@@ -1,9 +1,12 @@
+import { mkdir } from "node:fs/promises";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { dirname } from "node:path";
-import { mkdir } from "node:fs/promises";
 import {
   JSON_RPC_VERSION,
   isJsonRpcFailure,
+  isJsonRpcNotification,
+  isJsonRpcResponse,
+  type JsonRpcNotification,
   type JsonRpcRequest,
   type JsonRpcResponse,
 } from "@xcoding/protocol";
@@ -22,9 +25,13 @@ export class StdioRpcClient {
       reject: (reason: Error) => void;
     }
   >();
+  private readonly notificationListeners = new Set<
+    (notification: JsonRpcNotification) => void
+  >();
   private buffer = "";
   private nextId = 1;
   private closed = false;
+  private lastDiagnostic = "";
 
   private constructor(process: ChildProcessWithoutNullStreams) {
     this.process = process;
@@ -39,8 +46,6 @@ export class StdioRpcClient {
     process.once("exit", () => this.rejectPending(new Error(this.exitMessage())));
   }
 
-  private lastDiagnostic = "";
-
   static async start(options: StdioRpcClientOptions): Promise<StdioRpcClient> {
     await mkdir(dirname(options.databasePath), { recursive: true });
     const process = spawn(options.serverPath, ["--db", options.databasePath], {
@@ -49,6 +54,11 @@ export class StdioRpcClient {
     });
 
     return new StdioRpcClient(process);
+  }
+
+  onNotification(listener: (notification: JsonRpcNotification) => void): () => void {
+    this.notificationListeners.add(listener);
+    return () => this.notificationListeners.delete(listener);
   }
 
   async request<TResult>(method: string, params: unknown): Promise<TResult> {
@@ -95,14 +105,25 @@ export class StdioRpcClient {
         continue;
       }
 
-      let response: JsonRpcResponse;
+      let message: unknown;
       try {
-        response = JSON.parse(line) as JsonRpcResponse;
+        message = JSON.parse(line);
       } catch {
         this.rejectPending(new Error(`XCoding core returned invalid JSON: ${line}`));
         continue;
       }
 
+      if (isJsonRpcNotification(message)) {
+        this.emitNotification(message);
+        continue;
+      }
+
+      if (!isJsonRpcResponse(message)) {
+        this.rejectPending(new Error("XCoding core returned an invalid JSON-RPC message"));
+        continue;
+      }
+
+      const response: JsonRpcResponse = message;
       if (response.id === null) {
         if (isJsonRpcFailure(response)) {
           this.rejectPending(new Error(response.error.message));
@@ -122,6 +143,16 @@ export class StdioRpcClient {
         pending.reject(new Error(`XCoding RPC ${response.error.code}: ${response.error.message}`));
       } else {
         pending.resolve(response.result);
+      }
+    }
+  }
+
+  private emitNotification(notification: JsonRpcNotification): void {
+    for (const listener of this.notificationListeners) {
+      try {
+        listener(notification);
+      } catch {
+        // A consumer must not be able to break protocol processing for other consumers.
       }
     }
   }

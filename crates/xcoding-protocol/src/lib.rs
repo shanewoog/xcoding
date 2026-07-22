@@ -65,6 +65,23 @@ impl JsonRpcResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct JsonRpcNotification<TParams = Value> {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: TParams,
+}
+
+impl<TParams> JsonRpcNotification<TParams> {
+    pub fn new(method: impl Into<String>, params: TParams) -> Self {
+        Self {
+            jsonrpc: JSON_RPC_VERSION.to_owned(),
+            method: method.into(),
+            params,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct RpcError {
     pub code: i32,
     pub message: String,
@@ -105,6 +122,14 @@ impl RpcError {
         }
     }
 
+    pub fn provider_error(message: impl Into<String>) -> Self {
+        Self {
+            code: 1101,
+            message: message.into(),
+            data: None,
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             code: -32000,
@@ -139,6 +164,26 @@ pub enum SessionStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl MessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Session {
     pub id: Uuid,
     pub workspace_root: String,
@@ -150,6 +195,15 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Message {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub role: MessageRole,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -187,6 +241,34 @@ pub struct ListSessionsResult {
     pub sessions: Vec<Session>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ChatParams {
+    pub workspace_root: String,
+    pub message: String,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ChatResult {
+    pub session: Session,
+    pub message: Message,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEvent {
+    TextDelta { session_id: Uuid, delta: String },
+    MessageCompleted { session_id: Uuid, message: Message },
+    Error { session_id: Uuid, message: String },
+}
+
 fn default_provider() -> String {
     "openai".to_owned()
 }
@@ -220,5 +302,30 @@ mod tests {
         assert_eq!(params.mode, Mode::Ask);
         assert_eq!(params.provider, "openai");
         assert_eq!(params.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn serializes_session_event_notification() {
+        let session_id = Uuid::nil();
+        let notification = JsonRpcNotification::new(
+            "session.event",
+            SessionEvent::TextDelta {
+                session_id,
+                delta: "Hello".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            serde_json::to_value(notification).expect("notification serializes"),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session.event",
+                "params": {
+                    "type": "text_delta",
+                    "session_id": session_id,
+                    "delta": "Hello"
+                }
+            })
+        );
     }
 }

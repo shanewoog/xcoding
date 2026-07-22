@@ -62,23 +62,21 @@ Error:
 
 ### 2.2 Server Push Events
 
-Use notifications:
+Use notifications. Phase 1A emits `session.event` directly on the same transport as the request:
 
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "event",
+  "method": "session.event",
   "params": {
-    "session_id": "ses_123",
-    "event": {
-      "type": "text_delta",
-      "delta": "hello"
-    }
+    "type": "text_delta",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "delta": "hello"
   }
 }
 ```
 
-Clients subscribe by session and render the event stream.
+Clients must ignore unknown notification methods and event types so fields and events can be added compatibly.
 
 ### 2.3 IDs
 
@@ -259,6 +257,48 @@ Result:
 }
 ```
 
+### `session.chat` (Phase 1A)
+
+Starts a new cloud-model chat session, persists the user message, streams assistant text, then persists the completed assistant message. The initial implementation supports `provider: "openai"` through the OpenAI-compatible Chat Completions SSE endpoint.
+
+Params:
+
+```json
+{
+  "workspace_root": "D:/work/demo",
+  "message": "Summarize this repository",
+  "mode": "ask",
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "title": "Repository summary"
+}
+```
+
+No credential fields are accepted. The server reads `OPENAI_API_KEY` from its environment and optionally reads `XCODING_OPENAI_BASE_URL`; the latter defaults to `https://api.openai.com/v1`.
+
+The server emits these `session.event` payloads in order:
+
+```ts
+type SessionEvent =
+  | { type: "text_delta"; session_id: string; delta: string }
+  | { type: "message_completed"; session_id: string; message: Message }
+  | { type: "error"; session_id: string; message: string }
+```
+
+Result:
+
+```json
+{
+  "session": { "id": "550e8400-e29b-41d4-a716-446655440000", "status": "done" },
+  "message": {
+    "id": "4ea8c0cc-79ce-4d4f-94f9-13f8bc77597a",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "role": "assistant",
+    "content": "...",
+    "created_at": "2026-07-22T08:00:00Z"
+  }
+}
+```
 ### `session.get`
 
 Params:

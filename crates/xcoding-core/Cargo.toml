@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 serde_json.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 xcoding-protocol = { path = "../xcoding-protocol" }
 xcoding-store = { path = "../xcoding-store" }

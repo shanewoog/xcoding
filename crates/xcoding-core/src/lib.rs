@@ -1,12 +1,13 @@
-//! XCoding's core request dispatcher. Agent orchestration is added in later phases.
+//! XCoding's core request dispatcher and chat session lifecycle.
 
 use std::path::Path;
 
 use serde_json::Value;
 use thiserror::Error;
 use xcoding_protocol::{
-    CreateSessionParams, CreateSessionResult, JsonRpcRequest, JsonRpcResponse, ListSessionsParams,
-    ListSessionsResult, PingResult, RpcError,
+    ChatParams, ChatResult, CreateSessionParams, CreateSessionResult, JsonRpcRequest,
+    JsonRpcResponse, ListSessionsParams, ListSessionsResult, Message, MessageRole, PingResult,
+    RpcError, Session, SessionStatus,
 };
 use xcoding_store::{SessionStore, StoreError};
 
@@ -14,6 +15,10 @@ use xcoding_store::{SessionStore, StoreError};
 pub enum CoreError {
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error("invalid chat input: {0}")]
+    InvalidInput(String),
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
 }
 
 pub struct CoreService {
@@ -40,6 +45,53 @@ impl CoreService {
         }
     }
 
+    pub fn start_chat(&self, params: ChatParams) -> Result<Session, CoreError> {
+        if params.workspace_root.trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "workspace_root must not be empty".to_owned(),
+            ));
+        }
+        if params.message.trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "message must not be empty".to_owned(),
+            ));
+        }
+
+        let session = self.store.create_session(CreateSessionParams {
+            workspace_root: params.workspace_root,
+            mode: params.mode,
+            provider: params.provider,
+            model: params.model,
+            title: params.title,
+        })?;
+        let session = self.set_status(session.id, SessionStatus::Running)?;
+        self.store
+            .append_message(session.id, MessageRole::User, params.message)?;
+        Ok(session)
+    }
+
+    pub fn messages(&self, session_id: uuid::Uuid) -> Result<Vec<Message>, CoreError> {
+        self.store
+            .list_messages(session_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn complete_chat(
+        &self,
+        session_id: uuid::Uuid,
+        content: impl Into<String>,
+    ) -> Result<ChatResult, CoreError> {
+        let message = self
+            .store
+            .append_message(session_id, MessageRole::Assistant, content)?;
+        let session = self.set_status(session_id, SessionStatus::Done)?;
+        Ok(ChatResult { session, message })
+    }
+
+    pub fn fail_chat(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+        self.set_status(session_id, SessionStatus::Failed)
+    }
+
     pub fn dispatch(&self, request: JsonRpcRequest) -> JsonRpcResponse {
         let id = request.id.clone();
 
@@ -61,6 +113,16 @@ impl CoreService {
             Ok(result) => JsonRpcResponse::success(id, result),
             Err(error) => JsonRpcResponse::failure(id, error),
         }
+    }
+
+    fn set_status(
+        &self,
+        session_id: uuid::Uuid,
+        status: SessionStatus,
+    ) -> Result<Session, CoreError> {
+        self.store
+            .set_session_status(session_id, status)?
+            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))
     }
 
     fn create_session(&self, params: Value) -> Result<Value, RpcError> {
@@ -91,7 +153,7 @@ impl CoreService {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use xcoding_protocol::{JsonRpcRequest, JsonRpcResponse};
+    use xcoding_protocol::{JsonRpcRequest, JsonRpcResponse, Mode};
 
     use super::*;
 
@@ -127,5 +189,30 @@ mod tests {
             }
             JsonRpcResponse::Failure { error, .. } => panic!("unexpected error: {error:?}"),
         }
+    }
+
+    #[test]
+    fn persists_chat_lifecycle() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Explain this project".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-4.1".to_owned(),
+                title: None,
+            })
+            .expect("chat starts");
+
+        assert_eq!(session.status, SessionStatus::Running);
+        assert_eq!(core.messages(session.id).expect("messages").len(), 1);
+
+        let result = core
+            .complete_chat(session.id, "XCoding is a local coding agent.")
+            .expect("chat completes");
+        assert_eq!(result.session.status, SessionStatus::Done);
+        assert_eq!(result.message.role, MessageRole::Assistant);
+        assert_eq!(core.messages(session.id).expect("messages").len(), 2);
     }
 }

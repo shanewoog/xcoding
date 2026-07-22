@@ -62,23 +62,21 @@ V1 传输方式：
 
 ### 2.2 服务端推送事件
 
-使用 notification：
+使用 notification。Phase 1A 通过与请求相同的传输通道直接发送 `session.event`：
 
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "event",
+  "method": "session.event",
   "params": {
-    "session_id": "ses_123",
-    "event": {
-      "type": "text_delta",
-      "delta": "hello"
-    }
+    "type": "text_delta",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "delta": "hello"
   }
 }
 ```
 
-客户端按 session 订阅并渲染事件流。
+客户端必须安全忽略未知 notification 方法和未知事件类型，从而支持后续兼容式扩展。
 
 ### 2.3 ID
 
@@ -259,6 +257,48 @@ interface Message {
 }
 ```
 
+### `session.chat`（Phase 1A）
+
+创建一个新的云模型聊天会话，持久化用户消息，流式推送助手文本，并在结束时持久化助手消息。首个实现仅支持通过 OpenAI-compatible Chat Completions SSE 端点调用 `provider: "openai"`。
+
+参数：
+
+```json
+{
+  "workspace_root": "D:/work/demo",
+  "message": "总结这个仓库",
+  "mode": "ask",
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "title": "仓库总结"
+}
+```
+
+请求不接受任何密钥字段。服务端从运行环境读取 `OPENAI_API_KEY`，可选读取 `XCODING_OPENAI_BASE_URL`；未设置后者时默认值为 `https://api.openai.com/v1`。
+
+服务端会按顺序发送以下 `session.event` 负载：
+
+```ts
+type SessionEvent =
+  | { type: "text_delta"; session_id: string; delta: string }
+  | { type: "message_completed"; session_id: string; message: Message }
+  | { type: "error"; session_id: string; message: string }
+```
+
+结果：
+
+```json
+{
+  "session": { "id": "550e8400-e29b-41d4-a716-446655440000", "status": "done" },
+  "message": {
+    "id": "4ea8c0cc-79ce-4d4f-94f9-13f8bc77597a",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "role": "assistant",
+    "content": "...",
+    "created_at": "2026-07-22T08:00:00Z"
+  }
+}
+```
 ### `session.get`
 
 参数：

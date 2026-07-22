@@ -5,10 +5,13 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioRpcClient } from "@xcoding/client";
 import type {
+  ChatParams,
+  ChatResult,
   CreateSessionParams,
   CreateSessionResult,
   ListSessionsResult,
   PingResult,
+  SessionEvent,
 } from "@xcoding/protocol";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -16,6 +19,7 @@ const defaultServerPath = resolve(
   process.env.XCODING_SERVER_PATH ??
     resolve(currentDirectory, "../../../target/debug/xcoding-server.exe"),
 );
+const optionNames = new Set(["--workspace", "--server", "--provider", "--model", "--title", "--mode"]);
 
 async function main(): Promise<void> {
   const commandArguments = process.argv.slice(2);
@@ -44,6 +48,9 @@ async function main(): Promise<void> {
       }
       case "session":
         await runSessionCommand(client, workspace, args);
+        return;
+      case "chat":
+        await runChatCommand(client, workspace, args);
         return;
       default:
         throw new Error(`unknown command: ${command}`);
@@ -91,6 +98,54 @@ async function runSessionCommand(
   }
 }
 
+async function runChatCommand(
+  client: StdioRpcClient,
+  workspace: string,
+  args: string[],
+): Promise<void> {
+  const message = positionalArguments(args).join(" ").trim();
+  if (!message) {
+    throw new Error("expected a chat message");
+  }
+
+  const params: ChatParams = {
+    workspace_root: workspace,
+    message,
+    title: option(args, "--title"),
+    mode: option(args, "--mode") as ChatParams["mode"],
+    provider: option(args, "--provider"),
+    model: option(args, "--model"),
+  };
+
+  let receivedText = false;
+  const unsubscribe = client.onNotification((notification) => {
+    if (notification.method !== "session.event") {
+      return;
+    }
+
+    const event = notification.params as SessionEvent;
+    if (event.type === "text_delta") {
+      receivedText = true;
+      process.stdout.write(event.delta);
+    }
+  });
+
+  try {
+    const result = await client.request<ChatResult>("session.chat", withoutUndefined(params));
+    if (receivedText) {
+      process.stdout.write("\n");
+    }
+    console.log(`Session ${result.session.id}: ${result.session.status}`);
+  } catch (error) {
+    if (receivedText) {
+      process.stdout.write("\n");
+    }
+    throw error;
+  } finally {
+    unsubscribe();
+  }
+}
+
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index < 0) {
@@ -104,20 +159,41 @@ function option(args: string[], name: string): string | undefined {
   return value;
 }
 
+function positionalArguments(args: string[]): string[] {
+  const values: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (optionNames.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--")) {
+      throw new Error(`unknown option: ${argument}`);
+    }
+    values.push(argument);
+  }
+
+  return values;
+}
+
 function withoutUndefined(value: object): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 function printUsage(): void {
-  console.log(`XCoding Phase 0 CLI
+  console.log(`XCoding Phase 1A CLI
 
 Usage:
   xcoding ping [--workspace <path>] [--server <path>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
   xcoding session list [--workspace <path>]
+  xcoding chat "<message>" [--workspace <path>] [--provider openai] [--model <model>]
 
 Environment:
-  XCODING_SERVER_PATH  Absolute path to the xcoding-server binary
+  OPENAI_API_KEY           API key for the OpenAI-compatible cloud provider
+  XCODING_OPENAI_BASE_URL  Optional OpenAI-compatible API base URL
+  XCODING_SERVER_PATH      Absolute path to the xcoding-server binary
 `);
 }
 

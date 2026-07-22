@@ -1,4 +1,4 @@
-//! SQLite persistence for XCoding sessions and future event traces.
+//! SQLite persistence for XCoding sessions and messages.
 
 use std::path::Path;
 
@@ -6,18 +6,18 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
-use xcoding_protocol::{CreateSessionParams, Session, SessionStatus};
+use xcoding_protocol::{CreateSessionParams, Message, MessageRole, Session, SessionStatus};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
-    #[error("invalid stored session data: {0}")]
+    #[error("invalid stored data: {0}")]
     InvalidData(#[from] serde_json::Error),
     #[error("invalid stored timestamp: {0}")]
     Timestamp(#[from] chrono::ParseError),
-    #[error("invalid stored session id: {0}")]
-    SessionId(#[from] uuid::Error),
+    #[error("invalid stored identifier: {0}")]
+    Identifier(#[from] uuid::Error),
 }
 
 pub struct SessionStore {
@@ -111,6 +111,66 @@ impl SessionStore {
             .map_err(StoreError::from)
     }
 
+    pub fn append_message(
+        &self,
+        session_id: Uuid,
+        role: MessageRole,
+        content: impl Into<String>,
+    ) -> Result<Message, StoreError> {
+        let message = Message {
+            id: Uuid::new_v4(),
+            session_id,
+            role,
+            content: content.into(),
+            created_at: Utc::now(),
+        };
+
+        self.connection.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                message.id.to_string(),
+                message.session_id.to_string(),
+                serde_json::to_string(&message.role)?,
+                message.content,
+                message.created_at.to_rfc3339(),
+            ],
+        )?;
+
+        Ok(message)
+    }
+
+    pub fn list_messages(&self, session_id: Uuid) -> Result<Vec<Message>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, role, content, created_at
+             FROM messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = statement.query_map([session_id.to_string()], Self::row_to_message)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_session_status(
+        &self,
+        id: Uuid,
+        status: SessionStatus,
+    ) -> Result<Option<Session>, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&status)?,
+                Utc::now().to_rfc3339(),
+                id.to_string(),
+            ],
+        )?;
+
+        if changed == 0 {
+            return Ok(None);
+        }
+
+        self.get_session(id)
+    }
+
     fn migrate(&self) -> Result<(), StoreError> {
         self.connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
@@ -123,6 +183,15 @@ impl SessionStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 title TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
             );",
         )?;
         Ok(())
@@ -144,7 +213,7 @@ impl SessionStore {
         };
 
         Ok(Session {
-            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::SessionId(error)))?,
+            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::Identifier(error)))?,
             workspace_root: row.get(1)?,
             mode: serde_json::from_str(&mode)
                 .map_err(|error| parse(StoreError::InvalidData(error)))?,
@@ -161,6 +230,33 @@ impl SessionStore {
             title: row.get(8)?,
         })
     }
+
+    fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+        let id: String = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let role: String = row.get(2)?;
+        let created_at: String = row.get(4)?;
+
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+
+        Ok(Message {
+            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::Identifier(error)))?,
+            session_id: Uuid::parse_str(&session_id)
+                .map_err(|error| parse(StoreError::Identifier(error)))?,
+            role: serde_json::from_str(&role)
+                .map_err(|error| parse(StoreError::InvalidData(error)))?,
+            content: row.get(3)?,
+            created_at: DateTime::parse_from_rfc3339(&created_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -169,7 +265,7 @@ mod tests {
     use xcoding_protocol::Mode;
 
     #[test]
-    fn persists_sessions() {
+    fn persists_sessions_and_messages() {
         let store = SessionStore::in_memory().expect("in-memory database starts");
         let session = store
             .create_session(CreateSessionParams {
@@ -184,7 +280,18 @@ mod tests {
         let sessions = store
             .list_sessions(Some("D:/work/demo"))
             .expect("sessions load");
+        assert_eq!(sessions, vec![session.clone()]);
 
-        assert_eq!(sessions, vec![session]);
+        let message = store
+            .append_message(session.id, MessageRole::User, "Ship it")
+            .expect("message saves");
+        let messages = store.list_messages(session.id).expect("messages load");
+        let running = store
+            .set_session_status(session.id, SessionStatus::Running)
+            .expect("status updates")
+            .expect("session exists");
+
+        assert_eq!(messages, vec![message]);
+        assert_eq!(running.status, SessionStatus::Running);
     }
 }

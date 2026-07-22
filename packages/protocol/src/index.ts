@@ -8,6 +8,7 @@ export type SessionStatus =
   | "done"
   | "failed"
   | "cancelled";
+export type MessageRole = "system" | "user" | "assistant" | "tool";
 
 export interface Session {
   id: string;
@@ -19,6 +20,14 @@ export interface Session {
   created_at: string;
   updated_at: string;
   title?: string;
+}
+
+export interface Message {
+  id: string;
+  session_id: string;
+  role: MessageRole;
+  content: string;
+  created_at: string;
 }
 
 export interface PingResult {
@@ -46,9 +55,46 @@ export interface ListSessionsResult {
   sessions: Session[];
 }
 
+export interface ChatParams {
+  workspace_root: string;
+  message: string;
+  mode?: Mode;
+  provider?: string;
+  model?: string;
+  title?: string;
+}
+
+export interface ChatResult {
+  session: Session;
+  message: Message;
+}
+
+export type SessionEvent =
+  | {
+      type: "text_delta";
+      session_id: string;
+      delta: string;
+    }
+  | {
+      type: "message_completed";
+      session_id: string;
+      message: Message;
+    }
+  | {
+      type: "error";
+      session_id: string;
+      message: string;
+    };
+
 export interface JsonRpcRequest<TParams = unknown> {
   jsonrpc: typeof JSON_RPC_VERSION;
   id: number;
+  method: string;
+  params: TParams;
+}
+
+export interface JsonRpcNotification<TParams = unknown> {
+  jsonrpc: typeof JSON_RPC_VERSION;
   method: string;
   params: TParams;
 }
@@ -73,4 +119,27 @@ export type JsonRpcResponse<TResult = unknown> = JsonRpcSuccess<TResult> | JsonR
 
 export function isJsonRpcFailure(response: JsonRpcResponse): response is JsonRpcFailure {
   return "error" in response;
+}
+
+export function isJsonRpcNotification(value: unknown): value is JsonRpcNotification {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "jsonrpc" in value &&
+    (value as { jsonrpc?: unknown }).jsonrpc === JSON_RPC_VERSION &&
+    "method" in value &&
+    typeof (value as { method?: unknown }).method === "string" &&
+    !("id" in value)
+  );
+}
+
+export function isJsonRpcResponse(value: unknown): value is JsonRpcResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "jsonrpc" in value &&
+    (value as { jsonrpc?: unknown }).jsonrpc === JSON_RPC_VERSION &&
+    "id" in value &&
+    ("result" in value || "error" in value)
+  );
 }
