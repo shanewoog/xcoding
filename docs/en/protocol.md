@@ -1,0 +1,762 @@
+# XCoding Protocol Draft
+
+## 1. Purpose
+
+This document defines the V1 local protocol between:
+
+- TypeScript clients (`apps/cli`, `apps/desktop`)
+- Rust core (`xcoding-server`)
+
+Goals:
+
+- one core, multiple shells
+- streamable agent events
+- explicit permission decisions
+- stable session replay
+
+Transport options for V1:
+
+- stdio JSON-RPC for CLI
+- local WebSocket JSON-RPC for Desktop
+
+All payloads are JSON.
+
+## 2. Conventions
+
+### 2.1 Request/Response
+
+JSON-RPC 2.0 style:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "session.create",
+  "params": {}
+}
+```
+
+Success:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "result": {}
+}
+```
+
+Error:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "error": {
+    "code": 1001,
+    "message": "workspace not found",
+    "data": {}
+  }
+}
+```
+
+### 2.2 Server Push Events
+
+Use notifications:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "event",
+  "params": {
+    "session_id": "ses_123",
+    "event": {
+      "type": "text_delta",
+      "delta": "hello"
+    }
+  }
+}
+```
+
+Clients subscribe by session and render the event stream.
+
+### 2.3 IDs
+
+- `session_id`: `ses_...`
+- `message_id`: `msg_...`
+- `tool_call_id`: `tc_...`
+- `decision_id`: `dec_...`
+- `event_id`: monotonic string or UUID
+
+## 3. Core Types
+
+### 3.1 Mode
+
+```ts
+type Mode = "ask" | "auto-edit"
+```
+
+### 3.2 SessionStatus
+
+```ts
+type SessionStatus =
+  | "created"
+  | "running"
+  | "need_user"
+  | "done"
+  | "failed"
+  | "cancelled"
+```
+
+### 3.3 PermissionKind
+
+```ts
+type PermissionKind = "read" | "write" | "exec" | "network"
+```
+
+### 3.4 Session
+
+```ts
+interface Session {
+  id: string
+  workspace_root: string
+  mode: Mode
+  provider: string
+  model: string
+  status: SessionStatus
+  created_at: string
+  updated_at: string
+  title?: string
+}
+```
+
+### 3.5 Message
+
+```ts
+interface Message {
+  id: string
+  session_id: string
+  role: "system" | "user" | "assistant" | "tool"
+  content: string
+  created_at: string
+}
+```
+
+## 4. RPC Methods
+
+## 4.1 Health
+
+### `system.ping`
+
+Request params:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "ok": true,
+  "version": "0.1.0"
+}
+```
+
+## 4.2 Auth / Config
+
+### `config.get`
+
+Result example:
+
+```json
+{
+  "mode": "ask",
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "permissions": {
+    "write": "confirm",
+    "exec": "confirm",
+    "network_tools": "deny"
+  }
+}
+```
+
+### `config.set`
+
+Params example:
+
+```json
+{
+  "mode": "auto-edit",
+  "model": "gpt-4.1"
+}
+```
+
+### `auth.setProviderKey`
+
+Params:
+
+```json
+{
+  "provider": "openai",
+  "api_key": "sk-..."
+}
+```
+
+Result:
+
+```json
+{
+  "ok": true,
+  "provider": "openai"
+}
+```
+
+Note: clients should prefer environment variables in developer workflows. Desktop may store secrets via OS keychain later; V1 can keep this minimal.
+
+## 4.3 Sessions
+
+### `session.create`
+
+Params:
+
+```json
+{
+  "workspace_root": "D:/work/demo",
+  "mode": "ask",
+  "provider": "openai",
+  "model": "gpt-4.1",
+  "title": "Add health check"
+}
+```
+
+Result:
+
+```json
+{
+  "session": {
+    "id": "ses_123",
+    "workspace_root": "D:/work/demo",
+    "mode": "ask",
+    "provider": "openai",
+    "model": "gpt-4.1",
+    "status": "created",
+    "created_at": "2026-07-22T08:00:00Z",
+    "updated_at": "2026-07-22T08:00:00Z",
+    "title": "Add health check"
+  }
+}
+```
+
+### `session.list`
+
+Result:
+
+```json
+{
+  "sessions": []
+}
+```
+
+### `session.get`
+
+Params:
+
+```json
+{
+  "session_id": "ses_123"
+}
+```
+
+### `session.cancel`
+
+Params:
+
+```json
+{
+  "session_id": "ses_123"
+}
+```
+
+### `session.replay`
+
+Params:
+
+```json
+{
+  "session_id": "ses_123"
+}
+```
+
+Result:
+
+```json
+{
+  "session": {},
+  "events": []
+}
+```
+
+## 4.4 Task Execution
+
+### `session.prompt`
+
+Submit a user task or follow-up.
+
+Params:
+
+```json
+{
+  "session_id": "ses_123",
+  "message": "Add a /health endpoint and tests",
+  "attachments": []
+}
+```
+
+Result:
+
+```json
+{
+  "accepted": true,
+  "message_id": "msg_1"
+}
+```
+
+After this call, clients consume streamed `event` notifications.
+
+### `session.decide`
+
+Respond to a permission or clarification request.
+
+Params:
+
+```json
+{
+  "session_id": "ses_123",
+  "decision_id": "dec_1",
+  "decision": "allow",
+  "note": "looks good"
+}
+```
+
+`decision` values:
+
+- `allow`
+- `deny`
+- `allow_always_for_session` (optional V1.x)
+- `submit_text` for clarification answers
+
+Clarification example:
+
+```json
+{
+  "session_id": "ses_123",
+  "decision_id": "dec_2",
+  "decision": "submit_text",
+  "text": "Use the existing axum router"
+}
+```
+
+## 5. Event Model
+
+All stream events are wrapped as:
+
+```ts
+interface EventEnvelope {
+  session_id: string
+  event_id: string
+  timestamp: string
+  event: AgentEvent
+}
+```
+
+### 5.1 AgentEvent
+
+```ts
+type AgentEvent =
+  | TextDeltaEvent
+  | MessageEvent
+  | PlanEvent
+  | StatusEvent
+  | ToolStartEvent
+  | ToolEndEvent
+  | DiffEvent
+  | PermissionRequestEvent
+  | UserInputRequestEvent
+  | UsageEvent
+  | ErrorEvent
+  | FinalEvent
+```
+
+### 5.2 Event Payloads
+
+#### `text_delta`
+
+```json
+{
+  "type": "text_delta",
+  "delta": "I will inspect the router next."
+}
+```
+
+#### `message`
+
+```json
+{
+  "type": "message",
+  "message_id": "msg_2",
+  "role": "assistant",
+  "content": "I will inspect the router next."
+}
+```
+
+#### `plan`
+
+```json
+{
+  "type": "plan",
+  "steps": [
+    "Locate HTTP router",
+    "Add /health endpoint",
+    "Add test",
+    "Run tests"
+  ]
+}
+```
+
+#### `status`
+
+```json
+{
+  "type": "status",
+  "status": "running"
+}
+```
+
+#### `tool_start`
+
+```json
+{
+  "type": "tool_start",
+  "tool_call_id": "tc_1",
+  "tool": "read_file",
+  "permission": "read",
+  "input": {
+    "path": "src/main.rs"
+  }
+}
+```
+
+#### `tool_end`
+
+```json
+{
+  "type": "tool_end",
+  "tool_call_id": "tc_1",
+  "tool": "read_file",
+  "ok": true,
+  "output": {
+    "path": "src/main.rs",
+    "content": "..."
+  }
+}
+```
+
+#### `diff`
+
+```json
+{
+  "type": "diff",
+  "tool_call_id": "tc_2",
+  "path": "src/routes/health.rs",
+  "kind": "create",
+  "patch": "@@\n+pub async fn health() -> &'static str {\n+    \"ok\"\n+}\n",
+  "applied": false
+}
+```
+
+`applied`:
+
+- `false` when awaiting approval or only proposed
+- `true` after successful apply
+
+#### `permission_request`
+
+```json
+{
+  "type": "permission_request",
+  "decision_id": "dec_1",
+  "kind": "write",
+  "summary": "Create src/routes/health.rs",
+  "tool": "apply_patch",
+  "tool_call_id": "tc_2",
+  "details": {
+    "paths": ["src/routes/health.rs"]
+  }
+}
+```
+
+#### `user_input_request`
+
+```json
+{
+  "type": "user_input_request",
+  "decision_id": "dec_2",
+  "prompt": "Which web framework should I modify?",
+  "options": ["axum", "actix"]
+}
+```
+
+#### `usage`
+
+```json
+{
+  "type": "usage",
+  "input_tokens": 1200,
+  "output_tokens": 350,
+  "total_tokens": 1550
+}
+```
+
+#### `error`
+
+```json
+{
+  "type": "error",
+  "code": "patch_conflict",
+  "message": "Failed to apply patch to src/main.rs"
+}
+```
+
+#### `final`
+
+```json
+{
+  "type": "final",
+  "status": "done",
+  "summary": "Added /health endpoint and tests passed"
+}
+```
+
+## 6. Tool Contracts
+
+## 6.1 `list_dir`
+
+Input:
+
+```json
+{
+  "path": "src",
+  "max_entries": 200
+}
+```
+
+Output:
+
+```json
+{
+  "path": "src",
+  "entries": [
+    { "name": "main.rs", "kind": "file" },
+    { "name": "routes", "kind": "dir" }
+  ]
+}
+```
+
+## 6.2 `read_file`
+
+Input:
+
+```json
+{
+  "path": "src/main.rs",
+  "start_line": 1,
+  "end_line": 200
+}
+```
+
+Output:
+
+```json
+{
+  "path": "src/main.rs",
+  "content": "...",
+  "start_line": 1,
+  "end_line": 200,
+  "truncated": false
+}
+```
+
+## 6.3 `search_code`
+
+Input:
+
+```json
+{
+  "query": "Router::new",
+  "path": ".",
+  "max_results": 50
+}
+```
+
+Output:
+
+```json
+{
+  "results": [
+    {
+      "path": "src/main.rs",
+      "line": 42,
+      "text": "let app = Router::new()"
+    }
+  ]
+}
+```
+
+## 6.4 `apply_patch`
+
+Input:
+
+```json
+{
+  "patch": "*** Begin Patch\n*** Add File: src/routes/health.rs\n+pub async fn health() -> &'static str { \"ok\" }\n*** End Patch"
+}
+```
+
+Output:
+
+```json
+{
+  "applied": true,
+  "changed_files": ["src/routes/health.rs"]
+}
+```
+
+## 6.5 `run_command`
+
+Input:
+
+```json
+{
+  "command": "cargo test",
+  "cwd": ".",
+  "timeout_ms": 120000
+}
+```
+
+Output:
+
+```json
+{
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "...",
+  "timed_out": false
+}
+```
+
+## 6.6 `git_status` / `git_diff`
+
+Read-only helpers for context and final summaries.
+
+## 7. Permission Evaluation Rules
+
+Before executing a tool:
+
+1. Determine permission kind
+2. Check mode
+3. Check path confinement / command policy
+4. Auto-allow, auto-deny, or emit `permission_request`
+5. Wait for `session.decide` when needed
+6. Execute or skip
+7. Emit `tool_end`
+
+### Mode matrix
+
+| Kind | `ask` | `auto-edit` |
+|---|---|---|
+| read | auto-allow | auto-allow |
+| write | confirm | auto-allow unless high-risk |
+| exec | confirm | confirm |
+| network tools | deny | deny |
+
+## 8. Error Codes
+
+Suggested ranges:
+
+- `1000-1099` session/config errors
+- `1100-1199` auth/provider errors
+- `1200-1299` tool errors
+- `1300-1399` policy errors
+- `1400-1499` internal errors
+
+Examples:
+
+| Code | Meaning |
+|---|---|
+| 1001 | workspace not found |
+| 1002 | session not found |
+| 1101 | missing provider api key |
+| 1201 | patch conflict |
+| 1202 | command timeout |
+| 1301 | permission denied |
+| 1400 | internal error |
+
+## 9. Client Rendering Expectations
+
+### CLI
+
+- print streamed text
+- show plan steps
+- prompt for permission decisions
+- render compact diffs
+- show final summary and status exit code
+
+### Desktop
+
+- append chat messages
+- render plan checklist
+- open diff viewer on `diff`
+- modal/panel for `permission_request`
+- timeline from tool/status events
+- replay by replaying stored events in order
+
+## 10. Compatibility Rules
+
+V1 rules:
+
+1. Unknown event types must be ignored by clients without crashing
+2. Unknown tool fields must be ignored by servers when possible
+3. Additive fields are preferred over breaking renames
+4. Status and mode enums should stay stable
+5. Protocol changes require docs update in this file
+
+## 11. Minimal Happy Path
+
+1. Client calls `system.ping`
+2. Client calls `session.create`
+3. Client calls `session.prompt`
+4. Server emits `status=running`
+5. Server emits `plan`
+6. Server emits read-only `tool_start` / `tool_end`
+7. Server emits `diff` + `permission_request` in `ask` mode
+8. Client calls `session.decide allow`
+9. Server applies patch and emits `tool_end`
+10. Server may request exec permission for tests
+11. Server emits `final status=done`
+
+## 12. Open Points for Implementation
+
+These can be decided during scaffolding without blocking docs:
+
+- exact secret storage mechanism for Desktop
+- whether Desktop uses WebSocket only or also embedded sidecar stdio
+- patch format finalization:
+  - custom begin/end patch
+  - or strict unified diff only
+- whether `allow_always_for_session` ships in first runnable build
+
+## Other Language
+
+- Chinese: [../zh/protocol.md](../zh/protocol.md)
