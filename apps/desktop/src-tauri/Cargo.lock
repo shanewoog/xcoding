@@ -4716,6 +4716,8 @@ dependencies = [
  "futures-util",
  "serde_json",
  "thiserror 2.0.19",
+ "tokio",
+ "uuid",
  "xcoding-context",
  "xcoding-core",
  "xcoding-policy",

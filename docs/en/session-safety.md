@@ -43,9 +43,12 @@ On Windows, replacing an existing file requires deleting the destination before 
 
 ## Cancellation
 
-`session cancel` is for a session waiting at an approval prompt. It marks the session as cancelled, rejects its remaining pending actions, and prevents a later approval from executing them.
+`session cancel` works for active sessions in `running` or `need_user` state.
 
-This release does not yet interrupt an active cloud stream or a command already running. Supporting that safely requires concurrent request handling, cancellation tokens, and subprocess termination, and is a later milestone.
+- Approval-paused sessions are marked cancelled, outstanding actions are rejected, and later approval is blocked.
+- In-flight model streams are interrupted cooperatively: the agent polls session status while reading SSE chunks and exits with `status=cancelled`.
+- Running commands are killed: `run_command` executes off the async runtime, polls the cancel probe, and terminates the child process when cancelled.
+- The stdio JSON-RPC server accepts `session.cancel` (and other short requests) while `session.chat` / `session.resolve` are in progress.
 
 ## Credentials
 

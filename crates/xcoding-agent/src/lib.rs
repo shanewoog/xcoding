@@ -1,21 +1,24 @@
 //! Shared guarded coding-agent loop for XCoding clients.
 
+use std::time::Duration;
+
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use thiserror::Error;
+use uuid::Uuid;
 use xcoding_context::ContextSnapshot;
 use xcoding_core::{CoreError, CoreService};
 use xcoding_policy::{PermissionDecision, evaluate};
 use xcoding_protocol::{
     ChatParams, ChatResult, MessageRole, PlanStep, ResolveActionParams, ResolveActionResult,
-    RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionEvent, ToolCall,
-    ToolName,
+    RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionEvent, SessionStatus,
+    ToolCall, ToolName,
 };
 use xcoding_providers::{
     ChatMessage, OpenAiCompatibleProvider, ProviderError, ProviderEvent, ProviderToolCall,
     ToolDefinition,
 };
-use xcoding_tools::{ToolError, ToolExecution, ToolRegistry};
+use xcoding_tools::{ToolError, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 8;
 
@@ -33,6 +36,8 @@ pub enum AgentError {
     InvalidProviderToolCall(String),
     #[error("model exceeded the tool-call limit")]
     ToolCallLimit,
+    #[error("session cancelled")]
+    Cancelled,
 }
 
 pub struct AgentService<'a> {
@@ -53,18 +58,24 @@ impl<'a> AgentService<'a> {
         F: FnMut(SessionEvent),
     {
         let session = self.core.start_chat(params)?;
-        let result = self.run_session(&session, &mut on_event).await;
-        if let Err(error) = &result {
-            let _ = self.core.fail_chat(session.id);
-            self.emit(
-                &mut on_event,
-                SessionEvent::Error {
-                    session_id: session.id,
-                    message: error.to_string(),
-                },
-            );
+        match self.run_session(&session, None, &mut on_event).await {
+            Ok(result) => Ok(result),
+            Err(AgentError::Cancelled) => self.cancelled_result(session.id, &mut on_event),
+            Err(error) => {
+                if self.core.is_session_cancelled(session.id).unwrap_or(false) {
+                    return self.cancelled_result(session.id, &mut on_event);
+                }
+                let _ = self.core.fail_chat(session.id);
+                self.emit(
+                    &mut on_event,
+                    SessionEvent::Error {
+                        session_id: session.id,
+                        message: error.to_string(),
+                    },
+                );
+                Err(error)
+            }
         }
-        result
     }
 
     pub async fn resolve<F>(
@@ -92,7 +103,27 @@ impl<'a> AgentService<'a> {
                     summary: format!("Approved {}", action.tool_call.name.as_str()),
                 },
             );
-            self.execute_and_record(&session, &tools, &action.tool_call, &mut on_event)?
+            match self
+                .execute_and_record(&session, &tools, &action.tool_call, &mut on_event)
+                .await
+            {
+                Ok(output) => output,
+                Err(AgentError::Cancelled) => {
+                    let result = self.cancelled_result(session.id, &mut on_event)?;
+                    return Ok(ResolveActionResult {
+                        session: result.session,
+                        message: result.message,
+                    });
+                }
+                Err(_error) if self.core.is_session_cancelled(session.id).unwrap_or(false) => {
+                    let result = self.cancelled_result(session.id, &mut on_event)?;
+                    return Ok(ResolveActionResult {
+                        session: result.session,
+                        message: result.message,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             let output = json!({
                 "tool_call_id": action.tool_call.id,
@@ -113,8 +144,31 @@ impl<'a> AgentService<'a> {
             output
         };
 
-        let result = self.run_session(&session, &mut on_event).await?;
-        let _ = output;
+        let result = match self
+            .run_session(
+                &session,
+                Some((&action.tool_call, output.as_str())),
+                &mut on_event,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(AgentError::Cancelled) => self.cancelled_result(session.id, &mut on_event)?,
+            Err(_error) if self.core.is_session_cancelled(session.id).unwrap_or(false) => {
+                self.cancelled_result(session.id, &mut on_event)?
+            }
+            Err(error) => {
+                let _ = self.core.fail_chat(session.id);
+                self.emit(
+                    &mut on_event,
+                    SessionEvent::Error {
+                        session_id: session.id,
+                        message: error.to_string(),
+                    },
+                );
+                return Err(error);
+            }
+        };
         Ok(ResolveActionResult {
             session: result.session,
             message: result.message,
@@ -172,6 +226,7 @@ impl<'a> AgentService<'a> {
     async fn run_session<F>(
         &self,
         session: &Session,
+        resolved_tool: Option<(&ToolCall, &str)>,
         on_event: &mut F,
     ) -> Result<ChatResult, AgentError>
     where
@@ -190,12 +245,33 @@ impl<'a> AgentService<'a> {
                 MessageRole::System => ChatMessage::system(message.content),
                 MessageRole::User => ChatMessage::user(message.content),
                 MessageRole::Assistant => ChatMessage::assistant(message.content),
+                // Historical tool rows are not full OpenAI tool pairs yet. Keep them as
+                // assistant notes so resume still has the outcomes, and re-seed the
+                // just-resolved tool below as a proper tool result.
                 MessageRole::Tool => ChatMessage::assistant(format!(
                     "Previously recorded tool output: {}",
                     message.content
                 )),
             },
         ));
+
+        if let Some((tool_call, output)) = resolved_tool {
+            // Prefer the live resolve pair over the degraded historical note.
+            if let Some(last) = messages.last() {
+                if last.role == "assistant"
+                    && last
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains(output))
+                {
+                    messages.pop();
+                }
+            }
+            messages.push(ChatMessage::assistant_tool_calls(vec![provider_tool_call(
+                tool_call,
+            )?]));
+            messages.push(ChatMessage::tool_result(&tool_call.id, output));
+        }
 
         self.emit(
             on_event,
@@ -223,28 +299,43 @@ impl<'a> AgentService<'a> {
 
         let definitions = tool_definitions();
         for _ in 0..MAX_TOOL_ROUNDS {
+            self.ensure_not_cancelled(session.id)?;
             let mut stream = provider
                 .stream_chat(&session.model, messages.clone(), &definitions)
                 .await?;
             let mut content = String::new();
             let mut tool_calls = Vec::new();
 
-            while let Some(event) = stream.next().await {
-                match event? {
-                    ProviderEvent::TextDelta(delta) => {
-                        content.push_str(&delta);
-                        self.emit(
-                            on_event,
-                            SessionEvent::TextDelta {
-                                session_id: session.id,
-                                delta,
-                            },
-                        );
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        match event {
+                            Some(event) => {
+                                self.ensure_not_cancelled(session.id)?;
+                                match event? {
+                                    ProviderEvent::TextDelta(delta) => {
+                                        content.push_str(&delta);
+                                        self.emit(
+                                            on_event,
+                                            SessionEvent::TextDelta {
+                                                session_id: session.id,
+                                                delta,
+                                            },
+                                        );
+                                    }
+                                    ProviderEvent::ToolCall(tool_call) => tool_calls.push(tool_call),
+                                }
+                            }
+                            None => break,
+                        }
                     }
-                    ProviderEvent::ToolCall(tool_call) => tool_calls.push(tool_call),
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                        self.ensure_not_cancelled(session.id)?;
+                    }
                 }
             }
 
+            self.ensure_not_cancelled(session.id)?;
             if tool_calls.is_empty() {
                 let result = self.core.complete_chat(session.id, content)?;
                 self.emit(
@@ -269,6 +360,7 @@ impl<'a> AgentService<'a> {
 
             messages.push(ChatMessage::assistant_tool_calls(tool_calls.clone()));
             for provider_call in tool_calls {
+                self.ensure_not_cancelled(session.id)?;
                 let tool_call = protocol_tool_call(provider_call)?;
                 self.emit(
                     on_event,
@@ -282,8 +374,9 @@ impl<'a> AgentService<'a> {
                 let (kind, high_risk) = tools.permission_for(&tool_call)?;
                 match evaluate(&session.mode, kind, high_risk) {
                     PermissionDecision::Allow => {
-                        let output =
-                            self.execute_and_record(session, &tools, &tool_call, on_event)?;
+                        let output = self
+                            .execute_and_record(session, &tools, &tool_call, on_event)
+                            .await?;
                         messages.push(ChatMessage::tool_result(&tool_call.id, output));
                     }
                     PermissionDecision::AskUser => {
@@ -345,7 +438,52 @@ impl<'a> AgentService<'a> {
         on_event(event);
     }
 
-    fn execute_and_record<F>(
+    fn ensure_not_cancelled(&self, session_id: Uuid) -> Result<(), AgentError> {
+        if self.core.is_session_cancelled(session_id).unwrap_or(false) {
+            Err(AgentError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn cancelled_result<F>(
+        &self,
+        session_id: Uuid,
+        on_event: &mut F,
+    ) -> Result<ChatResult, AgentError>
+    where
+        F: FnMut(SessionEvent),
+    {
+        let session = match self.core.session(session_id) {
+            Ok(session) if session.status == SessionStatus::Cancelled => session,
+            _ => self.core.cancel_session(session_id)?,
+        };
+        // The cancel RPC may already have recorded this event.
+        let already_recorded = self
+            .core
+            .session_detail(session_id)
+            .map(|detail| {
+                detail.events.iter().any(|item| {
+                    matches!(item.event, SessionEvent::SessionCancelled { .. })
+                })
+            })
+            .unwrap_or(false);
+        if !already_recorded {
+            self.emit(
+                on_event,
+                SessionEvent::SessionCancelled {
+                    session_id,
+                    message: "Session cancelled by user".to_owned(),
+                },
+            );
+        }
+        Ok(ChatResult {
+            session,
+            message: None,
+        })
+    }
+
+    async fn execute_and_record<F>(
         &self,
         session: &Session,
         tools: &ToolRegistry,
@@ -355,20 +493,44 @@ impl<'a> AgentService<'a> {
     where
         F: FnMut(SessionEvent),
     {
-        let execution = (|| -> Result<ToolExecution, ToolError> {
-            if tool_call.name == ToolName::ApplyPatch {
-                let preview = tools.patch_preview(tool_call)?;
-                self.core
-                    .create_restore_point(
+        let session_id = session.id;
+        if self.core.is_session_cancelled(session_id).unwrap_or(false) {
+            return Err(AgentError::Cancelled);
+        }
+
+        if tool_call.name == ToolName::ApplyPatch {
+            match tools.patch_preview(tool_call) {
+                Ok(preview) => {
+                    self.core.create_restore_point(
                         session.id,
                         &preview.path,
                         preview.file_existed.then_some(preview.old_text.as_str()),
                         &preview.new_text,
-                    )
-                    .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+                    )?;
+                }
+                Err(error) => {
+                    return self.record_tool_error(session, tool_call, error, on_event);
+                }
             }
-            tools.execute_authorized(tool_call)
-        })();
+        }
+
+        let execution = if tool_call.name == ToolName::RunCommand {
+            // Run commands off the async runtime so the server can accept cancel RPC.
+            let probe = self.core.cancel_probe();
+            let workspace = session.workspace_root.clone();
+            let tool_call = tool_call.clone();
+            tokio::task::spawn_blocking(move || {
+                let tools = ToolRegistry::new(&workspace)?;
+                tools.execute_authorized_cancellable(&tool_call, &|| probe.is_cancelled(session_id))
+            })
+            .await
+            .map_err(|error| {
+                AgentError::InvalidProviderToolCall(format!("tool worker failed: {error}"))
+            })?
+        } else {
+            let is_cancelled = || self.core.is_session_cancelled(session_id).unwrap_or(false);
+            tools.execute_authorized_cancellable(tool_call, &is_cancelled)
+        };
 
         match execution {
             Ok(execution) => {
@@ -386,6 +548,7 @@ impl<'a> AgentService<'a> {
                 );
                 Ok(output)
             }
+            Err(ToolError::Cancelled) => Err(AgentError::Cancelled),
             Err(error) => self.record_tool_error(session, tool_call, error, on_event),
         }
     }
@@ -451,6 +614,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             parameters: json!({ "type": "object", "properties": { "executable": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } } }, "required": ["executable"] }),
         },
     ]
+}
+
+fn provider_tool_call(tool_call: &ToolCall) -> Result<ProviderToolCall, AgentError> {
+    Ok(ProviderToolCall {
+        id: tool_call.id.clone(),
+        kind: "function".to_owned(),
+        function: xcoding_providers::ProviderFunctionCall {
+            name: tool_call.name.as_str().to_owned(),
+            arguments: tool_call.arguments.to_string(),
+        },
+    })
 }
 
 fn protocol_tool_call(provider_call: ProviderToolCall) -> Result<ToolCall, AgentError> {

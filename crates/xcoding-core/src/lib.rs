@@ -1,7 +1,8 @@
 //! XCoding's core request dispatcher and chat session lifecycle.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
@@ -28,21 +29,50 @@ pub enum CoreError {
     SessionNotFound(String),
 }
 
+/// Cross-thread cancel visibility for long-running tools and stream pollers.
+#[derive(Clone, Default)]
+pub struct CancelProbe {
+    inner: Arc<Mutex<HashSet<uuid::Uuid>>>,
+}
+
+impl CancelProbe {
+    pub fn mark(&self, session_id: uuid::Uuid) {
+        self.inner
+            .lock()
+            .expect("cancel probe lock")
+            .insert(session_id);
+    }
+
+    pub fn is_cancelled(&self, session_id: uuid::Uuid) -> bool {
+        self.inner
+            .lock()
+            .expect("cancel probe lock")
+            .contains(&session_id)
+    }
+}
+
 pub struct CoreService {
     store: SessionStore,
+    cancel_probe: CancelProbe,
 }
 
 impl CoreService {
     pub fn in_memory() -> Result<Self, CoreError> {
         Ok(Self {
             store: SessionStore::in_memory()?,
+            cancel_probe: CancelProbe::default(),
         })
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CoreError> {
         Ok(Self {
             store: SessionStore::open(path)?,
+            cancel_probe: CancelProbe::default(),
         })
+    }
+
+    pub fn cancel_probe(&self) -> CancelProbe {
+        self.cancel_probe.clone()
     }
 
     pub fn ping(&self) -> PingResult {
@@ -203,6 +233,13 @@ impl CoreService {
         Ok(self.store.record_event(event)?)
     }
 
+    pub fn is_session_cancelled(&self, session_id: uuid::Uuid) -> Result<bool, CoreError> {
+        if self.cancel_probe.is_cancelled(session_id) {
+            return Ok(true);
+        }
+        Ok(self.session(session_id)?.status == SessionStatus::Cancelled)
+    }
+
     pub fn cancel_session(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
         let session = self.session(session_id)?;
         if !matches!(
@@ -214,6 +251,7 @@ impl CoreService {
             ));
         }
         self.store.reject_pending_actions(session_id)?;
+        self.cancel_probe.mark(session_id);
         self.set_status(session_id, SessionStatus::Cancelled)
     }
 
@@ -264,6 +302,12 @@ impl CoreService {
     }
 
     pub fn resume_chat(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+        let session = self.session(session_id)?;
+        if session.status == SessionStatus::Cancelled {
+            return Err(CoreError::InvalidInput(
+                "cancelled sessions cannot be resumed".to_owned(),
+            ));
+        }
         self.set_status(session_id, SessionStatus::Running)
     }
 
@@ -293,6 +337,13 @@ impl CoreService {
         session_id: uuid::Uuid,
         content: impl Into<String>,
     ) -> Result<ChatResult, CoreError> {
+        let session = self.session(session_id)?;
+        if session.status == SessionStatus::Cancelled {
+            return Ok(ChatResult {
+                session,
+                message: None,
+            });
+        }
         let message = self
             .store
             .append_message(session_id, MessageRole::Assistant, content)?;
@@ -304,6 +355,13 @@ impl CoreService {
     }
 
     pub fn fail_chat(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+        let session = self.session(session_id)?;
+        if matches!(
+            session.status,
+            SessionStatus::Cancelled | SessionStatus::Done
+        ) {
+            return Ok(session);
+        }
         self.set_status(session_id, SessionStatus::Failed)
     }
 
@@ -642,6 +700,9 @@ mod tests {
             .cancel_session(session.id)
             .expect("paused session cancels");
         assert_eq!(cancelled.status, SessionStatus::Cancelled);
+        assert!(core
+            .is_session_cancelled(session.id)
+            .expect("cancelled flag loads"));
         assert_eq!(
             core.session_detail(session.id)
                 .expect("cancelled session detail loads")
@@ -657,5 +718,41 @@ mod tests {
             core.cancel_session(session.id),
             Err(CoreError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn cancel_running_session_is_visible_to_pollers() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "long running task".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-4.1".to_owned()),
+                title: None,
+            })
+            .expect("chat starts");
+        assert!(!core
+            .is_session_cancelled(session.id)
+            .expect("status loads"));
+        let cancelled = core
+            .cancel_session(session.id)
+            .expect("running session cancels");
+        assert_eq!(cancelled.status, SessionStatus::Cancelled);
+        assert!(core
+            .is_session_cancelled(session.id)
+            .expect("status loads"));
+        let completed = core
+            .complete_chat(session.id, "should not land")
+            .expect("complete becomes no-op after cancel");
+        assert_eq!(completed.session.status, SessionStatus::Cancelled);
+        assert!(completed.message.is_none());
+        assert_eq!(
+            core.fail_chat(session.id)
+                .expect("fail becomes no-op after cancel")
+                .status,
+            SessionStatus::Cancelled
+        );
     }
 }

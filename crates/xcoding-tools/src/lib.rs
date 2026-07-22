@@ -3,8 +3,11 @@
 use std::{
     collections::VecDeque,
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -43,6 +46,8 @@ pub enum ToolError {
     PatchConflict(String),
     #[error("command arguments are invalid: {0}")]
     InvalidCommand(String),
+    #[error("command was cancelled")]
+    Cancelled,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -127,12 +132,22 @@ impl ToolRegistry {
     }
 
     pub fn execute_authorized(&self, tool_call: &ToolCall) -> Result<ToolExecution, ToolError> {
+        self.execute_authorized_cancellable(tool_call, &|| false)
+    }
+
+    pub fn execute_authorized_cancellable(
+        &self,
+        tool_call: &ToolCall,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<ToolExecution, ToolError> {
         match tool_call.name {
             ToolName::ListDir => self.list_dir(parse_arguments(&tool_call.arguments)?),
             ToolName::ReadFile => self.read_file(parse_arguments(&tool_call.arguments)?),
             ToolName::SearchCode => self.search_code(parse_arguments(&tool_call.arguments)?),
             ToolName::ApplyPatch => self.apply_patch(parse_arguments(&tool_call.arguments)?),
-            ToolName::RunCommand => self.run_command(parse_arguments(&tool_call.arguments)?),
+            ToolName::RunCommand => {
+                self.run_command(parse_arguments(&tool_call.arguments)?, is_cancelled)
+            }
         }
     }
 
@@ -322,7 +337,11 @@ impl ToolRegistry {
         })
     }
 
-    fn run_command(&self, args: RunCommandArgs) -> Result<ToolExecution, ToolError> {
+    fn run_command(
+        &self,
+        args: RunCommandArgs,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<ToolExecution, ToolError> {
         if args.executable.trim().is_empty() {
             return Err(ToolError::InvalidCommand(
                 "executable must not be empty".to_owned(),
@@ -334,19 +353,53 @@ impl ToolRegistry {
             ));
         }
 
-        let output = Command::new(&args.executable)
+        let mut child = Command::new(&args.executable)
             .args(&args.args)
             .current_dir(&self.workspace_root)
-            .output()?;
-        let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout));
-        let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
-        let success = output.status.success();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
+        let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
+        let stdout_handle = thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut buffer);
+            buffer
+        });
+        let stderr_handle = thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stderr_pipe.read_to_end(&mut buffer);
+            buffer
+        });
+
+        let status = loop {
+            if is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(ToolError::Cancelled);
+            }
+            match child.try_wait()? {
+                Some(status) => break status,
+                None => thread::sleep(Duration::from_millis(50)),
+            }
+        };
+
+        let stdout = truncate_output(&String::from_utf8_lossy(
+            &stdout_handle.join().unwrap_or_default(),
+        ));
+        let stderr = truncate_output(&String::from_utf8_lossy(
+            &stderr_handle.join().unwrap_or_default(),
+        ));
+        let success = status.success();
         Ok(ToolExecution {
             output: json!({
                 "executable": args.executable,
                 "args": args.args,
                 "success": success,
-                "exit_code": output.status.code(),
+                "exit_code": status.code(),
                 "stdout": stdout,
                 "stderr": stderr,
             }),
@@ -650,6 +703,40 @@ mod tests {
             "edited elsewhere\n"
         );
 
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn cancels_long_running_command() {
+        let root = workspace();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&cancelled);
+        let tools_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            let tools = ToolRegistry::new(&tools_root).expect("tools open");
+            tools.execute_authorized_cancellable(
+                &ToolCall {
+                    id: "cmd".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: if cfg!(windows) {
+                        json!({
+                            "executable": "ping",
+                            "args": ["127.0.0.1", "-n", "30"]
+                        })
+                    } else {
+                        json!({
+                            "executable": "sleep",
+                            "args": ["30"]
+                        })
+                    },
+                },
+                &|| flag.load(std::sync::atomic::Ordering::SeqCst),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = handle.join().expect("command thread joins");
+        assert!(matches!(result, Err(ToolError::Cancelled)));
         fs::remove_dir_all(root).expect("workspace removes");
     }
 }

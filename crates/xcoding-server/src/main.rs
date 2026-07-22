@@ -5,7 +5,7 @@ use std::{env, io, path::PathBuf, process};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout},
     sync::mpsc,
 };
 use xcoding_agent::{AgentError, AgentService};
@@ -51,13 +51,13 @@ async fn main() {
 
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) if request.method == "session.chat" => {
-                match handle_chat(&core, &mut stdout, request).await {
+                match handle_chat(&core, &mut stdout, &mut lines, request).await {
                     Ok(response) => response,
                     Err(_) => break,
                 }
             }
             Ok(request) if request.method == "session.resolve" => {
-                match handle_resolve(&core, &mut stdout, request).await {
+                match handle_resolve(&core, &mut stdout, &mut lines, request).await {
                     Ok(response) => response,
                     Err(_) => break,
                 }
@@ -90,6 +90,7 @@ async fn main() {
 async fn handle_chat(
     core: &CoreService,
     stdout: &mut Stdout,
+    lines: &mut Lines<BufReader<Stdin>>,
     request: JsonRpcRequest,
 ) -> io::Result<JsonRpcResponse> {
     let id = request.id.clone();
@@ -117,16 +118,7 @@ async fn handle_chat(
     });
     tokio::pin!(chat);
 
-    let outcome = loop {
-        tokio::select! {
-            event = event_rx.recv() => {
-                if let Some(event) = event {
-                    emit_event(stdout, event).await?;
-                }
-            }
-            result = &mut chat => break result,
-        }
-    };
+    let outcome = drive_long_running(core, stdout, lines, &mut event_rx, &mut chat).await?;
 
     while let Ok(event) = event_rx.try_recv() {
         emit_event(stdout, event).await?;
@@ -141,6 +133,7 @@ async fn handle_chat(
 async fn handle_resolve(
     core: &CoreService,
     stdout: &mut Stdout,
+    lines: &mut Lines<BufReader<Stdin>>,
     request: JsonRpcRequest,
 ) -> io::Result<JsonRpcResponse> {
     let id = request.id.clone();
@@ -166,21 +159,83 @@ async fn handle_resolve(
         let _ = event_tx.send(event);
     });
     tokio::pin!(resolve);
-    let outcome = loop {
-        tokio::select! {
-            event = event_rx.recv() => {
-                if let Some(event) = event { emit_event(stdout, event).await?; }
-            }
-            result = &mut resolve => break result,
-        }
-    };
+
+    let outcome = drive_long_running(core, stdout, lines, &mut event_rx, &mut resolve).await?;
+
     while let Ok(event) = event_rx.try_recv() {
         emit_event(stdout, event).await?;
     }
+
     match outcome {
         Ok(result) => Ok(JsonRpcResponse::success(id, result)),
         Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_agent(error))),
     }
+}
+
+async fn drive_long_running<T, E, F>(
+    core: &CoreService,
+    stdout: &mut Stdout,
+    lines: &mut Lines<BufReader<Stdin>>,
+    event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    work: &mut std::pin::Pin<&mut F>,
+) -> io::Result<Result<T, E>>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    loop {
+        tokio::select! {
+            event = event_rx.recv() => {
+                if let Some(event) = event {
+                    emit_event(stdout, event).await?;
+                }
+            }
+            result = &mut *work => {
+                return Ok(result);
+            }
+            line = lines.next_line() => {
+                match line? {
+                    Some(line) if !line.trim().is_empty() => {
+                        handle_concurrent_request(core, stdout, &line).await?;
+                    }
+                    Some(_) => {}
+                    None => {
+                        // stdin closed; keep waiting for the in-flight work to finish.
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_concurrent_request(
+    core: &CoreService,
+    stdout: &mut Stdout,
+    line: &str,
+) -> io::Result<()> {
+    let response = match serde_json::from_str::<JsonRpcRequest>(line) {
+        Ok(request)
+            if matches!(
+                request.method.as_str(),
+                "session.chat" | "session.resolve" | "session.rollback"
+            ) =>
+        {
+            JsonRpcResponse::failure(
+                request.id,
+                RpcError::invalid_request(
+                    "server is busy with another long-running session request",
+                ),
+            )
+        }
+        Ok(request) if request.method == "session.cancel" => {
+            handle_cancel(core, stdout, request).await?
+        }
+        Ok(request) => core.dispatch(request),
+        Err(error) => JsonRpcResponse::failure(
+            Value::Null,
+            RpcError::parse_error(format!("invalid JSON-RPC request: {error}")),
+        ),
+    };
+    write_json_line(stdout, &response).await
 }
 
 async fn handle_rollback(
@@ -261,6 +316,7 @@ fn rpc_error_for_agent(error: AgentError) -> RpcError {
         AgentError::Provider(error) => RpcError::provider_error(error.to_string()),
         AgentError::InvalidProviderToolCall(message) => RpcError::provider_error(message),
         AgentError::ToolCallLimit => RpcError::provider_error(error.to_string()),
+        AgentError::Cancelled => RpcError::invalid_params("session cancelled".to_owned()),
     }
 }
 
