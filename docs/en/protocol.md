@@ -62,7 +62,7 @@ Error:
 
 ### 2.2 Server Push Events
 
-Use notifications. Phase 1A emits `session.event` directly on the same transport as the request:
+Use notifications. Phases 1A and 1B emit `session.event` directly on the same transport as the request:
 
 ```json
 {
@@ -257,9 +257,9 @@ Result:
 }
 ```
 
-### `session.chat` (Phase 1A)
+### `session.chat` (Phase 1B)
 
-Starts a new cloud-model chat session, persists the user message, streams assistant text, then persists the completed assistant message. The initial implementation supports `provider: "openai"` through the OpenAI-compatible Chat Completions SSE endpoint.
+Starts a new cloud-model chat session, persists the user message, streams assistant text, then persists the completed assistant message. The initial implementation supports `provider: "openai"` through the OpenAI-compatible Chat Completions SSE endpoint. Phase 1B exposes the read-only `list_dir`, `read_file`, and `search_code` tools to compatible models, persists each tool result, and streams the execution trace.
 
 Params:
 
@@ -282,6 +282,9 @@ The server emits these `session.event` payloads in order:
 type SessionEvent =
   | { type: "text_delta"; session_id: string; delta: string }
   | { type: "message_completed"; session_id: string; message: Message }
+  | { type: "plan"; session_id: string; steps: Array<{ id: string; description: string }> }
+  | { type: "tool_start"; session_id: string; tool_call: ToolCall; summary: string }
+  | { type: "tool_end"; session_id: string; tool_call: ToolCall; success: boolean; summary: string }
   | { type: "error"; session_id: string; message: string }
 ```
 
@@ -581,6 +584,8 @@ type AgentEvent =
 
 ## 6. Tool Contracts
 
+Phase 1B implements only the three read-only tools below. Every path is workspace-relative, is canonicalized before use, and must remain inside the workspace. Directory traversal skips `.git`, `.xcoding`, `node_modules`, `target`, and symlinks. `apply_patch` and `run_command` remain Phase 2 contracts.
+
 ## 6.1 `list_dir`
 
 Input:
@@ -702,7 +707,7 @@ Read-only helpers for context and final summaries.
 
 ## 7. Permission Evaluation Rules
 
-Before executing a tool:
+Before executing a tool. In Phase 1B, only read tools are executable, so both `ask` and `auto-edit` auto-allow them:
 
 1. Determine permission kind
 2. Check mode

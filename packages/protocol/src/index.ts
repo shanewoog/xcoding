@@ -9,6 +9,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
+export type ToolName = "list_dir" | "read_file" | "search_code";
 
 export interface Session {
   id: string;
@@ -69,6 +70,17 @@ export interface ChatResult {
   message: Message;
 }
 
+export interface ToolCall {
+  id: string;
+  name: ToolName;
+  arguments: Record<string, unknown>;
+}
+
+export interface PlanStep {
+  id: string;
+  description: string;
+}
+
 export type SessionEvent =
   | {
       type: "text_delta";
@@ -79,6 +91,24 @@ export type SessionEvent =
       type: "message_completed";
       session_id: string;
       message: Message;
+    }
+  | {
+      type: "plan";
+      session_id: string;
+      steps: PlanStep[];
+    }
+  | {
+      type: "tool_start";
+      session_id: string;
+      tool_call: ToolCall;
+      summary: string;
+    }
+  | {
+      type: "tool_end";
+      session_id: string;
+      tool_call: ToolCall;
+      success: boolean;
+      summary: string;
     }
   | {
       type: "error";

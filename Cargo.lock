@@ -1512,9 +1512,11 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+ "xcoding-context",
  "xcoding-core",
  "xcoding-protocol",
  "xcoding-providers",
+ "xcoding-tools",
 ]
 
 [[package]]
@@ -1533,6 +1535,9 @@ dependencies = [
 name = "xcoding-tools"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
  "xcoding-policy",
  "xcoding-protocol",
 ]

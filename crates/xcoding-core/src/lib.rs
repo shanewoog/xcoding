@@ -76,6 +76,15 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    pub fn record_tool_message(
+        &self,
+        session_id: uuid::Uuid,
+        content: impl Into<String>,
+    ) -> Result<Message, CoreError> {
+        Ok(self
+            .store
+            .append_message(session_id, MessageRole::Tool, content)?)
+    }
     pub fn complete_chat(
         &self,
         session_id: uuid::Uuid,
@@ -207,12 +216,17 @@ mod tests {
 
         assert_eq!(session.status, SessionStatus::Running);
         assert_eq!(core.messages(session.id).expect("messages").len(), 1);
+        core.record_tool_message(session.id, r#"{"path":"src/lib.rs"}"#)
+            .expect("tool message saves");
 
         let result = core
             .complete_chat(session.id, "XCoding is a local coding agent.")
             .expect("chat completes");
         assert_eq!(result.session.status, SessionStatus::Done);
         assert_eq!(result.message.role, MessageRole::Assistant);
-        assert_eq!(core.messages(session.id).expect("messages").len(), 2);
+        let messages = core.messages(session.id).expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, MessageRole::Tool);
+        assert_eq!(messages[2].role, MessageRole::Assistant);
     }
 }

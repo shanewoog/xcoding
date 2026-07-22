@@ -182,6 +182,36 @@ impl MessageRole {
         }
     }
 }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolName {
+    ListDir,
+    ReadFile,
+    SearchCode,
+}
+
+impl ToolName {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ListDir => "list_dir",
+            Self::ReadFile => "read_file",
+            Self::SearchCode => "search_code",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: ToolName,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PlanStep {
+    pub id: String,
+    pub description: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Session {
@@ -264,9 +294,33 @@ pub struct ChatResult {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
-    TextDelta { session_id: Uuid, delta: String },
-    MessageCompleted { session_id: Uuid, message: Message },
-    Error { session_id: Uuid, message: String },
+    TextDelta {
+        session_id: Uuid,
+        delta: String,
+    },
+    MessageCompleted {
+        session_id: Uuid,
+        message: Message,
+    },
+    Plan {
+        session_id: Uuid,
+        steps: Vec<PlanStep>,
+    },
+    ToolStart {
+        session_id: Uuid,
+        tool_call: ToolCall,
+        summary: String,
+    },
+    ToolEnd {
+        session_id: Uuid,
+        tool_call: ToolCall,
+        success: bool,
+        summary: String,
+    },
+    Error {
+        session_id: Uuid,
+        message: String,
+    },
 }
 
 fn default_provider() -> String {
@@ -325,6 +379,33 @@ mod tests {
                     "session_id": session_id,
                     "delta": "Hello"
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_read_only_tool_events() {
+        let event = SessionEvent::ToolStart {
+            session_id: Uuid::nil(),
+            tool_call: ToolCall {
+                id: "call_1".to_owned(),
+                name: ToolName::ReadFile,
+                arguments: json!({ "path": "src/main.rs" }),
+            },
+            summary: "Read src/main.rs".to_owned(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).expect("event serializes"),
+            json!({
+                "type": "tool_start",
+                "session_id": "00000000-0000-0000-0000-000000000000",
+                "tool_call": {
+                    "id": "call_1",
+                    "name": "read_file",
+                    "arguments": { "path": "src/main.rs" }
+                },
+                "summary": "Read src/main.rs"
             })
         );
     }

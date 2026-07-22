@@ -62,7 +62,7 @@ V1 传输方式：
 
 ### 2.2 服务端推送事件
 
-使用 notification。Phase 1A 通过与请求相同的传输通道直接发送 `session.event`：
+使用 notification。Phase 1A 和 Phase 1B 都通过与请求相同的传输通道直接发送 `session.event`：
 
 ```json
 {
@@ -257,9 +257,9 @@ interface Message {
 }
 ```
 
-### `session.chat`（Phase 1A）
+### `session.chat`（Phase 1B）
 
-创建一个新的云模型聊天会话，持久化用户消息，流式推送助手文本，并在结束时持久化助手消息。首个实现仅支持通过 OpenAI-compatible Chat Completions SSE 端点调用 `provider: "openai"`。
+创建一个新的云模型聊天会话，持久化用户消息，流式推送助手文本，并在结束时持久化助手消息。仅支持通过 OpenAI-compatible Chat Completions SSE 端点调用 `provider: "openai"`。Phase 1B 向兼容模型提供只读的 `list_dir`、`read_file` 与 `search_code` 工具，持久化每次工具返回，并发送执行轨迹。
 
 参数：
 
@@ -282,6 +282,9 @@ interface Message {
 type SessionEvent =
   | { type: "text_delta"; session_id: string; delta: string }
   | { type: "message_completed"; session_id: string; message: Message }
+  | { type: "plan"; session_id: string; steps: Array<{ id: string; description: string }> }
+  | { type: "tool_start"; session_id: string; tool_call: ToolCall; summary: string }
+  | { type: "tool_end"; session_id: string; tool_call: ToolCall; success: boolean; summary: string }
   | { type: "error"; session_id: string; message: string }
 ```
 
@@ -581,6 +584,8 @@ type AgentEvent =
 
 ## 6. 工具契约
 
+Phase 1B 仅实现以下三个只读工具。所有路径必须相对于工作区；使用前会规范化，并且必须始终位于工作区内。目录遍历会跳过 `.git`、`.xcoding`、`node_modules`、`target` 与符号链接。`apply_patch` 和 `run_command` 仍是 Phase 2 的契约。
+
 ## 6.1 `list_dir`
 
 输入：
@@ -702,7 +707,7 @@ type AgentEvent =
 
 ## 7. 权限评估规则
 
-执行工具前：
+执行工具前。Phase 1B 只允许执行只读工具，因此 `ask` 和 `auto-edit` 都会自动允许它们：
 
 1. 判断权限类别
 2. 检查模式

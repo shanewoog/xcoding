@@ -124,9 +124,22 @@ async function runChatCommand(
     }
 
     const event = notification.params as SessionEvent;
-    if (event.type === "text_delta") {
-      receivedText = true;
-      process.stdout.write(event.delta);
+    switch (event.type) {
+      case "text_delta":
+        receivedText = true;
+        process.stdout.write(event.delta);
+        break;
+      case "plan":
+        process.stderr.write(`Plan:\n${event.steps.map((step) => `- ${step.description}`).join("\n")}\n`);
+        break;
+      case "tool_start":
+        process.stderr.write(`> ${event.summary}\n`);
+        break;
+      case "tool_end":
+        process.stderr.write(`${event.success ? "done" : "failed"}: ${event.summary}\n`);
+        break;
+      default:
+        break;
     }
   });
 
@@ -182,7 +195,7 @@ function withoutUndefined(value: object): Record<string, unknown> {
 }
 
 function printUsage(): void {
-  console.log(`XCoding Phase 1A CLI
+  console.log(`XCoding Phase 1B CLI
 
 Usage:
   xcoding ping [--workspace <path>] [--server <path>]
