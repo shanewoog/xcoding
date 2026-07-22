@@ -1,12 +1,24 @@
 # Session Recovery And Safety
 
-XCoding persists each session in the local SQLite database at `<workspace>/.xcoding/xcoding.db` for the CLI and in the application data directory for Desktop. A saved session includes messages, tool events, approval requests, restore points, and the current session status.
+XCoding persists each session in the local SQLite database at `<workspace>/.xcoding/xcoding.db` for the CLI and in the application data directory for Desktop. A saved session includes messages, tool events, approval requests, restore points, the task completion summary, and the current session status.
 
 ## Permission Modes
 
 `ask` is the default. XCoding reads the workspace automatically, but pauses before every patch or command. The pending action and its patch preview are stored, so approval can continue after the CLI or Desktop restarts.
 
 `auto-edit` applies ordinary file patches without a prompt. Commands still require approval, and high-risk paths such as `.git` and `.xcoding` remain protected. Use this mode only for a workspace you are ready to let XCoding modify.
+
+## Workspace Defaults
+
+Each workspace has local defaults for mode, provider, and model. Only the `openai` OpenAI-compatible cloud provider is available in V1. The defaults contain no credentials.
+
+```powershell
+xcoding config show --workspace <path>
+xcoding config set --workspace <path> --mode ask --model gpt-4.1
+xcoding config set --workspace <path> --mode auto-edit
+```
+
+The CLI stores these values in that workspace's `.xcoding/xcoding.db`. Desktop stores its own workspace-keyed values in its application-data database, so its settings do not currently share a database with the CLI.
 
 ## Session Commands
 
@@ -19,7 +31,7 @@ xcoding session rollback <session-id> <restore-point-id> --workspace <path>
 xcoding session cancel <session-id> --workspace <path>
 ```
 
-`session show` prints the stored session detail as JSON. It includes the action IDs needed for approval or rejection and the restore point IDs needed for rollback.
+`session show` prints stored session detail as JSON. It includes action IDs needed for approval or rejection, restore point IDs needed for rollback, and the persisted `task_completed` event. The completion summary reports unique changed files and successful or failed command counts.
 
 ## Rollback
 
@@ -43,3 +55,5 @@ XCoding does not store cloud credentials in the repository or its session databa
 $env:OPENAI_API_KEY = "..."
 $env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # optional
 ```
+
+`OPENAI_API_KEY` stays in the environment of the CLI or Desktop process. The RPC protocol accepts no credential fields.

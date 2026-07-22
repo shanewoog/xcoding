@@ -10,6 +10,7 @@ import type {
   ChatResult,
   CreateSessionParams,
   CreateSessionResult,
+  GetConfigResult,
   GetSessionDetailResult,
   ListSessionsResult,
   PingResult,
@@ -17,6 +18,8 @@ import type {
   ResolveActionResult,
   RollbackRestorePointResult,
   SessionEvent,
+  SetConfigParams,
+  SetConfigResult,
 } from "@xcoding/protocol";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -54,6 +57,9 @@ async function main(): Promise<void> {
       case "session":
         await runSessionCommand(client, workspace, args);
         return;
+      case "config":
+        await runConfigCommand(client, workspace, args);
+        return;
       case "chat":
         await runChatCommand(client, workspace, args);
         return;
@@ -63,6 +69,38 @@ async function main(): Promise<void> {
   } finally {
     await client.close();
   }
+}
+
+async function runConfigCommand(
+  client: StdioRpcClient,
+  workspace: string,
+  args: string[],
+): Promise<void> {
+  const [subcommand] = args;
+  if (subcommand === "show") {
+    const result = await client.request<GetConfigResult>("config.get", { workspace_root: workspace });
+    console.log(JSON.stringify(result.config, null, 2));
+    return;
+  }
+  if (subcommand === "set") {
+    const mode = option(args, "--mode");
+    const provider = option(args, "--provider");
+    const model = option(args, "--model");
+    if (!mode && !provider && !model) {
+      throw new Error("expected at least one of `--mode`, `--provider`, or `--model`");
+    }
+    const current = await client.request<GetConfigResult>("config.get", { workspace_root: workspace });
+    const params: SetConfigParams = {
+      workspace_root: workspace,
+      mode: (mode ?? current.config.mode) as SetConfigParams["mode"],
+      provider: provider ?? current.config.provider,
+      model: model ?? current.config.model,
+    };
+    const result = await client.request<SetConfigResult>("config.set", params);
+    console.log(JSON.stringify(result.config, null, 2));
+    return;
+  }
+  throw new Error("expected `config show` or `config set`");
 }
 
 async function runSessionCommand(
@@ -210,6 +248,12 @@ function printEvent(event: SessionEvent): void {
     case "session_cancelled":
       process.stderr.write(`${event.message}\n`);
       return;
+    case "task_completed":
+      process.stderr.write(
+        `Task complete: ${event.summary.changed_files.length} changed file(s); ` +
+        `${event.summary.commands_succeeded}/${event.summary.commands_run} command(s) succeeded.\n`,
+      );
+      return;
     case "error":
       process.stderr.write(`Error: ${event.message}\n`);
       return;
@@ -257,6 +301,8 @@ function printUsage(): void {
 
 Usage:
   xcoding ping [--workspace <path>] [--server <path>]
+  xcoding config show [--workspace <path>]
+  xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
   xcoding session list [--workspace <path>]
   xcoding session show <session-id> [--workspace <path>]

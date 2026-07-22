@@ -68,6 +68,9 @@ button:hover:not(:disabled) { background: #105851; }
 .quiet-button { background: transparent; color: #176b64; }
 .quiet-button:hover:not(:disabled) { background: #edf7f4; }
 
+.workspace-settings { display: grid; gap: 0.45rem; margin-top: 1.25rem; }
+.workspace-settings .field-label { margin: 0.35rem 0 0; }
+.workspace-settings .quiet-button { justify-self: start; }
 .session-list { display: grid; gap: 0.35rem; margin-top: 1rem; }
 .session-item {
   align-items: start;
@@ -147,6 +150,11 @@ button:hover:not(:disabled) { background: #105851; }
 .restore-point > div { display: grid; gap: 0.2rem; min-width: 0; }
 .restore-point strong { color: #33404b; font-size: 0.83rem; overflow-wrap: anywhere; }
 .restore-point .quiet-button { flex: 0 0 auto; font-size: 0.76rem; padding: 0.35rem 0.5rem; }
+.task-summary { display: grid; gap: 0.45rem; }
+.task-summary strong { color: #33404b; font-size: 0.9rem; }
+.task-summary small { color: #65707b; text-transform: none; }
+.task-summary ul { display: grid; gap: 0.25rem; margin: 0.1rem 0 0; padding-left: 1.1rem; }
+.task-summary code { color: #64717c; font-size: 0.75rem; overflow-wrap: anywhere; }
 @media (max-width: 620px) {
   .chat-header { align-items: flex-start; }
   .header-controls { align-items: flex-end; flex-direction: column-reverse; }

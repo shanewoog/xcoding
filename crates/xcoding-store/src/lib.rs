@@ -9,6 +9,7 @@ use uuid::Uuid;
 use xcoding_protocol::{
     CreateSessionParams, Message, MessageRole, PendingAction, PendingActionStatus,
     PersistedSessionEvent, RestorePoint, Session, SessionEvent, SessionStatus, ToolCall,
+    WorkspaceConfig,
 };
 
 #[derive(Debug, Error)]
@@ -100,6 +101,37 @@ impl SessionStore {
         }
 
         Ok(sessions)
+    }
+
+    pub fn get_workspace_config(
+        &self,
+        workspace_root: &str,
+    ) -> Result<Option<WorkspaceConfig>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT workspace_root, mode, provider, model, updated_at\n                 FROM workspace_configs WHERE workspace_root = ?1",
+                [workspace_root],
+                Self::row_to_workspace_config,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_workspace_config(
+        &self,
+        config: WorkspaceConfig,
+    ) -> Result<WorkspaceConfig, StoreError> {
+        self.connection.execute(
+            "INSERT INTO workspace_configs (workspace_root, mode, provider, model, updated_at)\n             VALUES (?1, ?2, ?3, ?4, ?5)\n             ON CONFLICT(workspace_root) DO UPDATE SET\n                mode = excluded.mode,\n                provider = excluded.provider,\n                model = excluded.model,\n                updated_at = excluded.updated_at",
+            params![
+                config.workspace_root,
+                serde_json::to_string(&config.mode)?,
+                config.provider,
+                config.model,
+                config.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(config)
     }
 
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>, StoreError> {
@@ -385,6 +417,14 @@ impl SessionStore {
                 event TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_configs (
+                workspace_root TEXT PRIMARY KEY NOT NULL,
+                mode TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );",
         )?;
         self.ensure_column("restore_points", "applied_text", "TEXT")?;
@@ -405,6 +445,28 @@ impl SessionStore {
             ))?;
         }
         Ok(())
+    }
+
+    fn row_to_workspace_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceConfig> {
+        let mode: String = row.get(1)?;
+        let updated_at: String = row.get(4)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(WorkspaceConfig {
+            workspace_root: row.get(0)?,
+            mode: serde_json::from_str(&mode)
+                .map_err(|error| parse(StoreError::InvalidData(error)))?,
+            provider: row.get(2)?,
+            model: row.get(3)?,
+            updated_at: DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+        })
     }
 
     fn row_to_pending_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingAction> {
@@ -563,6 +625,7 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
         | SessionEvent::ApprovalRequested { session_id, .. }
         | SessionEvent::RestorePointRolledBack { session_id, .. }
         | SessionEvent::SessionCancelled { session_id, .. }
+        | SessionEvent::TaskCompleted { session_id, .. }
         | SessionEvent::Error { session_id, .. } => *session_id,
     }
 }
@@ -572,6 +635,34 @@ mod tests {
     use super::*;
     use xcoding_protocol::Mode;
 
+    #[test]
+    fn persists_workspace_configurations() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+        let config = WorkspaceConfig {
+            workspace_root: "D:/work/configured".to_owned(),
+            mode: Mode::AutoEdit,
+            provider: "openai".to_owned(),
+            model: "configured-model".to_owned(),
+            updated_at: Utc::now(),
+        };
+
+        let saved = store
+            .set_workspace_config(config.clone())
+            .expect("config saves");
+        let loaded = store
+            .get_workspace_config("D:/work/configured")
+            .expect("config loads")
+            .expect("config exists");
+
+        assert_eq!(saved, config);
+        assert_eq!(loaded, config);
+        assert!(
+            store
+                .get_workspace_config("D:/work/missing")
+                .expect("missing config loads")
+                .is_none()
+        );
+    }
     #[test]
     fn persists_sessions_and_messages() {
         let store = SessionStore::in_memory().expect("in-memory database starts");

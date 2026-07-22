@@ -64,6 +64,40 @@ export interface GetSessionDetailResult {
   detail: SessionDetail;
 }
 
+export interface WorkspaceConfig {
+  workspace_root: string;
+  mode: Mode;
+  provider: string;
+  model: string;
+  updated_at: string;
+}
+
+export interface TaskSummary {
+  changed_files: string[];
+  commands_run: number;
+  commands_succeeded: number;
+  commands_failed: number;
+}
+
+export interface GetConfigParams {
+  workspace_root: string;
+}
+
+export interface GetConfigResult {
+  config: WorkspaceConfig;
+}
+
+export interface SetConfigParams {
+  workspace_root: string;
+  mode: Mode;
+  provider: string;
+  model: string;
+}
+
+export interface SetConfigResult {
+  config: WorkspaceConfig;
+}
+
 export interface ChatParams {
   workspace_root: string;
   message: string;
@@ -210,6 +244,11 @@ export type SessionEvent =
       type: "session_cancelled";
       session_id: string;
       message: string;
+    }
+  | {
+      type: "task_completed";
+      session_id: string;
+      summary: TaskSummary;
     }
   | {
       type: "error";

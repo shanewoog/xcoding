@@ -1,8 +1,14 @@
 # XCoding Docs
 
-This directory freezes the V1 plan for XCoding.
+This directory contains the V1 design and operating documentation for XCoding.
 
-## Documents
+## Start Here
+
+- [getting-started.md](./getting-started.md): installation, cloud authentication, CLI, and Desktop startup
+- [session-safety.md](./session-safety.md): permission modes, approvals, rollback, cancellation, and task summaries
+- [desktop.md](../desktop.md): Desktop workflow
+
+## Design Documents
 
 - [architecture.md](./architecture.md): system architecture and module boundaries
 - [roadmap.md](./roadmap.md): phased delivery plan and acceptance criteria
@@ -16,10 +22,6 @@ This directory freezes the V1 plan for XCoding.
 - no editor extension in V1
 - default mode: `ask`
 - optional mode: `auto-edit`
-
-## Next Step
-
-Scaffold the monorepo and implement protocol + server skeleton.
 
 ## Other Language
 

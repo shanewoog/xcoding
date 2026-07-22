@@ -2,22 +2,23 @@
 
 ## Run
 
-Set cloud-model credentials in your shell, then start the Tauri shell:
+Set cloud-model credentials in your shell, then start the Tauri app:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
 # Optional for OpenAI-compatible cloud providers.
-$env:OPENAI_BASE_URL = "https://api.openai.com/v1"
+$env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1"
 pnpm --filter @xcoding/desktop exec tauri dev
 ```
 
-The app stores local session history in its operating-system application-data directory. Credentials are read from the environment only and are not written to the session database.
+The app stores local session history and workspace defaults in its operating-system application-data directory. Credentials are read from the environment only and are not written to the session database.
 
-## First workflow
+## First Workflow
 
 1. Enter the absolute workspace path in the left panel.
-2. Send a repository question from the composer.
-3. Watch the plan, streamed response, and read-only tool activity.
-4. Select a saved session to review its status.
+2. Choose the mode and model defaults, then save them for that workspace.
+3. Send a repository request from the composer.
+4. Review the plan, streamed response, tool activity, patch previews, and approval controls.
+5. Select saved sessions to review their events, restore points, and task completion summary.
 
-Desktop currently runs the same read-only agent service as the CLI server. The default mode is `ask`; write and command execution controls arrive in Phase 2.
+Desktop uses the same guarded agent service as the CLI. The default mode is `ask`; `auto-edit` applies ordinary file patches automatically, while commands still require approval.

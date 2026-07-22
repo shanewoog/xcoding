@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
-use xcoding_protocol::{CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, PingResult, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionDetail};
+use xcoding_protocol::{CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, PingResult, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionDetail, SetConfigParams, WorkspaceConfig};
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
@@ -26,6 +26,23 @@ fn ping(app: AppHandle) -> Result<PingResult, String> {
 fn list_sessions(app: AppHandle, workspace_root: Option<String>) -> Result<Vec<Session>, String> {
     open_core(&app)?
         .list_sessions(workspace_root.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn workspace_config(app: AppHandle, workspace_root: String) -> Result<WorkspaceConfig, String> {
+    open_core(&app)?
+        .workspace_config(&workspace_root)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_workspace_config(
+    app: AppHandle,
+    params: SetConfigParams,
+) -> Result<WorkspaceConfig, String> {
+    open_core(&app)?
+        .set_workspace_config(params)
         .map_err(|error| error.to_string())
 }
 
@@ -76,7 +93,7 @@ fn chat(app: AppHandle, params: ChatParams) -> Result<ChatResult, String> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping, list_sessions, session_detail, chat, resolve_action, rollback_restore_point, cancel_session])
+        .invoke_handler(tauri::generate_handler![ping, list_sessions, workspace_config, set_workspace_config, session_detail, chat, resolve_action, rollback_restore_point, cancel_session])
         .run(tauri::generate_context!())
         .expect("failed to run XCoding Desktop");
 }

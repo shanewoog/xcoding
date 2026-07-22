@@ -22,6 +22,19 @@ async function main() {
   });
 
   try {
+    const initialConfig = await rpc.request("config.get", { workspace_root: workspace });
+    assert.equal(initialConfig.config.mode, "ask");
+    assert.equal(initialConfig.config.provider, "openai");
+    assert.equal(initialConfig.config.model, "gpt-4.1");
+    const configured = await rpc.request("config.set", {
+      workspace_root: workspace,
+      mode: "auto-edit",
+      provider: "openai",
+      model: "fixture-model",
+    });
+    assert.equal(configured.config.mode, "auto-edit");
+    assert.equal(configured.config.model, "fixture-model");
+
     const rejected = await startPatchSession(rpc, workspace, "Prepare a rejected marker.", "ask");
     const rejectedApproval = approvalFor(rpc, rejected.session.id);
     const { detail: rejectedDetail } = await rpc.request("session.detail", { session_id: rejected.session.id });
@@ -45,6 +58,11 @@ async function main() {
     assert.equal(completedDetail.restore_points.length, 1);
     assert.equal(completedDetail.restore_points[0].applied_text, "healthy\n");
     assert.ok(completedDetail.events.some((item) => item.event.type === "tool_end"));
+    const taskCompleted = completedDetail.events.find((item) => item.event.type === "task_completed");
+    assert.deepEqual(taskCompleted?.event.summary.changed_files, ["health.txt"]);
+    assert.equal(taskCompleted?.event.summary.commands_run, 0);
+    assert.equal(taskCompleted?.event.summary.commands_succeeded, 0);
+    assert.equal(taskCompleted?.event.summary.commands_failed, 0);
 
     const rollback = await rpc.request("session.rollback", {
       session_id: approved.session.id,
@@ -55,7 +73,13 @@ async function main() {
     const { detail: rolledBackDetail } = await rpc.request("session.detail", { session_id: approved.session.id });
     assert.ok(rolledBackDetail.events.some((item) => item.event.type === "restore_point_rolled_back"));
 
-    const autoEdit = await startPatchSession(rpc, workspace, "Add an auto marker file.", "auto-edit");
+    const autoEdit = await rpc.request("session.chat", {
+      workspace_root: workspace,
+      message: "Add an auto marker file.",
+    });
+    assert.equal(autoEdit.session.mode, "auto-edit");
+    assert.equal(autoEdit.session.provider, "openai");
+    assert.equal(autoEdit.session.model, "fixture-model");
     assert.equal(autoEdit.session.status, "done");
     assert.equal(await readFile(resolve(workspace, "auto.txt"), "utf8"), "automatic\n");
     assert.ok(!eventsFor(rpc, autoEdit.session.id).some((event) => event.type === "approval_requested"));

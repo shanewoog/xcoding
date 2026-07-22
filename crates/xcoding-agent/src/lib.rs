@@ -257,6 +257,13 @@ impl<'a> AgentService<'a> {
                             .expect("completed chat has a message"),
                     },
                 );
+                self.emit(
+                    on_event,
+                    SessionEvent::TaskCompleted {
+                        session_id: session.id,
+                        summary: self.core.task_summary(session.id)?,
+                    },
+                );
                 return Ok(result);
             }
 

@@ -1,15 +1,20 @@
 //! XCoding's core request dispatcher and chat session lifecycle.
 
+use std::collections::BTreeSet;
 use std::path::Path;
+
+use chrono::Utc;
 
 use serde_json::Value;
 use thiserror::Error;
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateSessionParams,
-    CreateSessionResult, GetSessionDetailParams, GetSessionDetailResult, JsonRpcRequest,
-    JsonRpcResponse, ListSessionsParams, ListSessionsResult, Message, MessageRole, PendingAction,
-    PendingActionStatus, PersistedSessionEvent, PingResult, RestorePoint, RpcError, Session,
-    SessionDetail, SessionEvent, SessionStatus, ToolCall,
+    CreateSessionResult, GetConfigParams, GetConfigResult, GetSessionDetailParams,
+    GetSessionDetailResult, JsonRpcRequest, JsonRpcResponse, ListSessionsParams,
+    ListSessionsResult, Message, MessageRole, PendingAction, PendingActionStatus,
+    PersistedSessionEvent, PingResult, RestorePoint, RpcError, Session, SessionDetail,
+    SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName,
+    WorkspaceConfig,
 };
 use xcoding_store::{SessionStore, StoreError};
 
@@ -59,17 +64,92 @@ impl CoreService {
             ));
         }
 
+        let config = self.workspace_config(&params.workspace_root)?;
         let session = self.store.create_session(CreateSessionParams {
             workspace_root: params.workspace_root,
-            mode: params.mode,
-            provider: params.provider,
-            model: params.model,
+            mode: params.mode.unwrap_or(config.mode),
+            provider: params.provider.unwrap_or(config.provider),
+            model: params.model.unwrap_or(config.model),
             title: params.title,
         })?;
         let session = self.set_status(session.id, SessionStatus::Running)?;
         self.store
             .append_message(session.id, MessageRole::User, params.message)?;
         Ok(session)
+    }
+
+    pub fn workspace_config(&self, workspace_root: &str) -> Result<WorkspaceConfig, CoreError> {
+        validate_workspace_root(workspace_root)?;
+        Ok(self
+            .store
+            .get_workspace_config(workspace_root)?
+            .unwrap_or_else(|| WorkspaceConfig {
+                workspace_root: workspace_root.to_owned(),
+                mode: xcoding_protocol::Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-4.1".to_owned(),
+                updated_at: Utc::now(),
+            }))
+    }
+
+    pub fn set_workspace_config(
+        &self,
+        params: SetConfigParams,
+    ) -> Result<WorkspaceConfig, CoreError> {
+        validate_workspace_root(&params.workspace_root)?;
+        if params.provider != "openai" {
+            return Err(CoreError::InvalidInput(
+                "only the openai-compatible cloud provider is supported".to_owned(),
+            ));
+        }
+        if params.model.trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "model must not be empty".to_owned(),
+            ));
+        }
+        Ok(self.store.set_workspace_config(WorkspaceConfig {
+            workspace_root: params.workspace_root,
+            mode: params.mode,
+            provider: params.provider,
+            model: params.model.trim().to_owned(),
+            updated_at: Utc::now(),
+        })?)
+    }
+
+    pub fn task_summary(&self, session_id: uuid::Uuid) -> Result<TaskSummary, CoreError> {
+        self.session(session_id)?;
+        let changed_files = self
+            .store
+            .list_restore_points(session_id)?
+            .into_iter()
+            .map(|restore_point| restore_point.path)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut commands_run = 0;
+        let mut commands_succeeded = 0;
+        let mut commands_failed = 0;
+        for event in self.store.list_events(session_id)? {
+            if let SessionEvent::ToolEnd {
+                tool_call, success, ..
+            } = event.event
+            {
+                if tool_call.name == ToolName::RunCommand {
+                    commands_run += 1;
+                    if success {
+                        commands_succeeded += 1;
+                    } else {
+                        commands_failed += 1;
+                    }
+                }
+            }
+        }
+        Ok(TaskSummary {
+            changed_files,
+            commands_run,
+            commands_succeeded,
+            commands_failed,
+        })
     }
 
     pub fn list_sessions(&self, workspace_root: Option<&str>) -> Result<Vec<Session>, CoreError> {
@@ -243,6 +323,8 @@ impl CoreService {
             "session.list" => self.list_sessions_rpc(request.params),
             "session.detail" => self.session_detail_rpc(request.params),
             "session.cancel" => self.cancel_session_rpc(request.params),
+            "config.get" => self.config_get_rpc(request.params),
+            "config.set" => self.config_set_rpc(request.params),
             _ => return JsonRpcResponse::failure(id, RpcError::method_not_found(request.method)),
         };
 
@@ -297,6 +379,34 @@ impl CoreService {
             .map_err(|error| RpcError::internal(error.to_string()))
     }
 
+    fn config_get_rpc(&self, params: Value) -> Result<Value, RpcError> {
+        let params: GetConfigParams = serde_json::from_value(params).map_err(|error| {
+            RpcError::invalid_params(format!("invalid config.get params: {error}"))
+        })?;
+        let config =
+            self.workspace_config(&params.workspace_root)
+                .map_err(|error| match error {
+                    CoreError::InvalidInput(message) => RpcError::invalid_params(message),
+                    other => RpcError::internal(other.to_string()),
+                })?;
+        serde_json::to_value(GetConfigResult { config })
+            .map_err(|error| RpcError::internal(error.to_string()))
+    }
+
+    fn config_set_rpc(&self, params: Value) -> Result<Value, RpcError> {
+        let params: SetConfigParams = serde_json::from_value(params).map_err(|error| {
+            RpcError::invalid_params(format!("invalid config.set params: {error}"))
+        })?;
+        let config = self
+            .set_workspace_config(params)
+            .map_err(|error| match error {
+                CoreError::InvalidInput(message) => RpcError::invalid_params(message),
+                other => RpcError::internal(other.to_string()),
+            })?;
+        serde_json::to_value(SetConfigResult { config })
+            .map_err(|error| RpcError::internal(error.to_string()))
+    }
+
     fn cancel_session_rpc(&self, params: Value) -> Result<Value, RpcError> {
         let params: CancelSessionParams = serde_json::from_value(params).map_err(|error| {
             RpcError::invalid_params(format!("invalid session.cancel params: {error}"))
@@ -312,6 +422,14 @@ impl CoreService {
     }
 }
 
+fn validate_workspace_root(workspace_root: &str) -> Result<(), CoreError> {
+    if workspace_root.trim().is_empty() {
+        return Err(CoreError::InvalidInput(
+            "workspace_root must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -356,15 +474,106 @@ mod tests {
     }
 
     #[test]
+    fn persists_workspace_defaults_and_uses_them_for_chats() {
+        let core = CoreService::in_memory().expect("core starts");
+        let workspace_root = "D:/work/configured";
+        let defaults = core
+            .workspace_config(workspace_root)
+            .expect("defaults load");
+        assert_eq!(defaults.mode, Mode::Ask);
+        assert_eq!(defaults.provider, "openai");
+        assert_eq!(defaults.model, "gpt-4.1");
+
+        let saved = core
+            .set_workspace_config(SetConfigParams {
+                workspace_root: workspace_root.to_owned(),
+                mode: Mode::AutoEdit,
+                provider: "openai".to_owned(),
+                model: "configured-model".to_owned(),
+            })
+            .expect("config saves");
+        assert_eq!(saved.mode, Mode::AutoEdit);
+        assert_eq!(saved.model, "configured-model");
+
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: workspace_root.to_owned(),
+                message: "Use workspace defaults".to_owned(),
+                mode: None,
+                provider: None,
+                model: None,
+                title: None,
+            })
+            .expect("chat starts");
+        assert_eq!(session.mode, Mode::AutoEdit);
+        assert_eq!(session.provider, "openai");
+        assert_eq!(session.model, "configured-model");
+    }
+
+    #[test]
+    fn summarizes_changed_files_and_command_results() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/summary".to_owned(),
+                message: "Summarize work".to_owned(),
+                mode: None,
+                provider: None,
+                model: None,
+                title: None,
+            })
+            .expect("chat starts");
+        core.create_restore_point(session.id, "src/a.rs", Some("old"), "new")
+            .expect("first restore point saves");
+        core.create_restore_point(session.id, "src/a.rs", Some("new"), "newer")
+            .expect("second restore point saves");
+        core.create_restore_point(session.id, "src/b.rs", None, "created")
+            .expect("third restore point saves");
+        for (id, success) in [("command_ok", true), ("command_failed", false)] {
+            core.record_event(&SessionEvent::ToolEnd {
+                session_id: session.id,
+                tool_call: ToolCall {
+                    id: id.to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({ "command": "echo test" }),
+                },
+                success,
+                summary: "command completed".to_owned(),
+            })
+            .expect("command event saves");
+        }
+        core.record_event(&SessionEvent::ToolEnd {
+            session_id: session.id,
+            tool_call: ToolCall {
+                id: "read_file".to_owned(),
+                name: ToolName::ReadFile,
+                arguments: json!({ "path": "src/a.rs" }),
+            },
+            success: true,
+            summary: "file read".to_owned(),
+        })
+        .expect("read event saves");
+
+        assert_eq!(
+            core.task_summary(session.id).expect("summary loads"),
+            TaskSummary {
+                changed_files: vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()],
+                commands_run: 2,
+                commands_succeeded: 1,
+                commands_failed: 1,
+            }
+        );
+    }
+    #[test]
     fn persists_chat_lifecycle() {
         let core = CoreService::in_memory().expect("core starts");
         let session = core
             .start_chat(ChatParams {
                 workspace_root: "D:/work/demo".to_owned(),
                 message: "Explain this project".to_owned(),
-                mode: Mode::Ask,
-                provider: "openai".to_owned(),
-                model: "gpt-4.1".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-4.1".to_owned()),
                 title: None,
             })
             .expect("chat starts");
@@ -394,9 +603,9 @@ mod tests {
             .start_chat(ChatParams {
                 workspace_root: "D:/work/demo".to_owned(),
                 message: "Update the configuration".to_owned(),
-                mode: Mode::Ask,
-                provider: "openai".to_owned(),
-                model: "gpt-4.1".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-4.1".to_owned()),
                 title: None,
             })
             .expect("chat starts");

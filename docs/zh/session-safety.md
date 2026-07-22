@@ -1,12 +1,24 @@
 # 会话恢复与安全
 
-XCoding 会把每个会话持久化到本地 SQLite 数据库：CLI 使用 `<workspace>/.xcoding/xcoding.db`，Desktop 使用应用数据目录。保存内容包括消息、工具事件、审批请求、恢复点与当前会话状态。
+XCoding 会把每个会话持久化到本地 SQLite 数据库：CLI 使用 `<workspace>/.xcoding/xcoding.db`，Desktop 使用应用数据目录。保存内容包括消息、工具事件、审批请求、恢复点、任务完成摘要与当前会话状态。
 
 ## 权限模式
 
 默认模式是 `ask`。XCoding 可以自动读取工作区，但在每次写文件或执行命令前暂停。待审批动作和补丁预览都会保存下来，因此即使 CLI 或 Desktop 重启，也能继续审批。
 
 `auto-edit` 会自动应用普通文件补丁。命令仍然必须审批，`.git`、`.xcoding` 等高风险路径依然受保护。只应在允许 XCoding 修改的工作区中启用该模式。
+
+## 工作区默认配置
+
+每个工作区都有本地的模式、供应商和模型默认配置。V1 仅支持名为 `openai` 的 OpenAI 兼容云供应商，配置中不会包含任何凭据。
+
+```powershell
+xcoding config show --workspace <path>
+xcoding config set --workspace <path> --mode ask --model gpt-4.1
+xcoding config set --workspace <path> --mode auto-edit
+```
+
+CLI 将这些值保存到该工作区的 `.xcoding/xcoding.db`。Desktop 会在应用数据目录的数据库中按工作区路径保存自己的配置，因此当前不会与 CLI 共用数据库。
 
 ## 会话命令
 
@@ -19,7 +31,7 @@ xcoding session rollback <session-id> <restore-point-id> --workspace <path>
 xcoding session cancel <session-id> --workspace <path>
 ```
 
-`session show` 会以 JSON 输出已保存的会话详情，其中包含审批/拒绝需要的 action ID，以及回滚需要的 restore point ID。
+`session show` 会以 JSON 输出已保存的会话详情，其中包含审批/拒绝需要的 action ID、回滚需要的 restore point ID，以及持久化的 `task_completed` 事件。任务完成摘要会列出唯一的已修改文件，并统计成功和失败的命令数量。
 
 ## 回滚
 
@@ -43,3 +55,5 @@ XCoding 不会把云模型凭据保存到仓库或会话数据库中。请通过
 $env:OPENAI_API_KEY = "..."
 $env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # 可选
 ```
+
+`OPENAI_API_KEY` 仅保留在启动 CLI 或 Desktop 的进程环境中，RPC 协议不接受任何凭据字段。

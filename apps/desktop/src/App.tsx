@@ -18,6 +18,8 @@ import type {
   Session,
   SessionDetail,
   SessionEvent,
+  TaskSummary,
+  WorkspaceConfig,
 } from "@xcoding/protocol";
 
 type Activity = {
@@ -28,6 +30,7 @@ type Activity = {
 };
 
 const defaultModel = "gpt-4.1";
+const defaultProvider = "openai";
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 
 function sessionTitle(session: Session): string {
@@ -70,6 +73,14 @@ function latestPlan(events: PersistedSessionEvent[]): PlanStep[] {
   return [];
 }
 
+function latestTaskSummary(events: PersistedSessionEvent[]): TaskSummary | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index].event;
+    if (event.type === "task_completed") return event.summary;
+  }
+  return null;
+}
+
 function latestPatchPreview(events: PersistedSessionEvent[], action: PendingAction | null): PatchPreview | null {
   if (!action || action.tool_call.name !== "apply_patch") return null;
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -87,6 +98,7 @@ export function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<Mode>("ask");
+  const [model, setModel] = useState(defaultModel);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -96,6 +108,8 @@ export function App() {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [patchPreview, setPatchPreview] = useState<PatchPreview | null>(null);
   const [restorePoints, setRestorePoints] = useState<RestorePoint[]>([]);
+  const [taskSummary, setTaskSummary] = useState<TaskSummary | null>(null);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -103,6 +117,18 @@ export function App() {
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
   );
+
+  const loadWorkspaceConfig = useCallback(async () => {
+    const root = workspaceRoot.trim();
+    if (!isTauriRuntime || !root) return;
+    try {
+      const config = await invoke<WorkspaceConfig>("workspace_config", { workspaceRoot: root });
+      setMode(config.mode);
+      setModel(config.model);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [workspaceRoot]);
 
   const refreshSessions = useCallback(async () => {
     if (!isTauriRuntime) return;
@@ -113,6 +139,10 @@ export function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [workspaceRoot]);
+
+  const refreshWorkspace = useCallback(async () => {
+    await Promise.all([refreshSessions(), loadWorkspaceConfig()]);
+  }, [loadWorkspaceConfig, refreshSessions]);
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
@@ -128,6 +158,7 @@ export function App() {
       setPendingAction(pending);
       setPatchPreview(latestPatchPreview(detail.events, pending));
       setRestorePoints(detail.restore_points);
+      setTaskSummary(latestTaskSummary(detail.events));
       setSessions((current) => current.some((session) => session.id === detail.session.id)
         ? current.map((session) => session.id === detail.session.id ? detail.session : session)
         : [detail.session, ...current]);
@@ -136,7 +167,7 @@ export function App() {
     }
   }, []);
 
-  useEffect(() => { void refreshSessions(); }, [refreshSessions]);
+  useEffect(() => { void refreshWorkspace(); }, [refreshWorkspace]);
   useEffect(() => {
     if (activeSessionId) void hydrateSession(activeSessionId);
   }, [activeSessionId, hydrateSession]);
@@ -156,6 +187,7 @@ export function App() {
       if (payload.type === "patch_preview") setPatchPreview(payload.preview);
       if (payload.type === "approval_requested") setPendingAction(payload.action);
       if (payload.type === "session_cancelled") setPendingAction(null);
+      if (payload.type === "task_completed") setTaskSummary(payload.summary);
       const nextActivity = eventActivity(payload, `${payload.type}-${Date.now()}`);
       if (nextActivity) {
         setActivity((current) => {
@@ -187,7 +219,8 @@ export function App() {
     setPendingAction(null);
     setPatchPreview(null);
     setRestorePoints([]);
-    const params: ChatParams = { workspace_root: root, message, mode, provider: "openai", model: defaultModel };
+    setTaskSummary(null);
+    const params: ChatParams = { workspace_root: root, message, mode, provider: defaultProvider, model };
     try {
       const result = await invoke<ChatResult>("chat", { params });
       setActiveSessionId(result.session.id);
@@ -254,15 +287,43 @@ export function App() {
     }
   }
 
+  async function saveWorkspaceConfig(): Promise<void> {
+    const root = workspaceRoot.trim();
+    if (!root || isSavingConfig || isRunning) return;
+    if (!isTauriRuntime) {
+      setError("Open XCoding through Tauri to save workspace defaults.");
+      return;
+    }
+    setError(null);
+    setIsSavingConfig(true);
+    try {
+      const config = await invoke<WorkspaceConfig>("set_workspace_config", {
+        params: { workspace_root: root, mode, provider: defaultProvider, model },
+      });
+      setMode(config.mode);
+      setModel(config.model);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsSavingConfig(false);
+    }
+  }
+
   return (
     <main className="workbench">
       <aside className="sessions-panel" aria-label="Sessions">
         <div className="brand-row">
           <div><p className="eyebrow">XCoding</p><h1>Sessions</h1></div>
-          <button type="button" className="quiet-button" onClick={() => void refreshSessions()} aria-label="Refresh sessions">Refresh</button>
+          <button type="button" className="quiet-button" onClick={() => void refreshWorkspace()} aria-label="Refresh workspace">Refresh</button>
         </div>
         <label className="field-label" htmlFor="workspace-root">Workspace</label>
         <input id="workspace-root" value={workspaceRoot} onChange={(event) => setWorkspaceRoot(event.target.value)} placeholder="D:\\work\\project" spellCheck={false} />
+        <section className="workspace-settings" aria-label="Workspace defaults">
+          <p className="panel-title">Defaults</p>
+          <label className="field-label" htmlFor="default-model">Model</label>
+          <input id="default-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={isRunning || isSavingConfig} spellCheck={false} />
+          <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>
+        </section>
         <nav className="session-list" aria-label="Saved sessions">
           {sessions.length === 0 ? <p className="empty-state">No saved sessions in this workspace.</p> : null}
           {sessions.map((session) => (
@@ -297,6 +358,7 @@ export function App() {
         {pendingAction ? <section className="review-panel"><p className="panel-title">Review</p><strong>{pendingAction.tool_call.name === "apply_patch" ? "Patch approval" : "Command approval"}</strong>{patchPreview ? <><code>{patchPreview.path}</code><pre className="diff-preview"><span>- {patchPreview.old_text || "(new file)"}</span><span>+ {patchPreview.new_text}</span></pre></> : <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code>}<div className="review-actions"><button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button><button type="button" onClick={() => void resolveAction(true)} disabled={isRunning}>Approve</button></div></section> : null}
         <section><p className="panel-title">Plan</p><ol className="plan-list">{plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}{plan.map((step) => <li key={step.id}>{step.description}</li>)}</ol></section>
         <section><p className="panel-title">Restore points</p><div className="restore-list">{restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}{restorePoints.map((restorePoint) => <div className="restore-point" key={restorePoint.id}><div><strong>{restorePoint.path}</strong><small>{new Date(restorePoint.created_at).toLocaleString()}</small></div><button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button></div>)}</div></section>
+        {taskSummary ? <section className="task-summary"><p className="panel-title">Task summary</p><strong>{taskSummary.changed_files.length} changed file(s)</strong><small>{taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded{taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}</small>{taskSummary.changed_files.length > 0 ? <ul>{taskSummary.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}</section> : null}
         <section><p className="panel-title">Activity</p><div className="activity-list">{activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}{activity.map((item) => <article className={`activity ${item.state}`} key={item.id}><strong>{item.label}</strong><code>{item.detail}</code></article>)}</div></section>
       </aside>
     </main>

@@ -251,6 +251,23 @@ pub struct RestorePoint {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct WorkspaceConfig {
+    pub workspace_root: String,
+    pub mode: Mode,
+    pub provider: String,
+    pub model: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct TaskSummary {
+    pub changed_files: Vec<String>,
+    pub commands_run: u32,
+    pub commands_succeeded: u32,
+    pub commands_failed: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PersistedSessionEvent {
     pub id: Uuid,
     pub session_id: Uuid,
@@ -342,15 +359,38 @@ pub struct GetSessionDetailResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct GetConfigParams {
+    pub workspace_root: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct GetConfigResult {
+    pub config: WorkspaceConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SetConfigParams {
+    pub workspace_root: String,
+    pub mode: Mode,
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SetConfigResult {
+    pub config: WorkspaceConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ChatParams {
     pub workspace_root: String,
     pub message: String,
     #[serde(default)]
-    pub mode: Mode,
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    #[serde(default = "default_model")]
-    pub model: String,
+    pub mode: Option<Mode>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
 }
@@ -441,6 +481,10 @@ pub enum SessionEvent {
     SessionCancelled {
         session_id: Uuid,
         message: String,
+    },
+    TaskCompleted {
+        session_id: Uuid,
+        summary: TaskSummary,
     },
     Error {
         session_id: Uuid,
