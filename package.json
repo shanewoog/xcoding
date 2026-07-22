@@ -8,7 +8,8 @@
     "build": "pnpm --filter @xcoding/protocol build && pnpm --filter @xcoding/client build && pnpm --filter @xcoding/cli build && pnpm --filter @xcoding/desktop build",
     "check": "pnpm --filter @xcoding/protocol build && pnpm --filter @xcoding/client build && pnpm --filter @xcoding/cli check && pnpm --filter @xcoding/desktop check",
     "cli": "pnpm --filter @xcoding/cli exec node dist/index.js",
-    "desktop": "pnpm --filter @xcoding/desktop dev"
+    "desktop": "pnpm --filter @xcoding/desktop dev",
+    "test:e2e": "cargo build -p xcoding-server && node tests/e2e/read-only-agent.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.2"
