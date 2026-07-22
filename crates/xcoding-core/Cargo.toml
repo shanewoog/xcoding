@@ -1,0 +1,11 @@
+[package]
+name = "xcoding-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+xcoding-protocol = { path = "../xcoding-protocol" }
+xcoding-store = { path = "../xcoding-store" }

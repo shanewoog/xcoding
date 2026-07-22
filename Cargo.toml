@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/xcoding-context",
+  "crates/xcoding-core",
+  "crates/xcoding-policy",
+  "crates/xcoding-protocol",
+  "crates/xcoding-providers",
+  "crates/xcoding-server",
+  "crates/xcoding-store",
+  "crates/xcoding-tools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["XCoding Contributors"]
+repository = "https://github.com/shanewoog/xcoding"
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt", "sync"] }
+uuid = { version = "1", features = ["serde", "v4"] }

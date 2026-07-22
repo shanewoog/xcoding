@@ -1,0 +1,21 @@
+{
+  "name": "@xcoding/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "xcoding": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@xcoding/client": "workspace:*",
+    "@xcoding/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0"
+  }
+}

@@ -1,0 +1,52 @@
+:root {
+  color: #17212b;
+  background: #edf3f1;
+  font-family: Inter, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; min-width: 320px; }
+
+button {
+  border: 1px solid #005a5f;
+  border-radius: 6px;
+  background: #006d72;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.6rem 0.85rem;
+}
+
+button:hover { background: #005a5f; }
+
+.app-shell {
+  display: grid;
+  gap: 1.25rem;
+  margin: 0 auto;
+  max-width: 760px;
+  min-height: 100vh;
+  padding: 3rem 1.5rem;
+}
+
+header {
+  align-items: start;
+  border-bottom: 1px solid #c9d6d2;
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 1.25rem;
+}
+
+h1, p { margin: 0; }
+h1 { font-size: 1.75rem; font-weight: 650; }
+.eyebrow, .label { color: #58706c; font-size: 0.78rem; font-weight: 700; text-transform: uppercase; }
+.eyebrow { margin-bottom: 0.4rem; }
+
+section { border-bottom: 1px solid #c9d6d2; padding-bottom: 1.25rem; }
+.label { margin-bottom: 0.5rem; }
+.status { font-size: 1.05rem; line-height: 1.5; }
+.placeholder { color: #344b47; line-height: 1.5; }
+
+@media (max-width: 520px) {
+  header { gap: 1rem; flex-direction: column; }
+}

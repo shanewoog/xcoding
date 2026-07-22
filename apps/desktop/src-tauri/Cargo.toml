@@ -1,0 +1,14 @@
+[package]
+name = "xcoding-desktop"
+version = "0.1.0"
+description = "XCoding Desktop shell"
+authors = ["XCoding Contributors"]
+edition = "2024"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+xcoding-core = { path = "../../../crates/xcoding-core" }
+xcoding-protocol = { path = "../../../crates/xcoding-protocol" }

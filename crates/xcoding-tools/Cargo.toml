@@ -1,0 +1,9 @@
+[package]
+name = "xcoding-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xcoding-policy = { path = "../xcoding-policy" }
+xcoding-protocol = { path = "../xcoding-protocol" }

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+target/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+**/.xcoding/*.db
+apps/desktop/src-tauri/target/
+*.tsbuildinfo

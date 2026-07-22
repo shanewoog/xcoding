@@ -1,0 +1,16 @@
+{
+  "name": "xcoding",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first AI coding agent platform",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "build": "pnpm --filter @xcoding/protocol build && pnpm --filter @xcoding/client build && pnpm --filter @xcoding/cli build && pnpm --filter @xcoding/desktop build",
+    "check": "pnpm --filter @xcoding/protocol build && pnpm --filter @xcoding/client build && pnpm --filter @xcoding/cli check && pnpm --filter @xcoding/desktop check",
+    "cli": "pnpm --filter @xcoding/cli exec node dist/index.js",
+    "desktop": "pnpm --filter @xcoding/desktop dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}
