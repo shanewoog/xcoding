@@ -4718,6 +4718,7 @@ dependencies = [
  "thiserror 2.0.19",
  "xcoding-context",
  "xcoding-core",
+ "xcoding-policy",
  "xcoding-protocol",
  "xcoding-providers",
  "xcoding-tools",

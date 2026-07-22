@@ -1,18 +1,20 @@
-//! Shared read-only agent loop for XCoding clients.
+//! Shared guarded coding-agent loop for XCoding clients.
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use thiserror::Error;
 use xcoding_context::ContextSnapshot;
 use xcoding_core::{CoreError, CoreService};
+use xcoding_policy::{PermissionDecision, evaluate};
 use xcoding_protocol::{
-    ChatParams, ChatResult, MessageRole, PlanStep, Session, SessionEvent, ToolCall,
+    ChatParams, ChatResult, MessageRole, PlanStep, ResolveActionParams, ResolveActionResult,
+    Session, SessionEvent, ToolCall, ToolName,
 };
 use xcoding_providers::{
     ChatMessage, OpenAiCompatibleProvider, ProviderError, ProviderEvent, ProviderToolCall,
     ToolDefinition,
 };
-use xcoding_tools::{ToolError, ToolRegistry};
+use xcoding_tools::{ToolError, ToolExecution, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 8;
 
@@ -28,7 +30,7 @@ pub enum AgentError {
     UnsupportedProvider(String),
     #[error("invalid tool call from provider: {0}")]
     InvalidProviderToolCall(String),
-    #[error("model exceeded the read-only tool-call limit")]
+    #[error("model exceeded the tool-call limit")]
     ToolCallLimit,
 }
 
@@ -59,6 +61,54 @@ impl<'a> AgentService<'a> {
             });
         }
         result
+    }
+
+    pub async fn resolve<F>(
+        &self,
+        params: ResolveActionParams,
+        mut on_event: F,
+    ) -> Result<ResolveActionResult, AgentError>
+    where
+        F: FnMut(SessionEvent),
+    {
+        let action = self.core.resolve_pending_action(
+            params.session_id,
+            params.action_id,
+            params.approved,
+        )?;
+        let session = self.core.resume_chat(params.session_id)?;
+        let tools = ToolRegistry::new(&session.workspace_root)?;
+
+        let output = if params.approved {
+            on_event(SessionEvent::ToolStart {
+                session_id: session.id,
+                tool_call: action.tool_call.clone(),
+                summary: format!("Approved {}", action.tool_call.name.as_str()),
+            });
+            self.execute_and_record(&session, &tools, &action.tool_call, &mut on_event)?
+        } else {
+            let output = json!({
+                "tool_call_id": action.tool_call.id,
+                "rejected": true,
+                "reason": "The user rejected this action. Continue without making the change."
+            })
+            .to_string();
+            self.core.record_tool_message(session.id, &output)?;
+            on_event(SessionEvent::ToolEnd {
+                session_id: session.id,
+                tool_call: action.tool_call.clone(),
+                success: false,
+                summary: "Action rejected by user".to_owned(),
+            });
+            output
+        };
+
+        let result = self.run_session(&session, &mut on_event).await?;
+        let _ = output;
+        Ok(ResolveActionResult {
+            session: result.session,
+            message: result.message,
+        })
     }
 
     async fn run_session<F>(
@@ -94,11 +144,18 @@ impl<'a> AgentService<'a> {
             steps: vec![
                 PlanStep {
                     id: "inspect".to_owned(),
-                    description: "Inspect relevant workspace files before answering.".to_owned(),
+                    description: "Inspect relevant workspace files before changing anything."
+                        .to_owned(),
                 },
                 PlanStep {
-                    id: "answer".to_owned(),
-                    description: "Answer from the gathered repository evidence.".to_owned(),
+                    id: "change".to_owned(),
+                    description: "Propose a minimal patch and wait for required approval."
+                        .to_owned(),
+                },
+                PlanStep {
+                    id: "verify".to_owned(),
+                    description: "Run approved verification commands and report the result."
+                        .to_owned(),
                 },
             ],
         });
@@ -128,7 +185,10 @@ impl<'a> AgentService<'a> {
                 let result = self.core.complete_chat(session.id, content)?;
                 on_event(SessionEvent::MessageCompleted {
                     session_id: session.id,
-                    message: result.message.clone(),
+                    message: result
+                        .message
+                        .clone()
+                        .expect("completed chat has a message"),
                 });
                 return Ok(result);
             }
@@ -142,30 +202,50 @@ impl<'a> AgentService<'a> {
                     tool_call: tool_call.clone(),
                 });
 
-                match tools.execute(&session.mode, &tool_call) {
-                    Ok(execution) => {
-                        let output = serde_json::to_string(&execution.output).map_err(|error| {
-                            AgentError::InvalidProviderToolCall(error.to_string())
-                        })?;
-                        self.core.record_tool_message(session.id, &output)?;
+                let (kind, high_risk) = tools.permission_for(&tool_call)?;
+                match evaluate(&session.mode, kind, high_risk) {
+                    PermissionDecision::Allow => {
+                        let output =
+                            self.execute_and_record(session, &tools, &tool_call, on_event)?;
                         messages.push(ChatMessage::tool_result(&tool_call.id, output));
-                        on_event(SessionEvent::ToolEnd {
+                    }
+                    PermissionDecision::AskUser => {
+                        if tool_call.name == ToolName::ApplyPatch {
+                            match tools.patch_preview(&tool_call) {
+                                Ok(preview) => on_event(SessionEvent::PatchPreview {
+                                    session_id: session.id,
+                                    preview,
+                                }),
+                                Err(error) => {
+                                    let output = self
+                                        .record_tool_error(session, &tool_call, error, on_event)?;
+                                    messages.push(ChatMessage::tool_result(&tool_call.id, output));
+                                    continue;
+                                }
+                            }
+                        }
+                        let action = self
+                            .core
+                            .create_pending_action(session.id, tool_call.clone())?;
+                        let paused = self.core.pause_chat(session.id)?;
+                        on_event(SessionEvent::ApprovalRequested {
                             session_id: session.id,
-                            tool_call,
-                            success: true,
-                            summary: execution.summary,
+                            action,
+                            summary: approval_summary(&tool_call),
+                        });
+                        return Ok(ChatResult {
+                            session: paused,
+                            message: None,
                         });
                     }
-                    Err(error) => {
-                        let output = json!({ "error": error.to_string() }).to_string();
-                        self.core.record_tool_message(session.id, &output)?;
+                    PermissionDecision::Deny => {
+                        let output = self.record_tool_error(
+                            session,
+                            &tool_call,
+                            ToolError::PermissionDenied,
+                            on_event,
+                        )?;
                         messages.push(ChatMessage::tool_result(&tool_call.id, output));
-                        on_event(SessionEvent::ToolEnd {
-                            session_id: session.id,
-                            tool_call,
-                            success: false,
-                            summary: error.to_string(),
-                        });
                     }
                 }
             }
@@ -173,48 +253,104 @@ impl<'a> AgentService<'a> {
 
         Err(AgentError::ToolCallLimit)
     }
+
+    fn execute_and_record<F>(
+        &self,
+        session: &Session,
+        tools: &ToolRegistry,
+        tool_call: &ToolCall,
+        on_event: &mut F,
+    ) -> Result<String, AgentError>
+    where
+        F: FnMut(SessionEvent),
+    {
+        let execution = (|| -> Result<ToolExecution, ToolError> {
+            if tool_call.name == ToolName::ApplyPatch {
+                let preview = tools.patch_preview(tool_call)?;
+                self.core
+                    .create_restore_point(
+                        session.id,
+                        &preview.path,
+                        preview.file_existed.then_some(preview.old_text.as_str()),
+                    )
+                    .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+            }
+            tools.execute_authorized(tool_call)
+        })();
+
+        match execution {
+            Ok(execution) => {
+                let output = serde_json::to_string(&execution.output)
+                    .map_err(|error| AgentError::InvalidProviderToolCall(error.to_string()))?;
+                self.core.record_tool_message(session.id, &output)?;
+                on_event(SessionEvent::ToolEnd {
+                    session_id: session.id,
+                    tool_call: tool_call.clone(),
+                    success: true,
+                    summary: execution.summary,
+                });
+                Ok(output)
+            }
+            Err(error) => self.record_tool_error(session, tool_call, error, on_event),
+        }
+    }
+
+    fn record_tool_error<F>(
+        &self,
+        session: &Session,
+        tool_call: &ToolCall,
+        error: ToolError,
+        on_event: &mut F,
+    ) -> Result<String, AgentError>
+    where
+        F: FnMut(SessionEvent),
+    {
+        let output = json!({ "error": error.to_string() }).to_string();
+        self.core.record_tool_message(session.id, &output)?;
+        on_event(SessionEvent::ToolEnd {
+            session_id: session.id,
+            tool_call: tool_call.clone(),
+            success: false,
+            summary: error.to_string(),
+        });
+        Ok(output)
+    }
+}
+
+fn approval_summary(tool_call: &ToolCall) -> String {
+    match tool_call.name {
+        ToolName::ApplyPatch => "Review and approve the proposed patch".to_owned(),
+        ToolName::RunCommand => "Review and approve the requested command".to_owned(),
+        _ => format!("Review {}", tool_call.name.as_str()),
+    }
 }
 
 pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "list_dir".to_owned(),
-            description: "List files and directories under a workspace-relative directory."
-                .to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative directory; defaults to ." },
-                    "max_entries": { "type": "integer", "minimum": 1, "maximum": 1000 }
-                }
-            }),
+            description: "List files and directories under a workspace-relative directory.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "path": { "type": "string", "description": "Workspace-relative directory; defaults to ." }, "max_entries": { "type": "integer", "minimum": 1, "maximum": 1000 } } }),
         },
         ToolDefinition {
             name: "read_file".to_owned(),
-            description: "Read a bounded line range from a workspace-relative text file."
-                .to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "start_line": { "type": "integer", "minimum": 1 },
-                    "end_line": { "type": "integer", "minimum": 1 }
-                },
-                "required": ["path"]
-            }),
+            description: "Read a bounded line range from a workspace-relative text file.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "path": { "type": "string" }, "start_line": { "type": "integer", "minimum": 1 }, "end_line": { "type": "integer", "minimum": 1 } }, "required": ["path"] }),
         },
         ToolDefinition {
             name: "search_code".to_owned(),
             description: "Search workspace text files for an exact string.".to_owned(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" },
-                    "path": { "type": "string", "description": "Workspace-relative directory; defaults to ." },
-                    "max_results": { "type": "integer", "minimum": 1, "maximum": 100 }
-                },
-                "required": ["query"]
-            }),
+            parameters: json!({ "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string", "description": "Workspace-relative directory; defaults to ." }, "max_results": { "type": "integer", "minimum": 1, "maximum": 100 } }, "required": ["query"] }),
+        },
+        ToolDefinition {
+            name: "apply_patch".to_owned(),
+            description: "Atomically replace a workspace-relative text file only when old_text exactly matches its current content. Use an empty old_text to create a new file.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "path": { "type": "string" }, "old_text": { "type": "string" }, "new_text": { "type": "string" } }, "required": ["path", "old_text", "new_text"] }),
+        },
+        ToolDefinition {
+            name: "run_command".to_owned(),
+            description: "Run an approved executable with an argument vector in the workspace root. Never use a shell.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "executable": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } } }, "required": ["executable"] }),
         },
     ]
 }
@@ -243,11 +379,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn declares_only_read_only_tools() {
+    fn declares_guarded_write_tools() {
         let names = tool_definitions()
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["list_dir", "read_file", "search_code"]);
+        assert_eq!(
+            names,
+            vec![
+                "list_dir",
+                "read_file",
+                "search_code",
+                "apply_patch",
+                "run_command"
+            ]
+        );
     }
 }

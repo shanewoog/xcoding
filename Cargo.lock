@@ -1467,6 +1467,7 @@ dependencies = [
  "thiserror",
  "xcoding-context",
  "xcoding-core",
+ "xcoding-policy",
  "xcoding-protocol",
  "xcoding-providers",
  "xcoding-tools",

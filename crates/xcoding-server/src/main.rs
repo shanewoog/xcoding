@@ -11,7 +11,8 @@ use tokio::{
 use xcoding_agent::{AgentError, AgentService};
 use xcoding_core::{CoreError, CoreService};
 use xcoding_protocol::{
-    ChatParams, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RpcError, SessionEvent,
+    ChatParams, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, ResolveActionParams,
+    RpcError, SessionEvent,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -51,6 +52,12 @@ async fn main() {
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) if request.method == "session.chat" => {
                 match handle_chat(&core, &mut stdout, request).await {
+                    Ok(response) => response,
+                    Err(_) => break,
+                }
+            }
+            Ok(request) if request.method == "session.resolve" => {
+                match handle_resolve(&core, &mut stdout, request).await {
                     Ok(response) => response,
                     Err(_) => break,
                 }
@@ -113,6 +120,51 @@ async fn handle_chat(
         emit_event(stdout, event).await?;
     }
 
+    match outcome {
+        Ok(result) => Ok(JsonRpcResponse::success(id, result)),
+        Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_agent(error))),
+    }
+}
+
+async fn handle_resolve(
+    core: &CoreService,
+    stdout: &mut Stdout,
+    request: JsonRpcRequest,
+) -> io::Result<JsonRpcResponse> {
+    let id = request.id.clone();
+    if !request.is_valid_version() {
+        return Ok(JsonRpcResponse::failure(
+            id,
+            RpcError::invalid_request("jsonrpc must be exactly \"2.0\""),
+        ));
+    }
+    let params: ResolveActionParams = match serde_json::from_value(request.params) {
+        Ok(params) => params,
+        Err(error) => {
+            return Ok(JsonRpcResponse::failure(
+                id,
+                RpcError::invalid_params(format!("invalid session.resolve params: {error}")),
+            ));
+        }
+    };
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let agent = AgentService::new(core);
+    let resolve = agent.resolve(params, move |event| {
+        let _ = event_tx.send(event);
+    });
+    tokio::pin!(resolve);
+    let outcome = loop {
+        tokio::select! {
+            event = event_rx.recv() => {
+                if let Some(event) = event { emit_event(stdout, event).await?; }
+            }
+            result = &mut resolve => break result,
+        }
+    };
+    while let Ok(event) = event_rx.try_recv() {
+        emit_event(stdout, event).await?;
+    }
     match outcome {
         Ok(result) => Ok(JsonRpcResponse::success(id, result)),
         Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_agent(error))),

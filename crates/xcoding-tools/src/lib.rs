@@ -4,13 +4,14 @@ use std::{
     collections::VecDeque,
     fs,
     path::{Component, Path, PathBuf},
+    process::Command,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
 use xcoding_policy::{PermissionDecision, PermissionKind, evaluate};
-use xcoding_protocol::{Mode, ToolCall, ToolName};
+use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
 const MAX_LIST_ENTRIES: usize = 1_000;
@@ -35,8 +36,12 @@ pub enum ToolError {
     FileTooLarge(String),
     #[error("tool arguments are invalid: {0}")]
     InvalidArguments(String),
-    #[error("read permission was not granted")]
+    #[error("permission was not granted")]
     PermissionDenied,
+    #[error("patch did not match the current file contents: {0}")]
+    PatchConflict(String),
+    #[error("command arguments are invalid: {0}")]
+    InvalidCommand(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -72,14 +77,61 @@ impl ToolRegistry {
     }
 
     pub fn execute(&self, mode: &Mode, tool_call: &ToolCall) -> Result<ToolExecution, ToolError> {
-        if evaluate(mode, PermissionKind::Read, false) != PermissionDecision::Allow {
+        let (kind, high_risk) = self.permission_for(tool_call)?;
+        if evaluate(mode, kind, high_risk) != PermissionDecision::Allow {
             return Err(ToolError::PermissionDenied);
         }
+        self.execute_authorized(tool_call)
+    }
 
+    pub fn permission_for(
+        &self,
+        tool_call: &ToolCall,
+    ) -> Result<(PermissionKind, bool), ToolError> {
+        match tool_call.name {
+            ToolName::ListDir | ToolName::ReadFile | ToolName::SearchCode => {
+                Ok((PermissionKind::Read, false))
+            }
+            ToolName::ApplyPatch => {
+                let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
+                Ok((PermissionKind::Write, is_high_risk_path(&args.path)))
+            }
+            ToolName::RunCommand => Ok((PermissionKind::Exec, false)),
+        }
+    }
+
+    pub fn patch_preview(&self, tool_call: &ToolCall) -> Result<PatchPreview, ToolError> {
+        if tool_call.name != ToolName::ApplyPatch {
+            return Err(ToolError::InvalidArguments(
+                "patch preview requires apply_patch".to_owned(),
+            ));
+        }
+        let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
+        let path = self.resolve_writable(&args.path)?;
+        let file_existed = path.exists();
+        let current = if file_existed {
+            fs::read_to_string(&path)?
+        } else {
+            String::new()
+        };
+        if current != args.old_text {
+            return Err(ToolError::PatchConflict(self.relative_path(&path)));
+        }
+        Ok(PatchPreview {
+            path: self.relative_path(&path),
+            file_existed,
+            old_text: args.old_text,
+            new_text: args.new_text,
+        })
+    }
+
+    pub fn execute_authorized(&self, tool_call: &ToolCall) -> Result<ToolExecution, ToolError> {
         match tool_call.name {
             ToolName::ListDir => self.list_dir(parse_arguments(&tool_call.arguments)?),
             ToolName::ReadFile => self.read_file(parse_arguments(&tool_call.arguments)?),
             ToolName::SearchCode => self.search_code(parse_arguments(&tool_call.arguments)?),
+            ToolName::ApplyPatch => self.apply_patch(parse_arguments(&tool_call.arguments)?),
+            ToolName::RunCommand => self.run_command(parse_arguments(&tool_call.arguments)?),
         }
     }
 
@@ -221,25 +273,96 @@ impl ToolRegistry {
         })
     }
 
-    fn resolve(&self, requested_path: &str) -> Result<PathBuf, ToolError> {
-        let requested_path = if requested_path.trim().is_empty() {
-            Path::new(".")
+    fn apply_patch(&self, args: ApplyPatchArgs) -> Result<ToolExecution, ToolError> {
+        let path = self.resolve_writable(&args.path)?;
+        let file_existed = path.exists();
+        let current = if file_existed {
+            fs::read_to_string(&path)?
         } else {
-            Path::new(requested_path)
+            String::new()
         };
-        if requested_path.is_absolute()
-            || requested_path.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(ToolError::PathOutsideWorkspace(
-                requested_path.display().to_string(),
+        if current != args.old_text {
+            return Err(ToolError::PatchConflict(self.relative_path(&path)));
+        }
+
+        let parent = path.parent().expect("workspace file has a parent");
+        let temporary = parent.join(format!(
+            ".xcoding-{}-{}.tmp",
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("patch"),
+            std::process::id()
+        ));
+        if temporary.exists() {
+            fs::remove_file(&temporary)?;
+        }
+        fs::write(&temporary, &args.new_text)?;
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        fs::rename(&temporary, &path)?;
+
+        let path = self.relative_path(&path);
+        Ok(ToolExecution {
+            output: json!({ "path": path, "changed": true }),
+            summary: format!("Applied patch to {path}"),
+        })
+    }
+
+    fn run_command(&self, args: RunCommandArgs) -> Result<ToolExecution, ToolError> {
+        if args.executable.trim().is_empty() {
+            return Err(ToolError::InvalidCommand(
+                "executable must not be empty".to_owned(),
+            ));
+        }
+        if Path::new(&args.executable).is_absolute() {
+            return Err(ToolError::InvalidCommand(
+                "absolute executable paths are not allowed".to_owned(),
             ));
         }
 
+        let output = Command::new(&args.executable)
+            .args(&args.args)
+            .current_dir(&self.workspace_root)
+            .output()?;
+        let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout));
+        let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
+        let success = output.status.success();
+        Ok(ToolExecution {
+            output: json!({
+                "executable": args.executable,
+                "args": args.args,
+                "success": success,
+                "exit_code": output.status.code(),
+                "stdout": stdout,
+                "stderr": stderr,
+            }),
+            summary: if success {
+                "Command completed".to_owned()
+            } else {
+                "Command failed".to_owned()
+            },
+        })
+    }
+
+    fn resolve_writable(&self, requested_path: &str) -> Result<PathBuf, ToolError> {
+        let requested = checked_relative_path(requested_path)?;
+        let target = self.workspace_root.join(requested);
+        let parent = target
+            .parent()
+            .ok_or_else(|| ToolError::PathOutsideWorkspace(requested_path.to_owned()))?;
+        let canonical_parent = parent.canonicalize()?;
+        if !canonical_parent.starts_with(&self.workspace_root) {
+            return Err(ToolError::PathOutsideWorkspace(requested_path.to_owned()));
+        }
+        if target.exists() && fs::symlink_metadata(&target)?.file_type().is_symlink() {
+            return Err(ToolError::PathOutsideWorkspace(requested_path.to_owned()));
+        }
+        Ok(target)
+    }
+
+    fn resolve(&self, requested_path: &str) -> Result<PathBuf, ToolError> {
+        let requested_path = checked_relative_path(requested_path)?;
         let resolved = self.workspace_root.join(requested_path).canonicalize()?;
         if !resolved.starts_with(&self.workspace_root) {
             return Err(ToolError::PathOutsideWorkspace(
@@ -278,6 +401,20 @@ struct ReadFileArgs {
 }
 
 #[derive(Deserialize)]
+struct ApplyPatchArgs {
+    path: String,
+    old_text: String,
+    new_text: String,
+}
+
+#[derive(Deserialize)]
+struct RunCommandArgs {
+    executable: String,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct SearchCodeArgs {
     query: String,
     #[serde(default)]
@@ -313,6 +450,41 @@ struct SearchResult {
     path: String,
     line: usize,
     text: String,
+}
+
+fn checked_relative_path(requested_path: &str) -> Result<&Path, ToolError> {
+    let requested_path = if requested_path.trim().is_empty() {
+        Path::new(".")
+    } else {
+        Path::new(requested_path)
+    };
+    if requested_path.is_absolute()
+        || requested_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ToolError::PathOutsideWorkspace(
+            requested_path.display().to_string(),
+        ));
+    }
+    Ok(requested_path)
+}
+
+fn is_high_risk_path(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|part| part == ".git" || part == ".xcoding")
+}
+
+fn truncate_output(value: &str) -> String {
+    const MAX_OUTPUT_BYTES: usize = 32 * 1024;
+    if value.len() <= MAX_OUTPUT_BYTES {
+        value.to_owned()
+    } else {
+        format!("{}\n[output truncated]", &value[..MAX_OUTPUT_BYTES])
+    }
 }
 
 fn parse_arguments<T: DeserializeOwned>(arguments: &Value) -> Result<T, ToolError> {

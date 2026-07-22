@@ -12,4 +12,5 @@ xcoding-context = { path = "../xcoding-context" }
 xcoding-core = { path = "../xcoding-core" }
 xcoding-protocol = { path = "../xcoding-protocol" }
 xcoding-providers = { path = "../xcoding-providers" }
+xcoding-policy = { path = "../xcoding-policy" }
 xcoding-tools = { path = "../xcoding-tools" }

@@ -9,7 +9,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
-export type ToolName = "list_dir" | "read_file" | "search_code";
+export type ToolName = "list_dir" | "read_file" | "search_code" | "apply_patch" | "run_command";
 
 export interface Session {
   id: string;
@@ -67,13 +67,42 @@ export interface ChatParams {
 
 export interface ChatResult {
   session: Session;
-  message: Message;
+  message?: Message;
+}
+
+export interface ResolveActionParams {
+  session_id: string;
+  action_id: string;
+  approved: boolean;
+}
+
+export interface ResolveActionResult {
+  session: Session;
+  message?: Message;
 }
 
 export interface ToolCall {
   id: string;
   name: ToolName;
   arguments: Record<string, unknown>;
+}
+
+export type PendingActionStatus = "pending" | "approved" | "rejected";
+
+export interface PendingAction {
+  id: string;
+  session_id: string;
+  tool_call: ToolCall;
+  status: PendingActionStatus;
+  created_at: string;
+  resolved_at?: string;
+}
+
+export interface PatchPreview {
+  path: string;
+  file_existed: boolean;
+  old_text: string;
+  new_text: string;
 }
 
 export interface PlanStep {
@@ -108,6 +137,17 @@ export type SessionEvent =
       session_id: string;
       tool_call: ToolCall;
       success: boolean;
+      summary: string;
+    }
+  | {
+      type: "patch_preview";
+      session_id: string;
+      preview: PatchPreview;
+    }
+  | {
+      type: "approval_requested";
+      session_id: string;
+      action: PendingAction;
       summary: string;
     }
   | {

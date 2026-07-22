@@ -11,6 +11,8 @@ import type {
   CreateSessionResult,
   ListSessionsResult,
   PingResult,
+  ResolveActionParams,
+  ResolveActionResult,
   SessionEvent,
 } from "@xcoding/protocol";
 
@@ -80,6 +82,20 @@ async function runSessionCommand(
       console.log(JSON.stringify(result.session, null, 2));
       return;
     }
+    case "approve":
+    case "reject": {
+      const sessionId = args[1];
+      const actionId = args[2];
+      if (!sessionId || !actionId) {
+        throw new Error(`expected session ${subcommand} <session-id> <action-id>`);
+      }
+      await runResolveAction(client, {
+        session_id: sessionId,
+        action_id: actionId,
+        approved: subcommand === "approve",
+      });
+      return;
+    }
     case "list": {
       const result = await client.request<ListSessionsResult>("session.list", {
         workspace_root: workspace,
@@ -94,7 +110,7 @@ async function runSessionCommand(
       return;
     }
     default:
-      throw new Error("expected `session create` or `session list`");
+      throw new Error("expected `session create`, `session list`, `session approve`, or `session reject`");
   }
 }
 
@@ -138,6 +154,12 @@ async function runChatCommand(
       case "tool_end":
         process.stderr.write(`${event.success ? "done" : "failed"}: ${event.summary}\n`);
         break;
+      case "patch_preview":
+        process.stderr.write(`Patch: ${event.preview.path}\n`);
+        break;
+      case "approval_requested":
+        process.stderr.write(`Approval required: ${event.action.id} (${event.summary})\n`);
+        break;
       default:
         break;
     }
@@ -154,6 +176,33 @@ async function runChatCommand(
       process.stdout.write("\n");
     }
     throw error;
+  } finally {
+    unsubscribe();
+  }
+}
+
+async function runResolveAction(client: StdioRpcClient, params: ResolveActionParams): Promise<void> {
+  let receivedText = false;
+  const unsubscribe = client.onNotification((notification) => {
+    if (notification.method !== "session.event") return;
+    const event = notification.params as SessionEvent;
+    if (event.type === "text_delta") {
+      receivedText = true;
+      process.stdout.write(event.delta);
+    } else if (event.type === "tool_start") {
+      process.stderr.write(`> ${event.summary}\n`);
+    } else if (event.type === "tool_end") {
+      process.stderr.write(`${event.success ? "done" : "failed"}: ${event.summary}\n`);
+    } else if (event.type === "patch_preview") {
+      process.stderr.write(`Patch: ${event.preview.path}\n`);
+    } else if (event.type === "approval_requested") {
+      process.stderr.write(`Approval required: ${event.action.id} (${event.summary})\n`);
+    }
+  });
+  try {
+    const result = await client.request<ResolveActionResult>("session.resolve", params);
+    if (receivedText) process.stdout.write("\n");
+    console.log(`Session ${result.session.id}: ${result.session.status}`);
   } finally {
     unsubscribe();
   }
@@ -201,6 +250,8 @@ Usage:
   xcoding ping [--workspace <path>] [--server <path>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
   xcoding session list [--workspace <path>]
+  xcoding session approve <session-id> <action-id> [--workspace <path>]
+  xcoding session reject <session-id> <action-id> [--workspace <path>]
   xcoding chat "<message>" [--workspace <path>] [--provider openai] [--model <model>]
 
 Environment:

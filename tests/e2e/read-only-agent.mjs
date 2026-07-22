@@ -46,7 +46,7 @@ async function main() {
     assert.equal(mock.requests.length, 2);
     assert.deepEqual(
       mock.requests[0].tools.map((tool) => tool.function.name),
-      ["list_dir", "read_file", "search_code"],
+      ["list_dir", "read_file", "search_code", "apply_patch", "run_command"],
     );
     const secondTurnMessages = mock.requests[1].messages;
     assert.ok(secondTurnMessages.some((message) => message.role === "assistant" && message.tool_calls));

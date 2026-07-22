@@ -188,6 +188,8 @@ pub enum ToolName {
     ListDir,
     ReadFile,
     SearchCode,
+    ApplyPatch,
+    RunCommand,
 }
 
 impl ToolName {
@@ -196,6 +198,8 @@ impl ToolName {
             Self::ListDir => "list_dir",
             Self::ReadFile => "read_file",
             Self::SearchCode => "search_code",
+            Self::ApplyPatch => "apply_patch",
+            Self::RunCommand => "run_command",
         }
     }
 }
@@ -205,6 +209,33 @@ pub struct ToolCall {
     pub id: String,
     pub name: ToolName,
     pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingActionStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PendingAction {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub tool_call: ToolCall,
+    pub status: PendingActionStatus,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PatchPreview {
+    pub path: String,
+    pub file_existed: bool,
+    pub old_text: String,
+    pub new_text: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -288,7 +319,22 @@ pub struct ChatParams {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ChatResult {
     pub session: Session,
-    pub message: Message,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<Message>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ResolveActionParams {
+    pub session_id: Uuid,
+    pub action_id: Uuid,
+    pub approved: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ResolveActionResult {
+    pub session: Session,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<Message>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -315,6 +361,15 @@ pub enum SessionEvent {
         session_id: Uuid,
         tool_call: ToolCall,
         success: bool,
+        summary: String,
+    },
+    PatchPreview {
+        session_id: Uuid,
+        preview: PatchPreview,
+    },
+    ApprovalRequested {
+        session_id: Uuid,
+        action: PendingAction,
         summary: String,
     },
     Error {

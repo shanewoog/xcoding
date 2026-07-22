@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
-use xcoding_protocol::{ChatParams, ChatResult, PingResult, Session};
+use xcoding_protocol::{ChatParams, ChatResult, PingResult, ResolveActionParams, ResolveActionResult, Session};
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
@@ -30,6 +30,15 @@ fn list_sessions(app: AppHandle, workspace_root: Option<String>) -> Result<Vec<S
 }
 
 #[tauri::command]
+fn resolve_action(app: AppHandle, params: ResolveActionParams) -> Result<ResolveActionResult, String> {
+    let core = open_core(&app)?;
+    tauri::async_runtime::block_on(AgentService::new(&core).resolve(params, move |event| {
+        let _ = app.emit("session-event", event);
+    }))
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn chat(app: AppHandle, params: ChatParams) -> Result<ChatResult, String> {
     let core = open_core(&app)?;
     tauri::async_runtime::block_on(AgentService::new(&core).chat(params, move |event| {
@@ -40,7 +49,7 @@ fn chat(app: AppHandle, params: ChatParams) -> Result<ChatResult, String> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping, list_sessions, chat])
+        .invoke_handler(tauri::generate_handler![ping, list_sessions, chat, resolve_action])
         .run(tauri::generate_context!())
         .expect("failed to run XCoding Desktop");
 }

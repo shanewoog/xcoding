@@ -6,7 +6,10 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
-use xcoding_protocol::{CreateSessionParams, Message, MessageRole, Session, SessionStatus};
+use xcoding_protocol::{
+    CreateSessionParams, Message, MessageRole, PendingAction, PendingActionStatus, Session,
+    SessionStatus, ToolCall,
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -150,6 +153,82 @@ impl SessionStore {
             .map_err(StoreError::from)
     }
 
+    pub fn create_pending_action(
+        &self,
+        session_id: Uuid,
+        tool_call: ToolCall,
+    ) -> Result<PendingAction, StoreError> {
+        let action = PendingAction {
+            id: Uuid::new_v4(),
+            session_id,
+            tool_call,
+            status: PendingActionStatus::Pending,
+            created_at: Utc::now(),
+            resolved_at: None,
+        };
+        self.connection.execute(
+            "INSERT INTO pending_actions (id, session_id, tool_call, status, created_at, resolved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                action.id.to_string(),
+                action.session_id.to_string(),
+                serde_json::to_string(&action.tool_call)?,
+                serde_json::to_string(&action.status)?,
+                action.created_at.to_rfc3339(),
+                Option::<String>::None,
+            ],
+        )?;
+        Ok(action)
+    }
+
+    pub fn get_pending_action(&self, id: Uuid) -> Result<Option<PendingAction>, StoreError> {
+        self.connection.query_row(
+            "SELECT id, session_id, tool_call, status, created_at, resolved_at FROM pending_actions WHERE id = ?1",
+            [id.to_string()],
+            Self::row_to_pending_action,
+        ).optional().map_err(StoreError::from)
+    }
+
+    pub fn resolve_pending_action(
+        &self,
+        id: Uuid,
+        status: PendingActionStatus,
+    ) -> Result<Option<PendingAction>, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE pending_actions SET status = ?1, resolved_at = ?2 WHERE id = ?3 AND status = ?4",
+            params![
+                serde_json::to_string(&status)?,
+                Utc::now().to_rfc3339(),
+                id.to_string(),
+                serde_json::to_string(&PendingActionStatus::Pending)?,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_pending_action(id)
+    }
+
+    pub fn create_restore_point(
+        &self,
+        session_id: Uuid,
+        path: &str,
+        original_text: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO restore_points (id, session_id, path, original_text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                Uuid::new_v4().to_string(),
+                session_id.to_string(),
+                path,
+                original_text,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn set_session_status(
         &self,
         id: Uuid,
@@ -192,9 +271,63 @@ impl SessionStore {
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_actions (
+                id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                tool_call TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS restore_points (
+                id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                original_text TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
             );",
         )?;
         Ok(())
+    }
+
+    fn row_to_pending_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingAction> {
+        let id: String = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let tool_call: String = row.get(2)?;
+        let status: String = row.get(3)?;
+        let created_at: String = row.get(4)?;
+        let resolved_at: Option<String> = row.get(5)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(PendingAction {
+            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::Identifier(error)))?,
+            session_id: Uuid::parse_str(&session_id)
+                .map_err(|error| parse(StoreError::Identifier(error)))?,
+            tool_call: serde_json::from_str(&tool_call)
+                .map_err(|error| parse(StoreError::InvalidData(error)))?,
+            status: serde_json::from_str(&status)
+                .map_err(|error| parse(StoreError::InvalidData(error)))?,
+            created_at: DateTime::parse_from_rfc3339(&created_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+            resolved_at: resolved_at
+                .map(|value| {
+                    DateTime::parse_from_rfc3339(&value)
+                        .map(|timestamp| timestamp.with_timezone(&Utc))
+                })
+                .transpose()
+                .map_err(|error| parse(StoreError::Timestamp(error)))?,
+        })
     }
 
     fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {

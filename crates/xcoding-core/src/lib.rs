@@ -6,8 +6,8 @@ use serde_json::Value;
 use thiserror::Error;
 use xcoding_protocol::{
     ChatParams, ChatResult, CreateSessionParams, CreateSessionResult, JsonRpcRequest,
-    JsonRpcResponse, ListSessionsParams, ListSessionsResult, Message, MessageRole, PingResult,
-    RpcError, Session, SessionStatus,
+    JsonRpcResponse, ListSessionsParams, ListSessionsResult, Message, MessageRole, PendingAction,
+    PendingActionStatus, PingResult, RpcError, Session, SessionStatus, ToolCall,
 };
 use xcoding_store::{SessionStore, StoreError};
 
@@ -82,6 +82,67 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    pub fn session(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+        self.store
+            .get_session(session_id)?
+            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))
+    }
+
+    pub fn create_pending_action(
+        &self,
+        session_id: uuid::Uuid,
+        tool_call: ToolCall,
+    ) -> Result<PendingAction, CoreError> {
+        self.store
+            .create_pending_action(session_id, tool_call)
+            .map_err(CoreError::from)
+    }
+
+    pub fn resolve_pending_action(
+        &self,
+        session_id: uuid::Uuid,
+        action_id: uuid::Uuid,
+        approved: bool,
+    ) -> Result<PendingAction, CoreError> {
+        let action = self.store.get_pending_action(action_id)?.ok_or_else(|| {
+            CoreError::InvalidInput(format!("pending action not found: {action_id}"))
+        })?;
+        if action.session_id != session_id {
+            return Err(CoreError::InvalidInput(
+                "pending action does not belong to this session".to_owned(),
+            ));
+        }
+        let status = if approved {
+            PendingActionStatus::Approved
+        } else {
+            PendingActionStatus::Rejected
+        };
+        self.store
+            .resolve_pending_action(action_id, status)?
+            .ok_or_else(|| {
+                CoreError::InvalidInput("pending action has already been resolved".to_owned())
+            })
+    }
+
+    pub fn pause_chat(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+        self.set_status(session_id, SessionStatus::NeedUser)
+    }
+
+    pub fn resume_chat(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+        self.set_status(session_id, SessionStatus::Running)
+    }
+
+    pub fn create_restore_point(
+        &self,
+        session_id: uuid::Uuid,
+        path: &str,
+        original_text: Option<&str>,
+    ) -> Result<(), CoreError> {
+        self.store
+            .create_restore_point(session_id, path, original_text)
+            .map_err(CoreError::from)
+    }
+
     pub fn record_tool_message(
         &self,
         session_id: uuid::Uuid,
@@ -100,7 +161,10 @@ impl CoreService {
             .store
             .append_message(session_id, MessageRole::Assistant, content)?;
         let session = self.set_status(session_id, SessionStatus::Done)?;
-        Ok(ChatResult { session, message })
+        Ok(ChatResult {
+            session,
+            message: Some(message),
+        })
     }
 
     pub fn fail_chat(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
@@ -229,7 +293,10 @@ mod tests {
             .complete_chat(session.id, "XCoding is a local coding agent.")
             .expect("chat completes");
         assert_eq!(result.session.status, SessionStatus::Done);
-        assert_eq!(result.message.role, MessageRole::Assistant);
+        assert_eq!(
+            result.message.expect("assistant message").role,
+            MessageRole::Assistant
+        );
         let messages = core.messages(session.id).expect("messages");
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].role, MessageRole::Tool);
