@@ -70,6 +70,12 @@ impl CoreService {
         Ok(session)
     }
 
+    pub fn list_sessions(&self, workspace_root: Option<&str>) -> Result<Vec<Session>, CoreError> {
+        self.store
+            .list_sessions(workspace_root)
+            .map_err(CoreError::from)
+    }
+
     pub fn messages(&self, session_id: uuid::Uuid) -> Result<Vec<Message>, CoreError> {
         self.store
             .list_messages(session_id)
@@ -114,7 +120,7 @@ impl CoreService {
         let result = match request.method.as_str() {
             "system.ping" => Ok(serde_json::to_value(self.ping()).expect("ping serializes")),
             "session.create" => self.create_session(request.params),
-            "session.list" => self.list_sessions(request.params),
+            "session.list" => self.list_sessions_rpc(request.params),
             _ => return JsonRpcResponse::failure(id, RpcError::method_not_found(request.method)),
         };
 
@@ -146,7 +152,7 @@ impl CoreService {
             .map_err(|error| RpcError::internal(error.to_string()))
     }
 
-    fn list_sessions(&self, params: Value) -> Result<Value, RpcError> {
+    fn list_sessions_rpc(&self, params: Value) -> Result<Value, RpcError> {
         let params: ListSessionsParams = serde_json::from_value(params).map_err(|error| {
             RpcError::invalid_params(format!("invalid session.list params: {error}"))
         })?;

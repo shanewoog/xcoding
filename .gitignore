@@ -9,3 +9,4 @@ target/
 **/.xcoding/*.db
 apps/desktop/src-tauri/target/
 *.tsbuildinfo
+apps/desktop/src-tauri/gen/
