@@ -1,0 +1,45 @@
+# Session Recovery And Safety
+
+XCoding persists each session in the local SQLite database at `<workspace>/.xcoding/xcoding.db` for the CLI and in the application data directory for Desktop. A saved session includes messages, tool events, approval requests, restore points, and the current session status.
+
+## Permission Modes
+
+`ask` is the default. XCoding reads the workspace automatically, but pauses before every patch or command. The pending action and its patch preview are stored, so approval can continue after the CLI or Desktop restarts.
+
+`auto-edit` applies ordinary file patches without a prompt. Commands still require approval, and high-risk paths such as `.git` and `.xcoding` remain protected. Use this mode only for a workspace you are ready to let XCoding modify.
+
+## Session Commands
+
+```powershell
+xcoding session list --workspace <path>
+xcoding session show <session-id> --workspace <path>
+xcoding session approve <session-id> <action-id> --workspace <path>
+xcoding session reject <session-id> <action-id> --workspace <path>
+xcoding session rollback <session-id> <restore-point-id> --workspace <path>
+xcoding session cancel <session-id> --workspace <path>
+```
+
+`session show` prints the stored session detail as JSON. It includes the action IDs needed for approval or rejection and the restore point IDs needed for rollback.
+
+## Rollback
+
+Every successful patch creates a restore point containing the original and applied file content. Rollback is conflict-protected: XCoding restores a file only when its current content exactly matches the content that XCoding applied. It therefore refuses to overwrite a subsequent human or tool edit.
+
+A restore point for a newly created file removes that file during rollback. Older restore points that predate applied-content storage are intentionally not rollbackable.
+
+On Windows, replacing an existing file requires deleting the destination before renaming the temporary file. XCoding cleans up its temporary file when a rename fails, but that replacement step is not atomic on Windows.
+
+## Cancellation
+
+`session cancel` is for a session waiting at an approval prompt. It marks the session as cancelled, rejects its remaining pending actions, and prevents a later approval from executing them.
+
+This release does not yet interrupt an active cloud stream or a command already running. Supporting that safely requires concurrent request handling, cancellation tokens, and subprocess termination, and is a later milestone.
+
+## Credentials
+
+XCoding does not store cloud credentials in the repository or its session database. Configure the OpenAI-compatible provider through environment variables:
+
+```powershell
+$env:OPENAI_API_KEY = "..."
+$env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # optional
+```

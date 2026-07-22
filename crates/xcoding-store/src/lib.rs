@@ -7,8 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_protocol::{
-    CreateSessionParams, Message, MessageRole, PendingAction, PendingActionStatus, Session,
-    SessionStatus, ToolCall,
+    CreateSessionParams, Message, MessageRole, PendingAction, PendingActionStatus,
+    PersistedSessionEvent, RestorePoint, Session, SessionEvent, SessionStatus, ToolCall,
 };
 
 #[derive(Debug, Error)]
@@ -209,24 +209,110 @@ impl SessionStore {
         self.get_pending_action(id)
     }
 
+    pub fn reject_pending_actions(&self, session_id: Uuid) -> Result<(), StoreError> {
+        let status = serde_json::to_string(&PendingActionStatus::Rejected)?;
+        self.connection.execute(
+            "UPDATE pending_actions
+             SET status = ?1, resolved_at = ?2
+             WHERE session_id = ?3 AND status = ?4",
+            params![
+                status,
+                Utc::now().to_rfc3339(),
+                session_id.to_string(),
+                serde_json::to_string(&PendingActionStatus::Pending)?,
+            ],
+        )?;
+        Ok(())
+    }
     pub fn create_restore_point(
         &self,
         session_id: Uuid,
         path: &str,
         original_text: Option<&str>,
-    ) -> Result<(), StoreError> {
+        applied_text: &str,
+    ) -> Result<RestorePoint, StoreError> {
+        let restore_point = RestorePoint {
+            id: Uuid::new_v4(),
+            session_id,
+            path: path.to_owned(),
+            original_text: original_text.map(str::to_owned),
+            applied_text: Some(applied_text.to_owned()),
+            created_at: Utc::now(),
+        };
         self.connection.execute(
-            "INSERT INTO restore_points (id, session_id, path, original_text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO restore_points (id, session_id, path, original_text, applied_text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
-                Uuid::new_v4().to_string(),
-                session_id.to_string(),
-                path,
-                original_text,
-                Utc::now().to_rfc3339(),
+                restore_point.id.to_string(),
+                restore_point.session_id.to_string(),
+                restore_point.path,
+                restore_point.original_text,
+                restore_point.applied_text,
+                restore_point.created_at.to_rfc3339(),
             ],
         )?;
-        Ok(())
+        Ok(restore_point)
+    }
+
+    pub fn list_pending_actions(&self, session_id: Uuid) -> Result<Vec<PendingAction>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, tool_call, status, created_at, resolved_at
+             FROM pending_actions WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = statement.query_map([session_id.to_string()], Self::row_to_pending_action)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_restore_points(&self, session_id: Uuid) -> Result<Vec<RestorePoint>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, path, original_text, applied_text, created_at
+             FROM restore_points WHERE session_id = ?1 ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let rows = statement.query_map([session_id.to_string()], Self::row_to_restore_point)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn get_restore_point(&self, id: Uuid) -> Result<Option<RestorePoint>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, path, original_text, applied_text, created_at
+             FROM restore_points WHERE id = ?1",
+                [id.to_string()],
+                Self::row_to_restore_point,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn record_event(&self, event: &SessionEvent) -> Result<PersistedSessionEvent, StoreError> {
+        let persisted = PersistedSessionEvent {
+            id: Uuid::new_v4(),
+            session_id: session_id_for_event(event),
+            event: event.clone(),
+            created_at: Utc::now(),
+        };
+        self.connection.execute(
+            "INSERT INTO session_events (id, session_id, event, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                persisted.id.to_string(),
+                persisted.session_id.to_string(),
+                serde_json::to_string(&persisted.event)?,
+                persisted.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(persisted)
+    }
+
+    pub fn list_events(&self, session_id: Uuid) -> Result<Vec<PersistedSessionEvent>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, event, created_at FROM session_events
+             WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = statement.query_map([session_id.to_string()], Self::row_to_event)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn set_session_status(
@@ -288,10 +374,36 @@ impl SessionStore {
                 session_id TEXT NOT NULL,
                 path TEXT NOT NULL,
                 original_text TEXT,
+                applied_text TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS session_events (
+                id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                event TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );",
         )?;
+        self.ensure_column("restore_points", "applied_text", "TEXT")?;
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, definition: &str) -> Result<(), StoreError> {
+        let columns = {
+            let mut statement = self
+                .connection
+                .prepare(&format!("PRAGMA table_info({table})"))?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if !columns.iter().any(|existing| existing == column) {
+            self.connection.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))?;
+        }
         Ok(())
     }
 
@@ -327,6 +439,54 @@ impl SessionStore {
                 })
                 .transpose()
                 .map_err(|error| parse(StoreError::Timestamp(error)))?,
+        })
+    }
+
+    fn row_to_restore_point(row: &rusqlite::Row<'_>) -> rusqlite::Result<RestorePoint> {
+        let id: String = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let created_at: String = row.get(5)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(RestorePoint {
+            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::Identifier(error)))?,
+            session_id: Uuid::parse_str(&session_id)
+                .map_err(|error| parse(StoreError::Identifier(error)))?,
+            path: row.get(2)?,
+            original_text: row.get(3)?,
+            applied_text: row.get(4)?,
+            created_at: DateTime::parse_from_rfc3339(&created_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+        })
+    }
+
+    fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedSessionEvent> {
+        let id: String = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let event: String = row.get(2)?;
+        let created_at: String = row.get(3)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(PersistedSessionEvent {
+            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::Identifier(error)))?,
+            session_id: Uuid::parse_str(&session_id)
+                .map_err(|error| parse(StoreError::Identifier(error)))?,
+            event: serde_json::from_str(&event)
+                .map_err(|error| parse(StoreError::InvalidData(error)))?,
+            created_at: DateTime::parse_from_rfc3339(&created_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
         })
     }
 
@@ -389,6 +549,21 @@ impl SessionStore {
                 .map_err(|error| parse(StoreError::Timestamp(error)))?
                 .with_timezone(&Utc),
         })
+    }
+}
+
+fn session_id_for_event(event: &SessionEvent) -> Uuid {
+    match event {
+        SessionEvent::TextDelta { session_id, .. }
+        | SessionEvent::MessageCompleted { session_id, .. }
+        | SessionEvent::Plan { session_id, .. }
+        | SessionEvent::ToolStart { session_id, .. }
+        | SessionEvent::ToolEnd { session_id, .. }
+        | SessionEvent::PatchPreview { session_id, .. }
+        | SessionEvent::ApprovalRequested { session_id, .. }
+        | SessionEvent::RestorePointRolledBack { session_id, .. }
+        | SessionEvent::SessionCancelled { session_id, .. }
+        | SessionEvent::Error { session_id, .. } => *session_id,
     }
 }
 

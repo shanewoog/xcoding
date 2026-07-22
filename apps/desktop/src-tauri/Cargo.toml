@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+uuid = { version = "1", features = ["serde", "v4"] }
 xcoding-agent = { path = "../../../crates/xcoding-agent" }
 xcoding-core = { path = "../../../crates/xcoding-core" }
 xcoding-protocol = { path = "../../../crates/xcoding-protocol" }

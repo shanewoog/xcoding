@@ -56,6 +56,14 @@ export interface ListSessionsResult {
   sessions: Session[];
 }
 
+export interface GetSessionDetailParams {
+  session_id: string;
+}
+
+export interface GetSessionDetailResult {
+  detail: SessionDetail;
+}
+
 export interface ChatParams {
   workspace_root: string;
   message: string;
@@ -68,6 +76,24 @@ export interface ChatParams {
 export interface ChatResult {
   session: Session;
   message?: Message;
+}
+
+export interface RollbackRestorePointParams {
+  session_id: string;
+  restore_point_id: string;
+}
+
+export interface RollbackRestorePointResult {
+  session: Session;
+  restore_point: RestorePoint;
+}
+
+export interface CancelSessionParams {
+  session_id: string;
+}
+
+export interface CancelSessionResult {
+  session: Session;
 }
 
 export interface ResolveActionParams {
@@ -103,6 +129,30 @@ export interface PatchPreview {
   file_existed: boolean;
   old_text: string;
   new_text: string;
+}
+
+export interface RestorePoint {
+  id: string;
+  session_id: string;
+  path: string;
+  original_text?: string;
+  applied_text?: string;
+  created_at: string;
+}
+
+export interface PersistedSessionEvent {
+  id: string;
+  session_id: string;
+  event: SessionEvent;
+  created_at: string;
+}
+
+export interface SessionDetail {
+  session: Session;
+  messages: Message[];
+  pending_actions: PendingAction[];
+  restore_points: RestorePoint[];
+  events: PersistedSessionEvent[];
 }
 
 export interface PlanStep {
@@ -149,6 +199,17 @@ export type SessionEvent =
       session_id: string;
       action: PendingAction;
       summary: string;
+    }
+  | {
+      type: "restore_point_rolled_back";
+      session_id: string;
+      restore_point: RestorePoint;
+      summary: string;
+    }
+  | {
+      type: "session_cancelled";
+      session_id: string;
+      message: string;
     }
   | {
       type: "error";

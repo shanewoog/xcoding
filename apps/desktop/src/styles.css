@@ -122,3 +122,32 @@ button:hover:not(:disabled) { background: #105851; }
   .trace-panel section + section { margin-top: 1.5rem; }
   .chat-header, .composer { padding-left: 1rem; padding-right: 1rem; }
 }
+.header-controls, .mode-control, .review-actions, .restore-point {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+.mode-control { color: #65707b; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; }
+.mode-control select { border: 1px solid #c8cdd3; border-radius: 4px; background: #fff; color: #1b2028; padding: 0.35rem; }
+.message { border-left: 3px solid #c4cbd1; color: #27313b; display: grid; gap: 0.35rem; line-height: 1.55; margin-bottom: 1rem; max-width: 76ch; padding-left: 0.75rem; white-space: pre-wrap; }
+.message p { color: #65707b; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; }
+.message-user { border-color: #567ca3; }
+.message-assistant { border-color: #21836f; }
+.message-tool { border-color: #d99929; }
+.review-panel { display: grid; gap: 0.65rem; }
+.review-panel > strong { color: #33404b; font-size: 0.9rem; }
+.diff-preview { background: #f4f6f6; border: 1px solid #d7d9dd; font-size: 0.72rem; margin: 0; max-height: 12rem; overflow: auto; padding: 0.65rem; white-space: pre-wrap; }
+.diff-preview span { display: block; }
+.diff-preview span:first-child { color: #9b3535; }
+.diff-preview span:last-child { color: #176b64; }
+.reject-button { background: #a84747; border-color: #a84747; }
+.reject-button:hover:not(:disabled) { background: #8c3434; }
+.restore-list { display: grid; gap: 0.55rem; margin-top: 0.75rem; }
+.restore-point { align-items: start; border-left: 3px solid #c4cbd1; justify-content: space-between; padding-left: 0.6rem; }
+.restore-point > div { display: grid; gap: 0.2rem; min-width: 0; }
+.restore-point strong { color: #33404b; font-size: 0.83rem; overflow-wrap: anywhere; }
+.restore-point .quiet-button { flex: 0 0 auto; font-size: 0.76rem; padding: 0.35rem 0.5rem; }
+@media (max-width: 620px) {
+  .chat-header { align-items: flex-start; }
+  .header-controls { align-items: flex-end; flex-direction: column-reverse; }
+}

@@ -239,6 +239,35 @@ pub struct PatchPreview {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RestorePoint {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_text: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PersistedSessionEvent {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub event: SessionEvent,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SessionDetail {
+    pub session: Session,
+    pub messages: Vec<Message>,
+    pub pending_actions: Vec<PendingAction>,
+    pub restore_points: Vec<RestorePoint>,
+    pub events: Vec<PersistedSessionEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PlanStep {
     pub id: String,
     pub description: String,
@@ -303,6 +332,16 @@ pub struct ListSessionsResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct GetSessionDetailParams {
+    pub session_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct GetSessionDetailResult {
+    pub detail: SessionDetail,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ChatParams {
     pub workspace_root: String,
     pub message: String,
@@ -321,6 +360,28 @@ pub struct ChatResult {
     pub session: Session,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<Message>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RollbackRestorePointParams {
+    pub session_id: Uuid,
+    pub restore_point_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RollbackRestorePointResult {
+    pub session: Session,
+    pub restore_point: RestorePoint,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CancelSessionParams {
+    pub session_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CancelSessionResult {
+    pub session: Session,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -371,6 +432,15 @@ pub enum SessionEvent {
         session_id: Uuid,
         action: PendingAction,
         summary: String,
+    },
+    RestorePointRolledBack {
+        session_id: Uuid,
+        restore_point: RestorePoint,
+        summary: String,
+    },
+    SessionCancelled {
+        session_id: Uuid,
+        message: String,
     },
     Error {
         session_id: Uuid,

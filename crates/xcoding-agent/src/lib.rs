@@ -8,7 +8,8 @@ use xcoding_core::{CoreError, CoreService};
 use xcoding_policy::{PermissionDecision, evaluate};
 use xcoding_protocol::{
     ChatParams, ChatResult, MessageRole, PlanStep, ResolveActionParams, ResolveActionResult,
-    Session, SessionEvent, ToolCall, ToolName,
+    RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionEvent, ToolCall,
+    ToolName,
 };
 use xcoding_providers::{
     ChatMessage, OpenAiCompatibleProvider, ProviderError, ProviderEvent, ProviderToolCall,
@@ -55,10 +56,13 @@ impl<'a> AgentService<'a> {
         let result = self.run_session(&session, &mut on_event).await;
         if let Err(error) = &result {
             let _ = self.core.fail_chat(session.id);
-            on_event(SessionEvent::Error {
-                session_id: session.id,
-                message: error.to_string(),
-            });
+            self.emit(
+                &mut on_event,
+                SessionEvent::Error {
+                    session_id: session.id,
+                    message: error.to_string(),
+                },
+            );
         }
         result
     }
@@ -80,11 +84,14 @@ impl<'a> AgentService<'a> {
         let tools = ToolRegistry::new(&session.workspace_root)?;
 
         let output = if params.approved {
-            on_event(SessionEvent::ToolStart {
-                session_id: session.id,
-                tool_call: action.tool_call.clone(),
-                summary: format!("Approved {}", action.tool_call.name.as_str()),
-            });
+            self.emit(
+                &mut on_event,
+                SessionEvent::ToolStart {
+                    session_id: session.id,
+                    tool_call: action.tool_call.clone(),
+                    summary: format!("Approved {}", action.tool_call.name.as_str()),
+                },
+            );
             self.execute_and_record(&session, &tools, &action.tool_call, &mut on_event)?
         } else {
             let output = json!({
@@ -94,12 +101,15 @@ impl<'a> AgentService<'a> {
             })
             .to_string();
             self.core.record_tool_message(session.id, &output)?;
-            on_event(SessionEvent::ToolEnd {
-                session_id: session.id,
-                tool_call: action.tool_call.clone(),
-                success: false,
-                summary: "Action rejected by user".to_owned(),
-            });
+            self.emit(
+                &mut on_event,
+                SessionEvent::ToolEnd {
+                    session_id: session.id,
+                    tool_call: action.tool_call.clone(),
+                    success: false,
+                    summary: "Action rejected by user".to_owned(),
+                },
+            );
             output
         };
 
@@ -108,6 +118,54 @@ impl<'a> AgentService<'a> {
         Ok(ResolveActionResult {
             session: result.session,
             message: result.message,
+        })
+    }
+
+    pub fn rollback<F>(
+        &self,
+        params: RollbackRestorePointParams,
+        mut on_event: F,
+    ) -> Result<RollbackRestorePointResult, AgentError>
+    where
+        F: FnMut(SessionEvent),
+    {
+        let session = self.core.session(params.session_id)?;
+        let restore_point = self
+            .core
+            .restore_point(session.id, params.restore_point_id)?;
+        let expected_text = restore_point.applied_text.as_deref().ok_or_else(|| {
+            AgentError::Core(CoreError::InvalidInput(
+                "restore point was created by an older XCoding version and cannot be safely rolled back"
+                    .to_owned(),
+            ))
+        })?;
+        let tools = ToolRegistry::new(&session.workspace_root)?;
+        let execution = tools.rollback_patch(
+            &restore_point.path,
+            expected_text,
+            restore_point.original_text.as_deref(),
+        )?;
+        self.core.record_tool_message(
+            session.id,
+            json!({
+                "restore_point_id": restore_point.id,
+                "path": restore_point.path,
+                "rolled_back": true,
+                "output": execution.output,
+            })
+            .to_string(),
+        )?;
+        self.emit(
+            &mut on_event,
+            SessionEvent::RestorePointRolledBack {
+                session_id: session.id,
+                restore_point: restore_point.clone(),
+                summary: execution.summary,
+            },
+        );
+        Ok(RollbackRestorePointResult {
+            session: self.core.session(session.id)?,
+            restore_point,
         })
     }
 
@@ -139,26 +197,29 @@ impl<'a> AgentService<'a> {
             },
         ));
 
-        on_event(SessionEvent::Plan {
-            session_id: session.id,
-            steps: vec![
-                PlanStep {
-                    id: "inspect".to_owned(),
-                    description: "Inspect relevant workspace files before changing anything."
-                        .to_owned(),
-                },
-                PlanStep {
-                    id: "change".to_owned(),
-                    description: "Propose a minimal patch and wait for required approval."
-                        .to_owned(),
-                },
-                PlanStep {
-                    id: "verify".to_owned(),
-                    description: "Run approved verification commands and report the result."
-                        .to_owned(),
-                },
-            ],
-        });
+        self.emit(
+            on_event,
+            SessionEvent::Plan {
+                session_id: session.id,
+                steps: vec![
+                    PlanStep {
+                        id: "inspect".to_owned(),
+                        description: "Inspect relevant workspace files before changing anything."
+                            .to_owned(),
+                    },
+                    PlanStep {
+                        id: "change".to_owned(),
+                        description: "Propose a minimal patch and wait for required approval."
+                            .to_owned(),
+                    },
+                    PlanStep {
+                        id: "verify".to_owned(),
+                        description: "Run approved verification commands and report the result."
+                            .to_owned(),
+                    },
+                ],
+            },
+        );
 
         let definitions = tool_definitions();
         for _ in 0..MAX_TOOL_ROUNDS {
@@ -172,10 +233,13 @@ impl<'a> AgentService<'a> {
                 match event? {
                     ProviderEvent::TextDelta(delta) => {
                         content.push_str(&delta);
-                        on_event(SessionEvent::TextDelta {
-                            session_id: session.id,
-                            delta,
-                        });
+                        self.emit(
+                            on_event,
+                            SessionEvent::TextDelta {
+                                session_id: session.id,
+                                delta,
+                            },
+                        );
                     }
                     ProviderEvent::ToolCall(tool_call) => tool_calls.push(tool_call),
                 }
@@ -183,24 +247,30 @@ impl<'a> AgentService<'a> {
 
             if tool_calls.is_empty() {
                 let result = self.core.complete_chat(session.id, content)?;
-                on_event(SessionEvent::MessageCompleted {
-                    session_id: session.id,
-                    message: result
-                        .message
-                        .clone()
-                        .expect("completed chat has a message"),
-                });
+                self.emit(
+                    on_event,
+                    SessionEvent::MessageCompleted {
+                        session_id: session.id,
+                        message: result
+                            .message
+                            .clone()
+                            .expect("completed chat has a message"),
+                    },
+                );
                 return Ok(result);
             }
 
             messages.push(ChatMessage::assistant_tool_calls(tool_calls.clone()));
             for provider_call in tool_calls {
                 let tool_call = protocol_tool_call(provider_call)?;
-                on_event(SessionEvent::ToolStart {
-                    session_id: session.id,
-                    summary: format!("Running {}", tool_call.name.as_str()),
-                    tool_call: tool_call.clone(),
-                });
+                self.emit(
+                    on_event,
+                    SessionEvent::ToolStart {
+                        session_id: session.id,
+                        summary: format!("Running {}", tool_call.name.as_str()),
+                        tool_call: tool_call.clone(),
+                    },
+                );
 
                 let (kind, high_risk) = tools.permission_for(&tool_call)?;
                 match evaluate(&session.mode, kind, high_risk) {
@@ -212,10 +282,13 @@ impl<'a> AgentService<'a> {
                     PermissionDecision::AskUser => {
                         if tool_call.name == ToolName::ApplyPatch {
                             match tools.patch_preview(&tool_call) {
-                                Ok(preview) => on_event(SessionEvent::PatchPreview {
-                                    session_id: session.id,
-                                    preview,
-                                }),
+                                Ok(preview) => self.emit(
+                                    on_event,
+                                    SessionEvent::PatchPreview {
+                                        session_id: session.id,
+                                        preview,
+                                    },
+                                ),
                                 Err(error) => {
                                     let output = self
                                         .record_tool_error(session, &tool_call, error, on_event)?;
@@ -228,11 +301,14 @@ impl<'a> AgentService<'a> {
                             .core
                             .create_pending_action(session.id, tool_call.clone())?;
                         let paused = self.core.pause_chat(session.id)?;
-                        on_event(SessionEvent::ApprovalRequested {
-                            session_id: session.id,
-                            action,
-                            summary: approval_summary(&tool_call),
-                        });
+                        self.emit(
+                            on_event,
+                            SessionEvent::ApprovalRequested {
+                                session_id: session.id,
+                                action,
+                                summary: approval_summary(&tool_call),
+                            },
+                        );
                         return Ok(ChatResult {
                             session: paused,
                             message: None,
@@ -254,6 +330,14 @@ impl<'a> AgentService<'a> {
         Err(AgentError::ToolCallLimit)
     }
 
+    fn emit<F>(&self, on_event: &mut F, event: SessionEvent)
+    where
+        F: FnMut(SessionEvent),
+    {
+        let _ = self.core.record_event(&event);
+        on_event(event);
+    }
+
     fn execute_and_record<F>(
         &self,
         session: &Session,
@@ -272,6 +356,7 @@ impl<'a> AgentService<'a> {
                         session.id,
                         &preview.path,
                         preview.file_existed.then_some(preview.old_text.as_str()),
+                        &preview.new_text,
                     )
                     .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
             }
@@ -283,12 +368,15 @@ impl<'a> AgentService<'a> {
                 let output = serde_json::to_string(&execution.output)
                     .map_err(|error| AgentError::InvalidProviderToolCall(error.to_string()))?;
                 self.core.record_tool_message(session.id, &output)?;
-                on_event(SessionEvent::ToolEnd {
-                    session_id: session.id,
-                    tool_call: tool_call.clone(),
-                    success: true,
-                    summary: execution.summary,
-                });
+                self.emit(
+                    on_event,
+                    SessionEvent::ToolEnd {
+                        session_id: session.id,
+                        tool_call: tool_call.clone(),
+                        success: true,
+                        summary: execution.summary,
+                    },
+                );
                 Ok(output)
             }
             Err(error) => self.record_tool_error(session, tool_call, error, on_event),
@@ -307,12 +395,15 @@ impl<'a> AgentService<'a> {
     {
         let output = json!({ "error": error.to_string() }).to_string();
         self.core.record_tool_message(session.id, &output)?;
-        on_event(SessionEvent::ToolEnd {
-            session_id: session.id,
-            tool_call: tool_call.clone(),
-            success: false,
-            summary: error.to_string(),
-        });
+        self.emit(
+            on_event,
+            SessionEvent::ToolEnd {
+                session_id: session.id,
+                tool_call: tool_call.clone(),
+                success: false,
+                summary: error.to_string(),
+            },
+        );
         Ok(output)
     }
 }

@@ -11,8 +11,8 @@ use tokio::{
 use xcoding_agent::{AgentError, AgentService};
 use xcoding_core::{CoreError, CoreService};
 use xcoding_protocol::{
-    ChatParams, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, ResolveActionParams,
-    RpcError, SessionEvent,
+    CancelSessionParams, CancelSessionResult, ChatParams, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, ResolveActionParams, RollbackRestorePointParams, RpcError, SessionEvent,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -58,6 +58,18 @@ async fn main() {
             }
             Ok(request) if request.method == "session.resolve" => {
                 match handle_resolve(&core, &mut stdout, request).await {
+                    Ok(response) => response,
+                    Err(_) => break,
+                }
+            }
+            Ok(request) if request.method == "session.rollback" => {
+                match handle_rollback(&core, &mut stdout, request).await {
+                    Ok(response) => response,
+                    Err(_) => break,
+                }
+            }
+            Ok(request) if request.method == "session.cancel" => {
+                match handle_cancel(&core, &mut stdout, request).await {
                     Ok(response) => response,
                     Err(_) => break,
                 }
@@ -168,6 +180,76 @@ async fn handle_resolve(
     match outcome {
         Ok(result) => Ok(JsonRpcResponse::success(id, result)),
         Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_agent(error))),
+    }
+}
+
+async fn handle_rollback(
+    core: &CoreService,
+    stdout: &mut Stdout,
+    request: JsonRpcRequest,
+) -> io::Result<JsonRpcResponse> {
+    let id = request.id.clone();
+    if !request.is_valid_version() {
+        return Ok(JsonRpcResponse::failure(
+            id,
+            RpcError::invalid_request("jsonrpc must be exactly \"2.0\""),
+        ));
+    }
+    let params: RollbackRestorePointParams = match serde_json::from_value(request.params) {
+        Ok(params) => params,
+        Err(error) => {
+            return Ok(JsonRpcResponse::failure(
+                id,
+                RpcError::invalid_params(format!("invalid session.rollback params: {error}")),
+            ));
+        }
+    };
+    let mut events = Vec::new();
+    let outcome = AgentService::new(core).rollback(params, |event| events.push(event));
+    for event in events {
+        emit_event(stdout, event).await?;
+    }
+    match outcome {
+        Ok(result) => Ok(JsonRpcResponse::success(id, result)),
+        Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_agent(error))),
+    }
+}
+
+async fn handle_cancel(
+    core: &CoreService,
+    stdout: &mut Stdout,
+    request: JsonRpcRequest,
+) -> io::Result<JsonRpcResponse> {
+    let id = request.id.clone();
+    if !request.is_valid_version() {
+        return Ok(JsonRpcResponse::failure(
+            id,
+            RpcError::invalid_request("jsonrpc must be exactly \"2.0\""),
+        ));
+    }
+    let params: CancelSessionParams = match serde_json::from_value(request.params) {
+        Ok(params) => params,
+        Err(error) => {
+            return Ok(JsonRpcResponse::failure(
+                id,
+                RpcError::invalid_params(format!("invalid session.cancel params: {error}")),
+            ));
+        }
+    };
+    match core.cancel_session(params.session_id) {
+        Ok(session) => {
+            let event = SessionEvent::SessionCancelled {
+                session_id: session.id,
+                message: "Session cancelled by user".to_owned(),
+            };
+            let _ = core.record_event(&event);
+            emit_event(stdout, event).await?;
+            Ok(JsonRpcResponse::success(
+                id,
+                CancelSessionResult { session },
+            ))
+        }
+        Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_core(error))),
     }
 }
 

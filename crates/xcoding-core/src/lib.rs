@@ -5,9 +5,11 @@ use std::path::Path;
 use serde_json::Value;
 use thiserror::Error;
 use xcoding_protocol::{
-    ChatParams, ChatResult, CreateSessionParams, CreateSessionResult, JsonRpcRequest,
+    CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateSessionParams,
+    CreateSessionResult, GetSessionDetailParams, GetSessionDetailResult, JsonRpcRequest,
     JsonRpcResponse, ListSessionsParams, ListSessionsResult, Message, MessageRole, PendingAction,
-    PendingActionStatus, PingResult, RpcError, Session, SessionStatus, ToolCall,
+    PendingActionStatus, PersistedSessionEvent, PingResult, RestorePoint, RpcError, Session,
+    SessionDetail, SessionEvent, SessionStatus, ToolCall,
 };
 use xcoding_store::{SessionStore, StoreError};
 
@@ -88,6 +90,53 @@ impl CoreService {
             .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))
     }
 
+    pub fn session_detail(&self, session_id: uuid::Uuid) -> Result<SessionDetail, CoreError> {
+        Ok(SessionDetail {
+            session: self.session(session_id)?,
+            messages: self.store.list_messages(session_id)?,
+            pending_actions: self.store.list_pending_actions(session_id)?,
+            restore_points: self.store.list_restore_points(session_id)?,
+            events: self.store.list_events(session_id)?,
+        })
+    }
+
+    pub fn restore_point(
+        &self,
+        session_id: uuid::Uuid,
+        restore_point_id: uuid::Uuid,
+    ) -> Result<RestorePoint, CoreError> {
+        let restore_point = self
+            .store
+            .get_restore_point(restore_point_id)?
+            .ok_or_else(|| {
+                CoreError::InvalidInput(format!("restore point not found: {restore_point_id}"))
+            })?;
+        if restore_point.session_id != session_id {
+            return Err(CoreError::InvalidInput(
+                "restore point does not belong to this session".to_owned(),
+            ));
+        }
+        Ok(restore_point)
+    }
+
+    pub fn record_event(&self, event: &SessionEvent) -> Result<PersistedSessionEvent, CoreError> {
+        Ok(self.store.record_event(event)?)
+    }
+
+    pub fn cancel_session(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+        let session = self.session(session_id)?;
+        if !matches!(
+            session.status,
+            SessionStatus::Running | SessionStatus::NeedUser
+        ) {
+            return Err(CoreError::InvalidInput(
+                "only active sessions can be cancelled".to_owned(),
+            ));
+        }
+        self.store.reject_pending_actions(session_id)?;
+        self.set_status(session_id, SessionStatus::Cancelled)
+    }
+
     pub fn create_pending_action(
         &self,
         session_id: uuid::Uuid,
@@ -104,6 +153,12 @@ impl CoreService {
         action_id: uuid::Uuid,
         approved: bool,
     ) -> Result<PendingAction, CoreError> {
+        let session = self.session(session_id)?;
+        if session.status != SessionStatus::NeedUser {
+            return Err(CoreError::InvalidInput(
+                "actions can only be resolved while a session is waiting for approval".to_owned(),
+            ));
+        }
         let action = self.store.get_pending_action(action_id)?.ok_or_else(|| {
             CoreError::InvalidInput(format!("pending action not found: {action_id}"))
         })?;
@@ -137,9 +192,10 @@ impl CoreService {
         session_id: uuid::Uuid,
         path: &str,
         original_text: Option<&str>,
-    ) -> Result<(), CoreError> {
+        applied_text: &str,
+    ) -> Result<RestorePoint, CoreError> {
         self.store
-            .create_restore_point(session_id, path, original_text)
+            .create_restore_point(session_id, path, original_text, applied_text)
             .map_err(CoreError::from)
     }
 
@@ -185,6 +241,8 @@ impl CoreService {
             "system.ping" => Ok(serde_json::to_value(self.ping()).expect("ping serializes")),
             "session.create" => self.create_session(request.params),
             "session.list" => self.list_sessions_rpc(request.params),
+            "session.detail" => self.session_detail_rpc(request.params),
+            "session.cancel" => self.cancel_session_rpc(request.params),
             _ => return JsonRpcResponse::failure(id, RpcError::method_not_found(request.method)),
         };
 
@@ -227,12 +285,39 @@ impl CoreService {
         serde_json::to_value(ListSessionsResult { sessions })
             .map_err(|error| RpcError::internal(error.to_string()))
     }
+
+    fn session_detail_rpc(&self, params: Value) -> Result<Value, RpcError> {
+        let params: GetSessionDetailParams = serde_json::from_value(params).map_err(|error| {
+            RpcError::invalid_params(format!("invalid session.detail params: {error}"))
+        })?;
+        let detail = self
+            .session_detail(params.session_id)
+            .map_err(|error| RpcError::internal(error.to_string()))?;
+        serde_json::to_value(GetSessionDetailResult { detail })
+            .map_err(|error| RpcError::internal(error.to_string()))
+    }
+
+    fn cancel_session_rpc(&self, params: Value) -> Result<Value, RpcError> {
+        let params: CancelSessionParams = serde_json::from_value(params).map_err(|error| {
+            RpcError::invalid_params(format!("invalid session.cancel params: {error}"))
+        })?;
+        let session = self
+            .cancel_session(params.session_id)
+            .map_err(|error| match error {
+                CoreError::InvalidInput(message) => RpcError::invalid_params(message),
+                other => RpcError::internal(other.to_string()),
+            })?;
+        serde_json::to_value(CancelSessionResult { session })
+            .map_err(|error| RpcError::internal(error.to_string()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use xcoding_protocol::{JsonRpcRequest, JsonRpcResponse, Mode};
+    use xcoding_protocol::{
+        JsonRpcRequest, JsonRpcResponse, Mode, PlanStep, SessionEvent, ToolCall, ToolName,
+    };
 
     use super::*;
 
@@ -301,5 +386,67 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].role, MessageRole::Tool);
         assert_eq!(messages[2].role, MessageRole::Assistant);
+    }
+    #[test]
+    fn details_persist_events_restore_points_and_pending_actions() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Update the configuration".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-4.1".to_owned(),
+                title: None,
+            })
+            .expect("chat starts");
+        let action = core
+            .create_pending_action(
+                session.id,
+                ToolCall {
+                    id: "patch_1".to_owned(),
+                    name: ToolName::ApplyPatch,
+                    arguments: json!({ "path": "settings.txt" }),
+                },
+            )
+            .expect("pending action saves");
+        let restore_point = core
+            .create_restore_point(session.id, "settings.txt", Some("old"), "new")
+            .expect("restore point saves");
+        core.record_event(&SessionEvent::Plan {
+            session_id: session.id,
+            steps: vec![PlanStep {
+                id: "inspect".to_owned(),
+                description: "Inspect settings".to_owned(),
+            }],
+        })
+        .expect("event saves");
+        core.pause_chat(session.id).expect("chat pauses");
+
+        let detail = core.session_detail(session.id).expect("detail loads");
+        assert_eq!(detail.messages.len(), 1);
+        assert_eq!(detail.pending_actions, vec![action.clone()]);
+        assert_eq!(detail.restore_points, vec![restore_point]);
+        assert_eq!(detail.events.len(), 1);
+
+        let cancelled = core
+            .cancel_session(session.id)
+            .expect("paused session cancels");
+        assert_eq!(cancelled.status, SessionStatus::Cancelled);
+        assert_eq!(
+            core.session_detail(session.id)
+                .expect("cancelled session detail loads")
+                .pending_actions[0]
+                .status,
+            PendingActionStatus::Rejected
+        );
+        assert!(matches!(
+            core.resolve_pending_action(session.id, action.id, true),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            core.cancel_session(session.id),
+            Err(CoreError::InvalidInput(_))
+        ));
     }
 }

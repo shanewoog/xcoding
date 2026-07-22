@@ -1549,6 +1549,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "uuid",
  "xcoding-policy",
  "xcoding-protocol",
 ]

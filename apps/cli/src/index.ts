@@ -5,14 +5,17 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioRpcClient } from "@xcoding/client";
 import type {
+  CancelSessionResult,
   ChatParams,
   ChatResult,
   CreateSessionParams,
   CreateSessionResult,
+  GetSessionDetailResult,
   ListSessionsResult,
   PingResult,
   ResolveActionParams,
   ResolveActionResult,
+  RollbackRestorePointResult,
   SessionEvent,
 } from "@xcoding/protocol";
 
@@ -82,20 +85,6 @@ async function runSessionCommand(
       console.log(JSON.stringify(result.session, null, 2));
       return;
     }
-    case "approve":
-    case "reject": {
-      const sessionId = args[1];
-      const actionId = args[2];
-      if (!sessionId || !actionId) {
-        throw new Error(`expected session ${subcommand} <session-id> <action-id>`);
-      }
-      await runResolveAction(client, {
-        session_id: sessionId,
-        action_id: actionId,
-        approved: subcommand === "approve",
-      });
-      return;
-    }
     case "list": {
       const result = await client.request<ListSessionsResult>("session.list", {
         workspace_root: workspace,
@@ -109,8 +98,41 @@ async function runSessionCommand(
       }
       return;
     }
+    case "show": {
+      const sessionId = requiredArgument(args[1], "expected `session show <session-id>`");
+      const result = await client.request<GetSessionDetailResult>("session.detail", { session_id: sessionId });
+      console.log(JSON.stringify(result.detail, null, 2));
+      return;
+    }
+    case "approve":
+    case "reject": {
+      const sessionId = requiredArgument(args[1], `expected session ${subcommand} <session-id> <action-id>`);
+      const actionId = requiredArgument(args[2], `expected session ${subcommand} <session-id> <action-id>`);
+      await runResolveAction(client, {
+        session_id: sessionId,
+        action_id: actionId,
+        approved: subcommand === "approve",
+      });
+      return;
+    }
+    case "rollback": {
+      const sessionId = requiredArgument(args[1], "expected `session rollback <session-id> <restore-point-id>`");
+      const restorePointId = requiredArgument(args[2], "expected `session rollback <session-id> <restore-point-id>`");
+      const result = await runWithEvents<RollbackRestorePointResult>(client, "session.rollback", {
+        session_id: sessionId,
+        restore_point_id: restorePointId,
+      });
+      console.log(`Restored ${result.restore_point.path} in session ${result.session.id}: ${result.session.status}`);
+      return;
+    }
+    case "cancel": {
+      const sessionId = requiredArgument(args[1], "expected `session cancel <session-id>`");
+      const result = await runWithEvents<CancelSessionResult>(client, "session.cancel", { session_id: sessionId });
+      console.log(`Session ${result.session.id}: ${result.session.status}`);
+      return;
+    }
     default:
-      throw new Error("expected `session create`, `session list`, `session approve`, or `session reject`");
+      throw new Error("expected `session create`, `session list`, `session show`, `session approve`, `session reject`, `session rollback`, or `session cancel`");
   }
 }
 
@@ -132,87 +154,78 @@ async function runChatCommand(
     provider: option(args, "--provider"),
     model: option(args, "--model"),
   };
-
-  let receivedText = false;
-  const unsubscribe = client.onNotification((notification) => {
-    if (notification.method !== "session.event") {
-      return;
-    }
-
-    const event = notification.params as SessionEvent;
-    switch (event.type) {
-      case "text_delta":
-        receivedText = true;
-        process.stdout.write(event.delta);
-        break;
-      case "plan":
-        process.stderr.write(`Plan:\n${event.steps.map((step) => `- ${step.description}`).join("\n")}\n`);
-        break;
-      case "tool_start":
-        process.stderr.write(`> ${event.summary}\n`);
-        break;
-      case "tool_end":
-        process.stderr.write(`${event.success ? "done" : "failed"}: ${event.summary}\n`);
-        break;
-      case "patch_preview":
-        process.stderr.write(`Patch: ${event.preview.path}\n`);
-        break;
-      case "approval_requested":
-        process.stderr.write(`Approval required: ${event.action.id} (${event.summary})\n`);
-        break;
-      default:
-        break;
-    }
-  });
-
-  try {
-    const result = await client.request<ChatResult>("session.chat", withoutUndefined(params));
-    if (receivedText) {
-      process.stdout.write("\n");
-    }
-    console.log(`Session ${result.session.id}: ${result.session.status}`);
-  } catch (error) {
-    if (receivedText) {
-      process.stdout.write("\n");
-    }
-    throw error;
-  } finally {
-    unsubscribe();
-  }
+  const result = await runWithEvents<ChatResult>(client, "session.chat", withoutUndefined(params));
+  console.log(`Session ${result.session.id}: ${result.session.status}`);
 }
 
 async function runResolveAction(client: StdioRpcClient, params: ResolveActionParams): Promise<void> {
+  const result = await runWithEvents<ResolveActionResult>(client, "session.resolve", params);
+  console.log(`Session ${result.session.id}: ${result.session.status}`);
+}
+
+async function runWithEvents<TResult>(
+  client: StdioRpcClient,
+  method: string,
+  params: object,
+): Promise<TResult> {
   let receivedText = false;
   const unsubscribe = client.onNotification((notification) => {
     if (notification.method !== "session.event") return;
     const event = notification.params as SessionEvent;
-    if (event.type === "text_delta") {
-      receivedText = true;
-      process.stdout.write(event.delta);
-    } else if (event.type === "tool_start") {
-      process.stderr.write(`> ${event.summary}\n`);
-    } else if (event.type === "tool_end") {
-      process.stderr.write(`${event.success ? "done" : "failed"}: ${event.summary}\n`);
-    } else if (event.type === "patch_preview") {
-      process.stderr.write(`Patch: ${event.preview.path}\n`);
-    } else if (event.type === "approval_requested") {
-      process.stderr.write(`Approval required: ${event.action.id} (${event.summary})\n`);
-    }
+    if (event.type === "text_delta") receivedText = true;
+    printEvent(event);
   });
+
   try {
-    const result = await client.request<ResolveActionResult>("session.resolve", params);
-    if (receivedText) process.stdout.write("\n");
-    console.log(`Session ${result.session.id}: ${result.session.status}`);
+    return await client.request<TResult>(method, params);
   } finally {
+    if (receivedText) process.stdout.write("\n");
     unsubscribe();
   }
 }
 
+function printEvent(event: SessionEvent): void {
+  switch (event.type) {
+    case "text_delta":
+      process.stdout.write(event.delta);
+      return;
+    case "plan":
+      process.stderr.write(`Plan:\n${event.steps.map((step) => `- ${step.description}`).join("\n")}\n`);
+      return;
+    case "tool_start":
+      process.stderr.write(`> ${event.summary}\n`);
+      return;
+    case "tool_end":
+      process.stderr.write(`${event.success ? "done" : "failed"}: ${event.summary}\n`);
+      return;
+    case "patch_preview":
+      process.stderr.write(`Patch: ${event.preview.path}\n`);
+      return;
+    case "approval_requested":
+      process.stderr.write(`Approval required: ${event.action.id} (${event.summary})\n`);
+      return;
+    case "restore_point_rolled_back":
+      process.stderr.write(`Restored: ${event.restore_point.path}\n`);
+      return;
+    case "session_cancelled":
+      process.stderr.write(`${event.message}\n`);
+      return;
+    case "error":
+      process.stderr.write(`Error: ${event.message}\n`);
+      return;
+    case "message_completed":
+      return;
+  }
+}
+
+function requiredArgument(value: string | undefined, message: string): string {
+  if (!value) throw new Error(message);
+  return value;
+}
+
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
-  if (index < 0) {
-    return undefined;
-  }
+  if (index < 0) return undefined;
 
   const value = args[index + 1];
   if (!value || value.startsWith("--")) {
@@ -223,19 +236,15 @@ function option(args: string[], name: string): string | undefined {
 
 function positionalArguments(args: string[]): string[] {
   const values: string[] = [];
-
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (optionNames.has(argument)) {
       index += 1;
       continue;
     }
-    if (argument.startsWith("--")) {
-      throw new Error(`unknown option: ${argument}`);
-    }
+    if (argument.startsWith("--")) throw new Error(`unknown option: ${argument}`);
     values.push(argument);
   }
-
   return values;
 }
 
@@ -244,14 +253,17 @@ function withoutUndefined(value: object): Record<string, unknown> {
 }
 
 function printUsage(): void {
-  console.log(`XCoding Phase 1B CLI
+  console.log(`XCoding CLI
 
 Usage:
   xcoding ping [--workspace <path>] [--server <path>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
   xcoding session list [--workspace <path>]
+  xcoding session show <session-id> [--workspace <path>]
   xcoding session approve <session-id> <action-id> [--workspace <path>]
   xcoding session reject <session-id> <action-id> [--workspace <path>]
+  xcoding session rollback <session-id> <restore-point-id> [--workspace <path>]
+  xcoding session cancel <session-id> [--workspace <path>]
   xcoding chat "<message>" [--workspace <path>] [--provider openai] [--model <model>]
 
 Environment:

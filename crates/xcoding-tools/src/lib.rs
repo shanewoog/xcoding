@@ -10,6 +10,7 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
+use uuid::Uuid;
 use xcoding_policy::{PermissionDecision, PermissionKind, evaluate};
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
 
@@ -133,6 +134,33 @@ impl ToolRegistry {
             ToolName::ApplyPatch => self.apply_patch(parse_arguments(&tool_call.arguments)?),
             ToolName::RunCommand => self.run_command(parse_arguments(&tool_call.arguments)?),
         }
+    }
+
+    pub fn rollback_patch(
+        &self,
+        path: &str,
+        expected_text: &str,
+        original_text: Option<&str>,
+    ) -> Result<ToolExecution, ToolError> {
+        let path = self.resolve_writable(path)?;
+        let current = if path.exists() {
+            fs::read_to_string(&path)?
+        } else {
+            String::new()
+        };
+        if current != expected_text {
+            return Err(ToolError::PatchConflict(self.relative_path(&path)));
+        }
+        match original_text {
+            Some(original_text) => self.write_atomically(&path, original_text)?,
+            None if path.exists() => fs::remove_file(&path)?,
+            None => {}
+        }
+        let relative_path = self.relative_path(&path);
+        Ok(ToolExecution {
+            output: json!({ "path": relative_path, "changed": true, "rolled_back": true }),
+            summary: format!("Restored {relative_path}"),
+        })
     }
 
     fn list_dir(&self, args: ListDirArgs) -> Result<ToolExecution, ToolError> {
@@ -285,22 +313,7 @@ impl ToolRegistry {
             return Err(ToolError::PatchConflict(self.relative_path(&path)));
         }
 
-        let parent = path.parent().expect("workspace file has a parent");
-        let temporary = parent.join(format!(
-            ".xcoding-{}-{}.tmp",
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("patch"),
-            std::process::id()
-        ));
-        if temporary.exists() {
-            fs::remove_file(&temporary)?;
-        }
-        fs::write(&temporary, &args.new_text)?;
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
-        fs::rename(&temporary, &path)?;
+        self.write_atomically(&path, &args.new_text)?;
 
         let path = self.relative_path(&path);
         Ok(ToolExecution {
@@ -343,6 +356,29 @@ impl ToolRegistry {
                 "Command failed".to_owned()
             },
         })
+    }
+
+    fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
+        let parent = path.parent().expect("workspace file has a parent");
+        let temporary = parent.join(format!(
+            ".xcoding-{}-{}.tmp",
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("patch"),
+            Uuid::new_v4()
+        ));
+        fs::write(&temporary, text)?;
+        #[cfg(windows)]
+        {
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+        }
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ToolError::Io(error));
+        }
+        Ok(())
     }
 
     fn resolve_writable(&self, requested_path: &str) -> Result<PathBuf, ToolError> {
@@ -579,6 +615,40 @@ mod tests {
             )
             .expect_err("outside path is rejected");
         assert!(matches!(error, ToolError::PathOutsideWorkspace(_)));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+    #[test]
+    fn rolls_back_patches_only_when_the_applied_text_is_unchanged() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let existing = root.join("settings.txt");
+        fs::write(&existing, "new\n").expect("patched file writes");
+
+        tools
+            .rollback_patch("settings.txt", "new\n", Some("old\n"))
+            .expect("existing file rolls back");
+        assert_eq!(
+            fs::read_to_string(&existing).expect("restored file reads"),
+            "old\n"
+        );
+
+        let created = root.join("created.txt");
+        fs::write(&created, "created\n").expect("created patch writes");
+        tools
+            .rollback_patch("created.txt", "created\n", None)
+            .expect("created file rolls back");
+        assert!(!created.exists());
+
+        fs::write(&existing, "edited elsewhere\n").expect("external edit writes");
+        let error = tools
+            .rollback_patch("settings.txt", "old\n", Some("before\n"))
+            .expect_err("rollback refuses to overwrite an external edit");
+        assert!(matches!(error, ToolError::PatchConflict(_)));
+        assert_eq!(
+            fs::read_to_string(&existing).expect("external edit remains"),
+            "edited elsewhere\n"
+        );
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
