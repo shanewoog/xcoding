@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/xcoding-agent",
   "crates/xcoding-context",
   "crates/xcoding-core",
   "crates/xcoding-policy",

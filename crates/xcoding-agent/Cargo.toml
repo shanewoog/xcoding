@@ -1,0 +1,15 @@
+[package]
+name = "xcoding-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+xcoding-context = { path = "../xcoding-context" }
+xcoding-core = { path = "../xcoding-core" }
+xcoding-protocol = { path = "../xcoding-protocol" }
+xcoding-providers = { path = "../xcoding-providers" }
+xcoding-tools = { path = "../xcoding-tools" }

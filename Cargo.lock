@@ -1459,6 +1459,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "xcoding-agent"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde_json",
+ "thiserror",
+ "xcoding-context",
+ "xcoding-core",
+ "xcoding-protocol",
+ "xcoding-providers",
+ "xcoding-tools",
+]
+
+[[package]]
 name = "xcoding-context"
 version = "0.1.0"
 
@@ -1507,16 +1521,12 @@ dependencies = [
 name = "xcoding-server"
 version = "0.1.0"
 dependencies = [
- "futures-util",
  "serde",
  "serde_json",
  "tokio",
- "uuid",
- "xcoding-context",
+ "xcoding-agent",
  "xcoding-core",
  "xcoding-protocol",
- "xcoding-providers",
- "xcoding-tools",
 ]
 
 [[package]]
