@@ -190,6 +190,8 @@ pub enum ToolName {
     SearchCode,
     ApplyPatch,
     RunCommand,
+    GitStatus,
+    GitDiff,
 }
 
 impl ToolName {
@@ -200,6 +202,8 @@ impl ToolName {
             Self::SearchCode => "search_code",
             Self::ApplyPatch => "apply_patch",
             Self::RunCommand => "run_command",
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
         }
     }
 }

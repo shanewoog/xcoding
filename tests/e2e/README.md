@@ -15,6 +15,7 @@ The tests start the real `xcoding-server` binary, use a local OpenAI-compatible 
 - `running-cancel-agent.mjs`: mid-stream cancel, mid-command cancel, failed command refeed, auto-edit still gates commands.
 - `session-replay-agent.mjs`: reconstruct session steps via `session.replay`.
 - `write-loop-agent.mjs`: feature (patch + test), bugfix (repro-first), refactor (baseline + rewrite + retest).
+- `git-tools-agent.mjs`: read-only `git_status` + `git_diff` against a temporary git fixture.
 - `surface-parity.mjs`: static CLI / Desktop / server method surface parity for shared workflows.
 
 ## 中文说明

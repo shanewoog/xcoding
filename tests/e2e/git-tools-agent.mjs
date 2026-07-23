@@ -1,19 +1,20 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const fixtureRoot = resolve(repositoryRoot, "tests/e2e/fixtures/read-only-agent");
 const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcoding-server";
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
 async function main() {
+  const fixtureRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-fixture-"));
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-git-"));
+  await prepareGitFixture(fixtureRoot);
   const mock = await startMockProvider();
-  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-"));
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
@@ -26,40 +27,66 @@ async function main() {
   try {
     const result = await rpc.request("session.chat", {
       workspace_root: fixtureRoot,
-      message: "What source files are in this repository?",
+      message: "What local git changes are present?",
       model: "fixture-model",
     });
 
     assert.equal(result.session.status, "done");
-    assert.match(result.message.content, /src\/auth\.ts/);
-    assert.ok(rpc.events.some((event) => event.type === "plan"));
+    assert.match(result.message.content, /hello\.txt|modified/i);
 
-    const toolStart = rpc.events.find((event) => event.type === "tool_start");
-    assert.deepEqual(toolStart?.tool_call, {
-      id: "call_list_root",
-      name: "list_dir",
-      arguments: { path: "." },
-    });
-    assert.equal(rpc.events.find((event) => event.type === "tool_end")?.success, true);
-    assert.ok(rpc.events.some((event) => event.type === "text_delta"));
+    assert.ok(
+      rpc.events.some((event) => event.type === "tool_start" && event.tool_call?.name === "git_status"),
+      "expected git_status tool start",
+    );
+    assert.ok(
+      rpc.events.some(
+        (event) =>
+          event.type === "tool_end" &&
+          event.tool_call?.name === "git_status" &&
+          event.success === true,
+      ),
+      "expected git_status tool end",
+    );
+    assert.ok(
+      rpc.events.some((event) => event.type === "tool_start" && event.tool_call?.name === "git_diff"),
+      "expected git_diff tool start",
+    );
 
-    assert.equal(mock.requests.length, 2);
+    assert.equal(mock.requests.length, 3);
     assert.deepEqual(
       mock.requests[0].tools.map((tool) => tool.function.name),
       ["list_dir", "read_file", "search_code", "apply_patch", "run_command", "git_status", "git_diff"],
     );
-    const secondTurnMessages = mock.requests[1].messages;
-    assert.ok(secondTurnMessages.some((message) => message.role === "assistant" && message.tool_calls));
-    const toolResult = secondTurnMessages.find((message) => message.role === "tool");
-    assert.equal(toolResult?.tool_call_id, "call_list_root");
-    assert.match(toolResult?.content ?? "", /src/);
 
-    console.log("Read-only agent E2E passed.");
+    const statusTool = mock.requests[1].messages.find(
+      (message) => message.role === "tool" && message.tool_call_id === "call_git_status",
+    );
+    assert.ok(statusTool, "status tool result refeeded");
+    assert.match(statusTool.content ?? "", /hello\.txt/);
+
+    const diffTool = mock.requests[2].messages.find(
+      (message) => message.role === "tool" && message.tool_call_id === "call_git_diff",
+    );
+    assert.ok(diffTool, "diff tool result refeeded");
+    assert.match(diffTool.content ?? "", /hello world/);
+
+    console.log("Git tools agent E2E passed.");
   } finally {
     await rpc.close();
     await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
+}
+
+async function prepareGitFixture(root) {
+  execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "xcoding@example.com"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "XCoding"], { cwd: root, stdio: "ignore" });
+  await writeFile(resolve(root, "hello.txt"), "hello\n", "utf8");
+  execFileSync("git", ["add", "hello.txt"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
+  await writeFile(resolve(root, "hello.txt"), "hello world\n", "utf8");
 }
 
 function startRpcClient({ databasePath, environment }) {
@@ -157,15 +184,58 @@ async function startMockProvider() {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
     });
-    if (turn++ === 0) {
+    if (turn === 0) {
       response.write(
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_list_root","type":"function","function":{"name":"list_dir","arguments":"{\\"path\\":\\".\\"}"}}]}}]}\n\n',
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_git_status",
+                    type: "function",
+                    function: {
+                      name: "git_status",
+                      arguments: JSON.stringify({}),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\n`,
+      );
+    } else if (turn === 1) {
+      response.write(
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_git_diff",
+                    type: "function",
+                    function: {
+                      name: "git_diff",
+                      arguments: JSON.stringify({ path: "hello.txt" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\n`,
       );
     } else {
       response.write(
-        'data: {"choices":[{"delta":{"content":"The repository contains src/auth.ts."}}]}\n\n',
+        `data: ${JSON.stringify({
+          choices: [{ delta: { content: "hello.txt is modified in the working tree." } }],
+        })}\n\n`,
       );
     }
+    turn += 1;
     response.end("data: [DONE]\n\n");
   });
 
@@ -179,7 +249,10 @@ async function startMockProvider() {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requests,
-    close: () => new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose())),
+    close: () =>
+      new Promise((resolveClose, rejectClose) =>
+        server.close((error) => (error ? rejectClose(error) : resolveClose())),
+      ),
   };
 }
 

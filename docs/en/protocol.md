@@ -705,6 +705,52 @@ Output:
 
 Read-only helpers for context and final summaries.
 
+### `git_status`
+
+Input:
+
+```json
+{
+  "path": "src"
+}
+```
+
+`path` is optional and workspace-relative.
+
+Output:
+
+```json
+{
+  "path": "src",
+  "branch": "main...origin/main",
+  "entries": [
+    { "kind": "branch", "branch": "main...origin/main" },
+    { "kind": "entry", "index_status": " ", "worktree_status": "M", "path": "src/lib.rs" }
+  ],
+  "raw": "..."
+}
+```
+
+### `git_diff`
+
+Input:
+
+```json
+{
+  "path": "src/lib.rs"
+}
+```
+
+Output:
+
+```json
+{
+  "path": "src/lib.rs",
+  "staged": "",
+  "unstaged": "diff --git a/src/lib.rs b/src/lib.rs\n..."
+}
+```
+
 ## 7. Permission Evaluation Rules
 
 Before executing a tool. In Phase 1B, only read tools are executable, so both `ask` and `auto-edit` auto-allow them:

@@ -625,6 +625,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             description: "Run an approved executable with an argument vector in the workspace root. Never use a shell.".to_owned(),
             parameters: json!({ "type": "object", "properties": { "executable": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } } }, "required": ["executable"] }),
         },
+        ToolDefinition {
+            name: "git_status".to_owned(),
+            description: "Read git status for the workspace (or an optional pathspec). Uses porcelain format.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "path": { "type": "string", "description": "Optional workspace-relative pathspec" } } }),
+        },
+        ToolDefinition {
+            name: "git_diff".to_owned(),
+            description: "Read staged and unstaged git diffs for the workspace (or an optional pathspec).".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "path": { "type": "string", "description": "Optional workspace-relative pathspec" } } }),
+        },
     ]
 }
 
@@ -675,7 +685,9 @@ mod tests {
                 "read_file",
                 "search_code",
                 "apply_patch",
-                "run_command"
+                "run_command",
+                "git_status",
+                "git_diff"
             ]
         );
     }

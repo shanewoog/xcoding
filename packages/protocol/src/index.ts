@@ -9,7 +9,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
-export type ToolName = "list_dir" | "read_file" | "search_code" | "apply_patch" | "run_command";
+export type ToolName = "list_dir" | "read_file" | "search_code" | "apply_patch" | "run_command" | "git_status" | "git_diff";
 
 export interface Session {
   id: string;

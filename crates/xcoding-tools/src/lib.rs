@@ -95,9 +95,11 @@ impl ToolRegistry {
         tool_call: &ToolCall,
     ) -> Result<(PermissionKind, bool), ToolError> {
         match tool_call.name {
-            ToolName::ListDir | ToolName::ReadFile | ToolName::SearchCode => {
-                Ok((PermissionKind::Read, false))
-            }
+            ToolName::ListDir
+            | ToolName::ReadFile
+            | ToolName::SearchCode
+            | ToolName::GitStatus
+            | ToolName::GitDiff => Ok((PermissionKind::Read, false)),
             ToolName::ApplyPatch => {
                 let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
                 Ok((PermissionKind::Write, is_high_risk_path(&args.path)))
@@ -148,6 +150,8 @@ impl ToolRegistry {
             ToolName::RunCommand => {
                 self.run_command(parse_arguments(&tool_call.arguments)?, is_cancelled)
             }
+            ToolName::GitStatus => self.git_status(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitDiff => self.git_diff(parse_arguments(&tool_call.arguments)?),
         }
     }
 
@@ -411,6 +415,113 @@ impl ToolRegistry {
         })
     }
 
+    fn git_status(&self, args: GitStatusArgs) -> Result<ToolExecution, ToolError> {
+        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        if let Some(path) = pathspec {
+            let _ = checked_relative_path(path)?;
+        }
+
+        let mut command = Command::new("git");
+        command
+            .arg("status")
+            .arg("--porcelain=v1")
+            .arg("--branch")
+            .arg("--untracked-files=all")
+            .current_dir(&self.workspace_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = pathspec {
+            command.arg("--").arg(path);
+        }
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
+                format!("git status failed with exit code {:?}", output.status.code())
+            } else {
+                truncate_output(&stderr)
+            }));
+        }
+
+        let entries = parse_git_status_lines(&stdout);
+        let branch = entries
+            .iter()
+            .find_map(|entry| entry.get("branch").and_then(Value::as_str))
+            .map(str::to_owned);
+        Ok(ToolExecution {
+            output: json!({
+                "path": pathspec.unwrap_or("."),
+                "branch": branch,
+                "entries": entries,
+                "raw": truncate_output(&stdout),
+            }),
+            summary: format!(
+                "Git status for {}",
+                pathspec.unwrap_or(".")
+            ),
+        })
+    }
+
+    fn git_diff(&self, args: GitDiffArgs) -> Result<ToolExecution, ToolError> {
+        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        if let Some(path) = pathspec {
+            let _ = checked_relative_path(path)?;
+        }
+
+        let mut staged = Command::new("git");
+        staged
+            .arg("diff")
+            .arg("--cached")
+            .arg("--no-ext-diff")
+            .arg("--no-color")
+            .current_dir(&self.workspace_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = pathspec {
+            staged.arg("--").arg(path);
+        }
+
+        let mut unstaged = Command::new("git");
+        unstaged
+            .arg("diff")
+            .arg("--no-ext-diff")
+            .arg("--no-color")
+            .current_dir(&self.workspace_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = pathspec {
+            unstaged.arg("--").arg(path);
+        }
+
+        let staged_output = staged.output()?;
+        let unstaged_output = unstaged.output()?;
+        if !staged_output.status.success() || !unstaged_output.status.success() {
+            let stderr = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&staged_output.stderr),
+                String::from_utf8_lossy(&unstaged_output.stderr)
+            );
+            return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
+                "git diff failed".to_owned()
+            } else {
+                truncate_output(stderr.trim())
+            }));
+        }
+
+        let staged_diff = truncate_output(&String::from_utf8_lossy(&staged_output.stdout));
+        let unstaged_diff = truncate_output(&String::from_utf8_lossy(&unstaged_output.stdout));
+        Ok(ToolExecution {
+            output: json!({
+                "path": pathspec.unwrap_or("."),
+                "staged": staged_diff,
+                "unstaged": unstaged_diff,
+            }),
+            summary: format!("Git diff for {}", pathspec.unwrap_or(".")),
+        })
+    }
+
     fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
         let parent = path.parent().expect("workspace file has a parent");
         let temporary = parent.join(format!(
@@ -512,6 +623,18 @@ struct SearchCodeArgs {
     max_results: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct GitStatusArgs {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitDiffArgs {
+    #[serde(default)]
+    path: Option<String>,
+}
+
 #[derive(Serialize)]
 struct DirectoryEntry {
     name: String,
@@ -560,6 +683,30 @@ fn checked_relative_path(requested_path: &str) -> Result<&Path, ToolError> {
         ));
     }
     Ok(requested_path)
+}
+
+fn parse_git_status_lines(stdout: &str) -> Vec<Value> {
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        if line.starts_with("## ") {
+            let branch = line.trim_start_matches("## ").to_owned();
+            entries.push(json!({ "kind": "branch", "branch": branch }));
+            continue;
+        }
+        if line.len() < 3 {
+            continue;
+        }
+        let index_status = line.chars().next().unwrap_or(' ');
+        let worktree_status = line.chars().nth(1).unwrap_or(' ');
+        let path = line[3..].to_owned();
+        entries.push(json!({
+            "kind": "entry",
+            "index_status": index_status.to_string(),
+            "worktree_status": worktree_status.to_string(),
+            "path": path,
+        }));
+    }
+    entries
 }
 
 fn is_high_risk_path(path: &str) -> bool {
@@ -672,6 +819,74 @@ mod tests {
         fs::remove_dir_all(root).expect("workspace removes");
     }
     #[test]
+    #[test]
+    fn reports_git_status_and_diff_for_workspace_changes() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git init runs");
+        assert!(init.success());
+        let _ = Command::new("git")
+            .args(["config", "user.email", "xcoding@example.com"])
+            .current_dir(&root)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "XCoding"])
+            .current_dir(&root)
+            .status();
+        fs::write(root.join("hello.txt"), "hello\n").expect("file writes");
+        let add = Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add runs");
+        assert!(add.success());
+        let commit = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git commit runs");
+        assert!(commit.success());
+        fs::write(root.join("hello.txt"), "hello world\n").expect("file mutates");
+        fs::write(root.join("new.txt"), "new\n").expect("new file writes");
+
+        let status = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "status_1".to_owned(),
+                    name: ToolName::GitStatus,
+                    arguments: json!({}),
+                },
+            )
+            .expect("git status runs");
+        let raw = status.output["raw"].as_str().expect("raw status");
+        assert!(raw.contains("hello.txt"), "{raw}");
+        assert!(raw.contains("new.txt"), "{raw}");
+
+        let diff = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "diff_1".to_owned(),
+                    name: ToolName::GitDiff,
+                    arguments: json!({ "path": "hello.txt" }),
+                },
+            )
+            .expect("git diff runs");
+        let unstaged = diff.output["unstaged"].as_str().expect("unstaged diff");
+        assert!(unstaged.contains("hello world"), "{unstaged}");
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
     fn rolls_back_patches_only_when_the_applied_text_is_unchanged() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("registry starts");
