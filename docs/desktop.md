@@ -23,6 +23,25 @@ The app stores local session history and workspace defaults in its operating-sys
 
 Desktop uses the same guarded agent service as the CLI. The default mode is `ask`; `auto-edit` applies ordinary file patches automatically, while commands still require approval.
 
+## Defaults and diagnostics
+
+The left **Defaults** panel stores workspace-scoped mode and model settings (provider is fixed to `openai` in v1):
+
+| Control | Behavior |
+|---------|----------|
+| Mode | `ask` (default) or `auto-edit` |
+| Provider | Read-only `openai` |
+| Model | Cloud model id for new sessions |
+| Save defaults | Writes mode/provider/model for the current workspace path |
+
+Mode help text updates when you switch modes:
+
+- **ask** — propose patches and commands; both need approval
+- **auto-edit** — apply ordinary file patches automatically; **commands still need approval**
+
+**Diagnostics** is a client-side checklist (workspace path, provider auth, base URL, defaults). Green means ready enough to start a task; it does not replace `pnpm cli -- doctor` for deeper server checks.
+
+
 ## High-risk command review
 
 When the agent proposes a shell-style or force-push command, Desktop shows a **HIGH-RISK** badge, the full command text, and a stronger approve button label. Hard-denied commands never reach this panel; they fail as tool errors instead.
@@ -39,7 +58,7 @@ Select a finished session in the left list to review history. Sending another me
 
 | Pane | Content |
 |------|---------|
-| Left | Workspace path, auth status, model defaults, and scrollable session history with status badges |
+| Left | Workspace path, auth status, mode/model defaults, diagnostics, and scrollable session history with status badges |
 | Center | Conversation transcript (auto-scrolls), empty-state pane map, and composer |
 | Right | Sticky approval review when needed, task summary, activity, then collapsible plan / restore / replay |
 

@@ -26,6 +26,11 @@ import type {
 } from "@xcoding/protocol";
 import { buildReviewPresentation, latestApprovalSummary } from "./review";
 import {
+  buildDesktopDoctorChecks,
+  desktopDoctorReady,
+  modeHelpText,
+} from "./config";
+import {
   formatMessageRole,
   formatSessionStatus,
   hasTraceContent,
@@ -489,6 +494,15 @@ export function App() {
     taskSummary,
   });
 
+  const doctorChecks = buildDesktopDoctorChecks({
+    workspaceRoot,
+    providerStatus,
+    mode,
+    model,
+    provider: defaultProvider,
+  });
+  const doctorReady = desktopDoctorReady(doctorChecks);
+
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
@@ -515,9 +529,28 @@ export function App() {
               <small>Base {providerStatus?.base_url || "https://ai.v58.dev/v1"}{providerStatus?.key_hint ? ` · key ${providerStatus.key_hint}` : ""}</small>
               <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>Refresh auth</button>
             </div>
+            <label className="field-label" htmlFor="default-mode">Mode</label>
+            <select id="default-mode" value={mode} onChange={(event) => setMode(event.target.value as Mode)} disabled={isRunning || isSavingConfig}>
+              <option value="ask">Ask</option>
+              <option value="auto-edit">Auto edit</option>
+            </select>
+            <p className="mode-help">{modeHelpText(mode)}</p>
+            <label className="field-label" htmlFor="default-provider">Provider</label>
+            <input id="default-provider" value={defaultProvider} readOnly spellCheck={false} title="V1 supports the OpenAI-compatible provider named openai" />
             <label className="field-label" htmlFor="default-model">Model</label>
             <input id="default-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={isRunning || isSavingConfig} spellCheck={false} />
             <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>
+            <div className={`doctor-panel ${doctorReady ? "ready" : "blocked"}`} aria-label="Workspace diagnostics">
+              <p className="panel-title">Diagnostics</p>
+              <ul className="doctor-list">
+                {doctorChecks.map((check) => (
+                  <li key={check.name} className={check.ok ? "ok" : "bad"}>
+                    <strong>{check.name}</strong>
+                    <small>{check.detail}</small>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </section>
         </div>
         <nav className="session-list" aria-label="Saved sessions">
@@ -560,7 +593,7 @@ export function App() {
             <div className="empty-chat">
               <p className="empty-state">Describe the repository task you want XCoding to inspect.</p>
               <ul className="empty-hints">
-                <li>Left: workspace, model defaults, session history</li>
+                <li>Left: workspace, mode/model defaults, diagnostics, session history</li>
                 <li>Center: conversation and composer</li>
                 <li>Right: review, plan, activity, restore, replay</li>
               </ul>

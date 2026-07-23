@@ -31,7 +31,15 @@ const defaultServerPath = resolve(
   process.env.XCODING_SERVER_PATH ??
     resolve(currentDirectory, "../../../target/debug/xcoding-server.exe"),
 );
-const optionNames = new Set(["--workspace", "--server", "--provider", "--model", "--title", "--mode"]);
+const optionNames = new Set(["--workspace", "--server", "--provider", "--model", "--title", "--mode", "--session"]);
+
+type CliMode = "ask" | "auto-edit";
+
+function parseModeOption(value: string | undefined): CliMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === "ask" || value === "auto-edit") return value;
+  throw new Error(`invalid mode: ${value} (expected ask or auto-edit)`);
+}
 
 async function main(): Promise<void> {
   await loadDotEnvFiles();
@@ -102,7 +110,7 @@ async function runConfigCommand(
     return;
   }
   if (subcommand === "set") {
-    const mode = option(args, "--mode");
+    const mode = parseModeOption(option(args, "--mode"));
     const provider = option(args, "--provider");
     const model = option(args, "--model");
     if (!mode && !provider && !model) {
@@ -111,7 +119,7 @@ async function runConfigCommand(
     const current = await client.request<GetConfigResult>("config.get", { workspace_root: workspace });
     const params: SetConfigParams = {
       workspace_root: workspace,
-      mode: (mode ?? current.config.mode) as SetConfigParams["mode"],
+      mode: mode ?? current.config.mode,
       provider: provider ?? current.config.provider,
       model: model ?? current.config.model,
     };
@@ -134,7 +142,7 @@ async function runSessionCommand(
       const params: CreateSessionParams = {
         workspace_root: workspace,
         title: option(args, "--title"),
-        mode: option(args, "--mode") as CreateSessionParams["mode"],
+        mode: parseModeOption(option(args, "--mode")),
         provider: option(args, "--provider"),
         model: option(args, "--model"),
       };
@@ -229,7 +237,7 @@ async function runChatCommand(
     workspace_root: workspace,
     message,
     title: option(args, "--title"),
-    mode: option(args, "--mode") as ChatParams["mode"],
+    mode: parseModeOption(option(args, "--mode")),
     provider: option(args, "--provider"),
     model: option(args, "--model"),
     session_id: option(args, "--session"),
@@ -547,6 +555,10 @@ Environment:
 
 Dotenv:
   Loads repository-root .env if present. Existing process env wins.
+
+Mode policy:
+  ask         Propose patches and commands; both need approval
+  auto-edit   Apply ordinary file patches automatically; commands still need approval
 `);
 }
 
