@@ -197,3 +197,56 @@ button:hover:not(:disabled) { background: #105851; }
   justify-self: start;
   margin-top: 0.25rem;
 }
+
+
+.review-panel.high-risk {
+  border: 1px solid #c45a4a;
+  background: #fff7f5;
+  border-radius: 6px;
+  padding: 0.7rem;
+}
+.review-header {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.risk-badge {
+  background: #a84747;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.45rem;
+}
+.review-summary {
+  color: #4a5560;
+  font-size: 0.8rem;
+  margin: 0;
+}
+.command-preview {
+  background: #1b2028;
+  border: 1px solid #2e3640;
+  border-radius: 4px;
+  color: #f4f6f6;
+  font-size: 0.78rem;
+  margin: 0;
+  max-height: 10rem;
+  overflow: auto;
+  padding: 0.65rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.risk-hint {
+  color: #8c3434;
+  font-size: 0.74rem;
+  margin: 0;
+}
+.approve-risk-button {
+  background: #a84747;
+  border-color: #a84747;
+}
+.approve-risk-button:hover:not(:disabled) {
+  background: #8c3434;
+}

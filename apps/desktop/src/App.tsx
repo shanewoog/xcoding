@@ -24,6 +24,7 @@ import type {
   ProviderAuthStatus,
   WorkspaceConfig,
 } from "@xcoding/protocol";
+import { buildReviewPresentation, latestApprovalSummary } from "./review";
 
 type Activity = {
   id: string;
@@ -142,6 +143,7 @@ export function App() {
   const [plan, setPlan] = useState<PlanStep[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [approvalSummary, setApprovalSummary] = useState<string | null>(null);
   const [patchPreview, setPatchPreview] = useState<PatchPreview | null>(null);
   const [restorePoints, setRestorePoints] = useState<RestorePoint[]>([]);
   const [taskSummary, setTaskSummary] = useState<TaskSummary | null>(null);
@@ -209,6 +211,7 @@ export function App() {
       setPlan(latestPlan(detail.events));
       setActivity(buildActivity(detail.events));
       setPendingAction(pending);
+      setApprovalSummary(latestApprovalSummary(detail.events, pending));
       setPatchPreview(latestPatchPreview(detail.events, pending));
       setRestorePoints(detail.restore_points);
       setTaskSummary(latestTaskSummary(detail.events));
@@ -247,8 +250,14 @@ export function App() {
       }
       if (payload.type === "plan") setPlan(payload.steps);
       if (payload.type === "patch_preview") setPatchPreview(payload.preview);
-      if (payload.type === "approval_requested") setPendingAction(payload.action);
-      if (payload.type === "session_cancelled") setPendingAction(null);
+      if (payload.type === "approval_requested") {
+        setPendingAction(payload.action);
+        setApprovalSummary(payload.summary);
+      }
+      if (payload.type === "session_cancelled") {
+        setPendingAction(null);
+        setApprovalSummary(null);
+      }
       if (payload.type === "task_completed") setTaskSummary(payload.summary);
       const nextActivity = eventActivity(payload, `${payload.type}-${Date.now()}`);
       if (nextActivity) {
@@ -279,6 +288,7 @@ export function App() {
     setPlan([]);
     setActivity([]);
     setPendingAction(null);
+    setApprovalSummary(null);
     setPatchPreview(null);
     setRestorePoints([]);
     setTaskSummary(null);
@@ -434,7 +444,44 @@ export function App() {
       </section>
 
       <aside className="trace-panel" aria-label="Agent trace">
-        {pendingAction ? <section className="review-panel"><p className="panel-title">Review</p><strong>{pendingAction.tool_call.name === "apply_patch" ? "Patch approval" : "Command approval"}</strong>{patchPreview ? <><code>{patchPreview.path}</code><pre className="diff-preview">{buildPatchDiffLines(patchPreview).map((line, index) => <span key={index} className={`diff-line ${line.kind}`}>{line.kind === "remove" ? `- ${line.text}` : line.kind === "add" ? `+ ${line.text}` : line.text}</span>)}</pre></> : <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code>}<div className="review-actions"><button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button><button type="button" onClick={() => void resolveAction(true)} disabled={isRunning}>Approve</button></div></section> : null}
+        {pendingAction ? (() => {
+          const review = buildReviewPresentation(pendingAction, approvalSummary, Boolean(patchPreview));
+          return (
+            <section className={`review-panel${review.highRisk ? " high-risk" : ""}`} aria-label={review.title}>
+              <p className="panel-title">Review</p>
+              <div className="review-header">
+                <strong>{review.title}</strong>
+                {review.highRisk ? <span className="risk-badge">HIGH-RISK</span> : null}
+              </div>
+              <p className="review-summary">{review.summary}</p>
+              {review.bodyKind === "patch" && patchPreview ? (
+                <>
+                  <code>{patchPreview.path}</code>
+                  <pre className="diff-preview">
+                    {buildPatchDiffLines(patchPreview).map((line, index) => (
+                      <span key={index} className={`diff-line ${line.kind}`}>
+                        {line.kind === "remove" ? `- ${line.text}` : line.kind === "add" ? `+ ${line.text}` : line.text}
+                      </span>
+                    ))}
+                  </pre>
+                </>
+              ) : null}
+              {review.bodyKind === "command" ? (
+                <pre className="command-preview" aria-label="Command to approve">{review.commandText ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}</pre>
+              ) : null}
+              {review.bodyKind === "generic" ? <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code> : null}
+              {review.highRisk ? (
+                <p className="risk-hint">Shell or force-push style commands can change the system or remote git history. Approve only if you trust the exact command.</p>
+              ) : null}
+              <div className="review-actions">
+                <button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button>
+                <button type="button" className={review.highRisk ? "approve-risk-button" : undefined} onClick={() => void resolveAction(true)} disabled={isRunning}>
+                  {review.highRisk ? "Approve high-risk" : "Approve"}
+                </button>
+              </div>
+            </section>
+          );
+        })() : null}
         <section><p className="panel-title">Plan</p><ol className="plan-list">{plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}{plan.map((step) => <li key={step.id}>{step.description}</li>)}</ol></section>
         <section><p className="panel-title">Restore points</p><div className="restore-list">{restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}{restorePoints.map((restorePoint) => <div className="restore-point" key={restorePoint.id}><div><strong>{restorePoint.path}</strong><small>{new Date(restorePoint.created_at).toLocaleString()}</small></div><button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button></div>)}</div></section>
         <section><p className="panel-title">Replay</p><div className="restore-list">{replaySteps.length === 0 ? <p className="empty-state">Load a finished session to reconstruct major steps.</p> : null}{replaySteps.map((step, index) => <div className="restore-point" key={`${step.kind}-${index}`}><div><strong>{step.kind}{step.tool_name ? ` · ${step.tool_name}` : ""}</strong><small>{step.summary}</small></div>{typeof step.success === "boolean" ? <code>{step.success ? "ok" : "fail"}</code> : null}</div>)}</div><button type="button" className="quiet-button" onClick={() => void loadReplay()} disabled={!activeSessionId || isRunning}>Replay steps</button></section>

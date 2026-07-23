@@ -63,4 +63,4 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
 
 ## Command Policy
 
-Every `run_command` requires approval before execution. The policy engine hard-denies clearly destructive system commands (for example `format`, `shutdown`, `git clean -fdx`) and labels high-risk shell or force-push invocations as **HIGH-RISK** in the approval summary.
+Every `run_command` requires approval before execution. The policy engine hard-denies clearly destructive system commands (for example `format`, `shutdown`, `git clean -fdx`) and labels high-risk shell or force-push invocations as **HIGH-RISK** in the approval summary. Desktop highlights those approvals with a badge, the rendered command, and a stronger confirm action; the CLI prints a HIGH-RISK warning plus the full command line.

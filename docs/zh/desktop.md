@@ -22,3 +22,7 @@ pnpm --filter @xcoding/desktop exec tauri dev
 5. 选择已保存会话，查看事件、恢复点和任务完成摘要。
 
 Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁，但执行命令仍然需要审批。
+
+## 高风险命令审批
+
+当 Agent 提出 shell 类或 force-push 命令时，Desktop 会显示 **HIGH-RISK** 标记、完整命令文本，以及更醒目的批准按钮文案。硬拒绝命令不会进入审批面板，而是作为工具错误返回给模型。

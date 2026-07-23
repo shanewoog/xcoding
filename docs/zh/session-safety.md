@@ -63,4 +63,4 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 
 ## 命令策略
 
-所有 `run_command` 在执行前都需要审批。策略引擎会硬拒绝明显危险的系统命令（例如 `format`、`shutdown`、`git clean -fdx`），并对 shell / force-push 等高风险调用在审批摘要中标注 **HIGH-RISK**。
+所有 `run_command` 在执行前都需要审批。策略引擎会硬拒绝明显危险的系统命令（例如 `format`、`shutdown`、`git clean -fdx`），并对 shell / force-push 等高风险调用在审批摘要中标注 **HIGH-RISK**。Desktop 会用徽章、完整命令文本和更醒目的确认按钮突出这些审批；CLI 会打印 HIGH-RISK 警告和完整命令行。

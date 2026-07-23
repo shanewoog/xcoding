@@ -267,9 +267,21 @@ function printEvent(event: SessionEvent): void {
     case "patch_preview":
       process.stderr.write(`Patch: ${event.preview.path}\n`);
       return;
-    case "approval_requested":
+    case "approval_requested": {
       process.stderr.write(`Approval required: ${event.action.id} (${event.summary})\n`);
+      if (typeof event.summary === "string" && event.summary.toUpperCase().includes("HIGH-RISK")) {
+        process.stderr.write("WARNING: HIGH-RISK command — review carefully before approving.\n");
+        const args = event.action.tool_call?.arguments;
+        if (args && typeof args === "object" && "executable" in args) {
+          const executable = typeof args.executable === "string" ? args.executable : "<command>";
+          const argList = Array.isArray(args.args)
+            ? args.args.filter((item) => typeof item === "string").join(" ")
+            : "";
+          process.stderr.write(`Command: ${argList ? `${executable} ${argList}` : executable}\n`);
+        }
+      }
       return;
+    }
     case "restore_point_rolled_back":
       process.stderr.write(`Restored: ${event.restore_point.path}\n`);
       return;

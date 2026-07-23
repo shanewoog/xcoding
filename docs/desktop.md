@@ -22,3 +22,7 @@ The app stores local session history and workspace defaults in its operating-sys
 5. Select saved sessions to review their events, restore points, and task completion summary.
 
 Desktop uses the same guarded agent service as the CLI. The default mode is `ask`; `auto-edit` applies ordinary file patches automatically, while commands still require approval.
+
+## High-risk command review
+
+When the agent proposes a shell-style or force-push command, Desktop shows a **HIGH-RISK** badge, the full command text, and a stronger approve button label. Hard-denied commands never reach this panel; they fail as tool errors instead.
