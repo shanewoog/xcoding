@@ -28,6 +28,8 @@ const MAX_READ_BYTES: u64 = 512 * 1024;
 const DEFAULT_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_SEARCH_CONTEXT_LINES: usize = 3;
+const MAX_SEARCH_CANDIDATES: usize = 500;
 
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -301,10 +303,31 @@ impl ToolRegistry {
         }
 
         let limit = bounded(args.max_results, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
-        let mut pending = VecDeque::from([root]);
-        let mut results = Vec::new();
+        let context_lines = args.context_lines.unwrap_or(0).min(MAX_SEARCH_CONTEXT_LINES);
+        let glob = args
+            .glob
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(pattern) = glob {
+            if pattern.contains('[') || pattern.contains(']') {
+                return Err(ToolError::InvalidArguments(
+                    "glob character classes are not supported".to_owned(),
+                ));
+            }
+        }
 
-        while let Some(directory) = pending.pop_front() {
+        let query_cmp = if args.case_insensitive {
+            args.query.to_lowercase()
+        } else {
+            args.query.clone()
+        };
+
+        let mut pending = VecDeque::from([root]);
+        let mut candidates = Vec::new();
+        let candidate_cap = (limit.saturating_mul(5)).clamp(limit, MAX_SEARCH_CANDIDATES);
+
+        'walk: while let Some(directory) = pending.pop_front() {
             for entry in fs::read_dir(directory)?.filter_map(Result::ok) {
                 let file_type = entry.file_type()?;
                 if file_type.is_symlink() {
@@ -320,29 +343,82 @@ impl ToolRegistry {
                     continue;
                 }
 
+                let relative = self.relative_path(&entry.path());
+                if let Some(pattern) = glob {
+                    if !path_matches_glob(&relative, pattern, args.case_insensitive) {
+                        continue;
+                    }
+                }
+                if is_low_value_search_file(&relative) {
+                    continue;
+                }
+
                 let Ok(content) = fs::read_to_string(entry.path()) else {
                     continue;
                 };
-                for (index, line) in content.lines().enumerate() {
-                    if line.contains(&args.query) {
-                        results.push(SearchResult {
-                            path: self.relative_path(&entry.path()),
+                let lines: Vec<&str> = content.lines().collect();
+                for (index, line) in lines.iter().enumerate() {
+                    let matched = if args.case_insensitive {
+                        line.to_lowercase().contains(&query_cmp)
+                    } else {
+                        line.contains(&query_cmp)
+                    };
+                    if !matched {
+                        continue;
+                    }
+
+                    let before = if context_lines == 0 {
+                        Vec::new()
+                    } else {
+                        let start = index.saturating_sub(context_lines);
+                        lines[start..index]
+                            .iter()
+                            .map(|value| (*value).to_owned())
+                            .collect()
+                    };
+                    let after = if context_lines == 0 {
+                        Vec::new()
+                    } else {
+                        let end = (index + 1 + context_lines).min(lines.len());
+                        lines[index + 1..end]
+                            .iter()
+                            .map(|value| (*value).to_owned())
+                            .collect()
+                    };
+
+                    candidates.push(RankedSearchHit {
+                        score: path_rank_score(&relative),
+                        result: SearchResult {
+                            path: relative.clone(),
                             line: index + 1,
-                            text: line.to_owned(),
-                        });
-                        if results.len() >= limit {
-                            return Ok(ToolExecution {
-                                output: json!({ "results": results, "truncated": true }),
-                                summary: format!("Searched for {:?}", args.query),
-                            });
-                        }
+                            text: (*line).to_owned(),
+                            before,
+                            after,
+                        },
+                    });
+                    if candidates.len() >= candidate_cap {
+                        break 'walk;
                     }
                 }
             }
         }
 
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.result.path.cmp(&right.result.path))
+                .then_with(|| left.result.line.cmp(&right.result.line))
+        });
+        let truncated = candidates.len() >= candidate_cap || candidates.len() > limit;
+        let results: Vec<SearchResult> = candidates
+            .into_iter()
+            .take(limit)
+            .map(|hit| hit.result)
+            .collect();
+
         Ok(ToolExecution {
-            output: json!({ "results": results, "truncated": false }),
+            output: json!({ "results": results, "truncated": truncated }),
             summary: format!("Searched for {:?}", args.query),
         })
     }
@@ -666,6 +742,12 @@ struct SearchCodeArgs {
     path: String,
     #[serde(default)]
     max_results: Option<usize>,
+    #[serde(default)]
+    case_insensitive: bool,
+    #[serde(default)]
+    glob: Option<String>,
+    #[serde(default)]
+    context_lines: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -707,6 +789,15 @@ struct SearchResult {
     path: String,
     line: usize,
     text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    before: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    after: Vec<String>,
+}
+
+struct RankedSearchHit {
+    score: i32,
+    result: SearchResult,
 }
 
 fn checked_relative_path(requested_path: &str) -> Result<&Path, ToolError> {
@@ -788,8 +879,101 @@ fn bounded(value: Option<usize>, default: usize, maximum: usize) -> usize {
 fn is_ignored_directory(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_string_lossy().as_ref(),
-        ".git" | ".xcoding" | "node_modules" | "target"
+        ".git"
+            | ".xcoding"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | "coverage"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | ".cargo"
     )
+}
+
+fn is_low_value_search_file(relative_path: &str) -> bool {
+    let lower = relative_path.replace('\\', "/").to_lowercase();
+    lower.ends_with(".min.js")
+        || lower.ends_with(".map")
+        || lower.ends_with(".lock")
+        || lower.ends_with("package-lock.json")
+        || lower.ends_with("pnpm-lock.yaml")
+        || lower.ends_with("yarn.lock")
+        || lower.ends_with("cargo.lock")
+}
+
+fn path_rank_score(relative_path: &str) -> i32 {
+    let lower = relative_path.replace('\\', "/").to_lowercase();
+    let mut score = 0;
+    if lower.starts_with("src/") || lower.contains("/src/") {
+        score += 30;
+    }
+    if lower.starts_with("crates/")
+        || lower.starts_with("apps/")
+        || lower.starts_with("packages/")
+        || lower.starts_with("lib/")
+    {
+        score += 25;
+    }
+    if lower.starts_with("tests/") || lower.contains("/tests/") {
+        score += 10;
+    }
+    const SOURCE_EXTS: &[&str] = &[
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".go", ".py",
+        ".java", ".kt", ".cs", ".cpp", ".c", ".h", ".hpp", ".md", ".toml", ".json",
+    ];
+    if SOURCE_EXTS.iter().any(|ext| lower.ends_with(ext)) {
+        score += 10;
+    }
+    if lower.starts_with("dist/") || lower.contains("/dist/") {
+        score -= 40;
+    }
+    if lower.ends_with(".min.js") || lower.ends_with(".map") {
+        score -= 50;
+    }
+    score
+}
+
+fn path_matches_glob(relative_path: &str, pattern: &str, case_insensitive: bool) -> bool {
+    let path = relative_path.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    let (path, pattern) = if case_insensitive {
+        (path.to_lowercase(), pattern.to_lowercase())
+    } else {
+        (path, pattern)
+    };
+    if pattern.contains('/') {
+        return glob_match(&pattern, &path);
+    }
+    let file_name = path.rsplit('/').next().unwrap_or(&path);
+    glob_match(&pattern, file_name)
+}
+
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    fn matches(pattern: &[char], text: &[char]) -> bool {
+        match (pattern.first(), text.first()) {
+            (None, None) => true,
+            (Some('*'), _) => {
+                for index in 0..=text.len() {
+                    if matches(&pattern[1..], &text[index..]) {
+                        return true;
+                    }
+                }
+                false
+            }
+            (Some('?'), Some(_)) => matches(&pattern[1..], &text[1..]),
+            (Some(expected), Some(actual)) if expected == actual => {
+                matches(&pattern[1..], &text[1..])
+            }
+            _ => false,
+        }
+    }
+    matches(&pattern, &text)
 }
 
 #[cfg(test)]
@@ -848,6 +1032,85 @@ mod tests {
             )
             .expect("code searches");
         assert_eq!(search.output["results"][0]["path"], "src/lib.rs");
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn search_code_supports_case_glob_and_context() {
+        let root = workspace();
+        fs::create_dir_all(root.join("src")).expect("src creates");
+        fs::create_dir_all(root.join("notes")).expect("notes creates");
+        fs::write(
+            root.join("src/lib.rs"),
+            "// preamble\npub fn find_me() {}\n// trailer\n",
+        )
+        .expect("source writes");
+        fs::write(root.join("notes/readme.md"), "find_me in docs\n").expect("doc writes");
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+
+        let case_search = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "search_case".to_owned(),
+                    name: ToolName::SearchCode,
+                    arguments: json!({
+                        "query": "FIND_ME",
+                        "case_insensitive": true,
+                        "glob": "*.rs",
+                        "context_lines": 1,
+                    }),
+                },
+            )
+            .expect("case search");
+        assert_eq!(case_search.output["results"].as_array().unwrap().len(), 1);
+        assert_eq!(case_search.output["results"][0]["path"], "src/lib.rs");
+        assert_eq!(case_search.output["results"][0]["text"], "pub fn find_me() {}");
+        assert_eq!(case_search.output["results"][0]["before"][0], "// preamble");
+        assert_eq!(case_search.output["results"][0]["after"][0], "// trailer");
+
+        let exact = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "search_exact".to_owned(),
+                    name: ToolName::SearchCode,
+                    arguments: json!({ "query": "FIND_ME" }),
+                },
+            )
+            .expect("exact search");
+        assert_eq!(exact.output["results"].as_array().unwrap().len(), 0);
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn search_code_prefers_source_paths_over_generated() {
+        let root = workspace();
+        fs::create_dir_all(root.join("src")).expect("src creates");
+        // dist is ignored as a directory now; use a non-ignored generated-looking path.
+        fs::create_dir_all(root.join("generated")).expect("generated creates");
+        fs::write(root.join("src/auth.ts"), "export const token = 'secret-marker';\n")
+            .expect("src writes");
+        fs::write(
+            root.join("generated/bundle.min.js"),
+            "var token='secret-marker';\n",
+        )
+        .expect("generated writes");
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+
+        let search = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "search_rank".to_owned(),
+                    name: ToolName::SearchCode,
+                    arguments: json!({ "query": "secret-marker", "max_results": 1 }),
+                },
+            )
+            .expect("ranked search");
+        assert_eq!(search.output["results"][0]["path"], "src/auth.ts");
 
         fs::remove_dir_all(root).expect("workspace removes");
     }

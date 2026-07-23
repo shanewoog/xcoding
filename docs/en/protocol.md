@@ -635,13 +635,18 @@ Output:
 
 ## 6.3 `search_code`
 
+Search workspace text files for a string. Optional: `case_insensitive`, simple `glob` (`*` / `?`), and `context_lines` (0–3). Source-like paths rank higher; common build directories are skipped.
+
 Input:
 
 ```json
 {
   "query": "Router::new",
   "path": ".",
-  "max_results": 50
+  "max_results": 50,
+  "case_insensitive": false,
+  "glob": "*.rs",
+  "context_lines": 1
 }
 ```
 
@@ -653,9 +658,12 @@ Output:
     {
       "path": "src/main.rs",
       "line": 42,
-      "text": "let app = Router::new()"
+      "text": "let app = Router::new()",
+      "before": ["// route builder"],
+      "after": ["    .route(\"/health\", get(health))"]
     }
-  ]
+  ],
+  "truncated": false
 }
 ```
 

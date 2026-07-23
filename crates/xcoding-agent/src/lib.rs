@@ -770,8 +770,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_code".to_owned(),
-            description: "Search workspace text files for an exact string.".to_owned(),
-            parameters: json!({ "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string", "description": "Workspace-relative directory; defaults to ." }, "max_results": { "type": "integer", "minimum": 1, "maximum": 100 } }, "required": ["query"] }),
+            description: "Search workspace text files for a string. Supports optional case-insensitive matching, simple filename/path globs (* and ?), and a few surrounding context lines. Source-like paths are ranked higher.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string", "description": "Workspace-relative directory; defaults to ." }, "max_results": { "type": "integer", "minimum": 1, "maximum": 100 }, "case_insensitive": { "type": "boolean", "description": "Match query ignoring case; defaults to false" }, "glob": { "type": "string", "description": "Optional simple glob on file name (e.g. *.rs) or relative path (e.g. src/*.ts)" }, "context_lines": { "type": "integer", "minimum": 0, "maximum": 3, "description": "Lines of context before and after each match" } }, "required": ["query"] }),
         },
         ToolDefinition {
             name: "apply_patch".to_owned(),

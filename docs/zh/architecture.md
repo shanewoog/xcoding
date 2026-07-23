@@ -182,7 +182,7 @@ V1 工具：
 |---|---|---|
 | `list_dir` | read | 查看工作区结构 |
 | `read_file` | read | 读取文件内容 |
-| `search_code` | read | 通过 ripgrep 搜索 |
+| `search_code` | read | 内置文本搜索，支持可选 glob/上下文 |
 | `apply_patch` | write | 应用 unified diff / patch |
 | `run_command` | exec | 运行测试或构建命令 |
 | `git_status` | read | 查看 git 状态 |

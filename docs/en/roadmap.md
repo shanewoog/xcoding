@@ -151,7 +151,7 @@ Duration target: continuous after V1
 
 ### Candidates
 
-- better relevant-file retrieval
+- better relevant-file retrieval (Wave R: search options + workspace sketch; embeddings later)
 - stronger command policy engine
 - more cloud providers
 - skills system

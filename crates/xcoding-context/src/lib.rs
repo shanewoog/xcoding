@@ -1,10 +1,16 @@
 //! Project-rule loading and prompt context for the coding-agent loop.
 
-use std::{fs, path::Path};
+use std::{
+    collections::VecDeque,
+    fs,
+    path::Path,
+};
 
 /// Workspace-root rule files, in load order.
 const RULE_FILES: [&str; 3] = ["AGENTS.md", "XCoding.md", ".xcoding/rules.md"];
 const MAX_RULE_CHARS: usize = 20_000;
+const MAX_RELEVANT_PATHS: usize = 40;
+const SKETCH_MAX_DEPTH: usize = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectRule {
@@ -38,7 +44,7 @@ impl ContextSnapshot {
 
         Self {
             project_rules,
-            relevant_paths: Vec::new(),
+            relevant_paths: workspace_path_sketch(workspace_root),
         }
     }
 
@@ -60,6 +66,17 @@ Prefer minimal, scoped changes. Do not invent secrets or commit credentials."
             }
         }
 
+        if !self.relevant_paths.is_empty() {
+            prompt.push_str(
+                "\n\nWorkspace sketch (shallow paths for orientation; still use tools before quoting file contents):\n",
+            );
+            for path in &self.relevant_paths {
+                prompt.push_str("- ");
+                prompt.push_str(path);
+                prompt.push('\n');
+            }
+        }
+
         prompt
     }
 }
@@ -71,6 +88,78 @@ fn truncate_rule_content(content: &str, max_chars: usize) -> String {
     let mut truncated = content.chars().take(max_chars).collect::<String>();
     truncated.push_str("\n...[truncated project rule]...");
     truncated
+}
+
+fn workspace_path_sketch(workspace_root: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut pending = VecDeque::from([(workspace_root.to_path_buf(), 0usize)]);
+
+    while let Some((directory, depth)) = pending.pop_front() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut children: Vec<_> = entries.filter_map(Result::ok).collect();
+        children.sort_by_key(|entry| entry.file_name());
+
+        for entry in children {
+            if paths.len() >= MAX_RELEVANT_PATHS {
+                return paths;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name();
+            if file_type.is_dir() && is_ignored_sketch_directory(&name) {
+                continue;
+            }
+
+            let absolute = entry.path();
+            let Some(relative) = relative_path_string(workspace_root, &absolute) else {
+                continue;
+            };
+            if file_type.is_dir() {
+                paths.push(format!("{relative}/"));
+                if depth + 1 <= SKETCH_MAX_DEPTH {
+                    pending.push_back((absolute, depth + 1));
+                }
+            } else if file_type.is_file() {
+                paths.push(relative);
+            }
+        }
+    }
+
+    paths
+}
+
+fn relative_path_string(workspace_root: &Path, absolute: &Path) -> Option<String> {
+    let relative = absolute.strip_prefix(workspace_root).ok()?;
+    let text = relative.to_string_lossy().replace('\\', "/");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn is_ignored_sketch_directory(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_string_lossy().as_ref(),
+        ".git"
+            | ".xcoding"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | "coverage"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | ".cargo"
+    )
 }
 
 #[cfg(test)]
@@ -103,6 +192,8 @@ mod tests {
         assert!(prompt.contains("Run focused tests."));
         assert!(prompt.contains("apply_patch"));
         assert!(prompt.contains("Current mode: ask"));
+        assert!(prompt.contains("AGENTS.md"));
+        assert!(prompt.contains("Workspace sketch"));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -158,6 +249,33 @@ mod tests {
         assert_eq!(context.project_rules.len(), 1);
         assert!(context.project_rules[0].content.contains("[truncated project rule]"));
         assert!(context.project_rules[0].content.chars().count() < oversized.chars().count());
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn sketches_shallow_workspace_paths_and_skips_ignored_dirs() {
+        let root = temp_workspace("sketch");
+        fs::create_dir_all(root.join("src/nested")).expect("src creates");
+        fs::create_dir_all(root.join("node_modules/pkg")).expect("node_modules creates");
+        fs::create_dir_all(root.join("target/debug")).expect("target creates");
+        fs::write(root.join("package.json"), "{}\n").expect("package writes");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("main writes");
+        fs::write(root.join("src/nested/mod.rs"), "// nested\n").expect("nested writes");
+        fs::write(root.join("node_modules/pkg/index.js"), "export {}\n").expect("nm writes");
+
+        let context = ContextSnapshot::load(&root);
+        assert!(context.relevant_paths.iter().any(|path| path == "package.json"));
+        assert!(context.relevant_paths.iter().any(|path| path == "src/"));
+        assert!(context.relevant_paths.iter().any(|path| path == "src/main.rs"));
+        assert!(context.relevant_paths.iter().any(|path| path == "src/nested/"));
+        assert!(context.relevant_paths.iter().any(|path| path == "src/nested/mod.rs"));
+        assert!(!context.relevant_paths.iter().any(|path| path.contains("node_modules")));
+        assert!(!context.relevant_paths.iter().any(|path| path.contains("target")));
+
+        let prompt = context.system_prompt("ask");
+        assert!(prompt.contains("Workspace sketch"));
+        assert!(prompt.contains("src/main.rs"));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
