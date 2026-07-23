@@ -30,3 +30,8 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
 ## 任务完成摘要
 
 任务结束后，Desktop 会显示完成摘要面板：变更文件（created/modified/deleted）、近似 `+/-` 行数、命令成功/失败计数，以及可选的 git status/diff 快照。可用 **Copy summary** 复制完整文本，或 **Copy git** 仅复制 git 快照。
+
+## 多轮会话
+
+在左侧选中已完成会话可查看历史。再发送消息会**续聊**同一会话（共享对话与恢复点）。**New chat** 清空当前选择并开始新任务。
+

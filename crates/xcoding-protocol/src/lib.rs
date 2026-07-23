@@ -458,6 +458,9 @@ pub struct ChatParams {
     pub model: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    /// When set, continue an existing finished session instead of creating a new one.
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

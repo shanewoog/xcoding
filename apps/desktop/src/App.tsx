@@ -299,18 +299,11 @@ export function App() {
     return () => unlisten?.();
   }, []);
 
-  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    const root = workspaceRoot.trim();
-    const message = prompt.trim();
-    if (!root || !message || isRunning) return;
-    if (!isTauriRuntime) {
-      setError("Open XCoding through Tauri to run a coding task.");
-      return;
-    }
+  function canContinueSession(session: Session | null): boolean {
+    return !!session && (session.status === "done" || session.status === "failed" || session.status === "created");
+  }
 
-    setError(null);
-    setIsRunning(true);
+  function startNewChat(): void {
     setActiveSessionId(null);
     setMessages([]);
     setStreamedText("");
@@ -321,7 +314,60 @@ export function App() {
     setPatchPreview(null);
     setRestorePoints([]);
     setTaskSummary(null);
-    const params: ChatParams = { workspace_root: root, message, mode, provider: defaultProvider, model };
+    setReplaySteps([]);
+    setError(null);
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const root = workspaceRoot.trim();
+    const message = prompt.trim();
+    if (!root || !message || isRunning) return;
+    if (!isTauriRuntime) {
+      setError("Open XCoding through Tauri to run a coding task.");
+      return;
+    }
+
+    const continuing = canContinueSession(activeSession);
+    setError(null);
+    setIsRunning(true);
+    if (!continuing) {
+      setActiveSessionId(null);
+      setMessages([]);
+      setStreamedText("");
+      setPlan([]);
+      setActivity([]);
+      setPendingAction(null);
+      setApprovalSummary(null);
+      setPatchPreview(null);
+      setRestorePoints([]);
+      setTaskSummary(null);
+      setReplaySteps([]);
+    } else {
+      setStreamedText("");
+      setPendingAction(null);
+      setApprovalSummary(null);
+      setPatchPreview(null);
+      setTaskSummary(null);
+      setMessages((current) => [
+        ...current,
+        {
+          id: `local-user-${Date.now()}`,
+          session_id: activeSession!.id,
+          role: "user",
+          content: message,
+          created_at: new Date().toISOString(),
+        },
+      ]);
+    }
+    const params: ChatParams = {
+      workspace_root: root,
+      message,
+      mode,
+      provider: defaultProvider,
+      model,
+      session_id: continuing ? activeSession!.id : undefined,
+    };
     try {
       const result = await invoke<ChatResult>("chat", { params });
       setActiveSessionId(result.session.id);
@@ -454,8 +500,9 @@ export function App() {
 
       <section className="chat-panel" aria-label="Coding conversation">
         <header className="chat-header">
-          <div><p className="eyebrow">Cloud model · {activeSession?.model || model}</p><h2>{activeSession ? sessionTitle(activeSession) : "New coding task"}</h2></div>
+          <div><p className="eyebrow">Cloud model · {activeSession?.model || model}</p><h2>{activeSession ? sessionTitle(activeSession) : "New coding task"}{canContinueSession(activeSession) ? " · follow-up" : ""}</h2></div>
           <div className="header-controls">
+            {activeSession ? <button type="button" className="quiet-button" onClick={() => startNewChat()} disabled={isRunning}>New chat</button> : null}
             {activeSession?.status === "need_user" ? <button type="button" className="quiet-button" onClick={() => void cancelSession()} disabled={isRunning}>Cancel</button> : null}
             <label className="mode-control">Mode<select value={mode} onChange={(event) => setMode(event.target.value as Mode)} disabled={isRunning}><option value="ask">Ask</option><option value="auto-edit">Auto edit</option></select></label>
           </div>
@@ -467,8 +514,8 @@ export function App() {
           {error ? <p className="error-message">{error}</p> : null}
         </div>
         <form className="composer" onSubmit={submit}>
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask about this codebase..." rows={4} disabled={isRunning} />
-          <div className="composer-footer"><span>{workspaceRoot.trim() ? workspaceRoot : "Choose a workspace path"}</span><button type="submit" disabled={isRunning || !workspaceRoot.trim() || !prompt.trim()}>{isRunning ? "Working..." : "Send"}</button></div>
+          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={canContinueSession(activeSession) ? "Continue this session..." : "Ask about this codebase..."} rows={4} disabled={isRunning} />
+          <div className="composer-footer"><span>{canContinueSession(activeSession) ? `Continue · ${activeSession!.id.slice(0, 8)}` : workspaceRoot.trim() ? workspaceRoot : "Choose a workspace path"}</span><button type="submit" disabled={isRunning || !workspaceRoot.trim() || !prompt.trim()}>{isRunning ? "Working..." : canContinueSession(activeSession) ? "Continue" : "Send"}</button></div>
         </form>
       </section>
 

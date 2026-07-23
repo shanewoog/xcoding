@@ -146,6 +146,8 @@ export interface ChatParams {
   provider?: string;
   model?: string;
   title?: string;
+  /** Continue an existing finished session instead of creating a new one. */
+  session_id?: string;
 }
 
 export interface ChatResult {

@@ -82,6 +82,9 @@ impl CoreService {
     }
 
     pub fn start_chat(&self, params: ChatParams) -> Result<Session, CoreError> {
+        if let Some(session_id) = params.session_id {
+            return self.continue_chat(session_id, params);
+        }
         if params.workspace_root.trim().is_empty() {
             return Err(CoreError::InvalidInput(
                 "workspace_root must not be empty".to_owned(),
@@ -107,6 +110,53 @@ impl CoreService {
         Ok(session)
     }
 
+    /// Append a user follow-up to a finished session and mark it running again.
+    pub fn continue_chat(
+        &self,
+        session_id: uuid::Uuid,
+        params: ChatParams,
+    ) -> Result<Session, CoreError> {
+        if params.message.trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "message must not be empty".to_owned(),
+            ));
+        }
+
+        let session = self.session(session_id)?;
+        if !params.workspace_root.trim().is_empty() {
+            let requested = params.workspace_root.trim().replace('\\', "/");
+            let existing = session.workspace_root.trim().replace('\\', "/");
+            if !requested.eq_ignore_ascii_case(&existing) {
+                return Err(CoreError::InvalidInput(
+                    "session_id belongs to a different workspace_root".to_owned(),
+                ));
+            }
+        }
+
+        match session.status {
+            SessionStatus::Done | SessionStatus::Failed | SessionStatus::Created => {}
+            SessionStatus::NeedUser => {
+                return Err(CoreError::InvalidInput(
+                    "session is waiting for approval; resolve or cancel it before continuing"
+                        .to_owned(),
+                ));
+            }
+            SessionStatus::Running => {
+                return Err(CoreError::InvalidInput(
+                    "session is already running".to_owned(),
+                ));
+            }
+            SessionStatus::Cancelled => {
+                return Err(CoreError::InvalidInput(
+                    "cancelled sessions cannot be continued".to_owned(),
+                ));
+            }
+        }
+
+        self.store
+            .append_message(session_id, MessageRole::User, params.message.trim())?;
+        self.set_status(session_id, SessionStatus::Running)
+    }
     pub fn workspace_config(&self, workspace_root: &str) -> Result<WorkspaceConfig, CoreError> {
         validate_workspace_root(workspace_root)?;
         Ok(self
@@ -745,6 +795,8 @@ mod tests {
                 provider: None,
                 model: None,
                 title: None,
+
+                session_id: None,
             })
             .expect("chat starts");
         assert_eq!(session.mode, Mode::AutoEdit);
@@ -763,6 +815,8 @@ mod tests {
                 provider: None,
                 model: None,
                 title: None,
+
+                session_id: None,
             })
             .expect("chat starts");
         core.create_restore_point(session.id, "src/a.rs", Some("old"), "new")
@@ -846,6 +900,8 @@ mod tests {
                 provider: Some("openai".to_owned()),
                 model: Some("gpt-5.5".to_owned()),
                 title: None,
+
+                session_id: None,
             })
             .expect("chat starts");
 
@@ -878,6 +934,8 @@ mod tests {
                 provider: Some("openai".to_owned()),
                 model: Some("gpt-5.5".to_owned()),
                 title: None,
+
+                session_id: None,
             })
             .expect("chat starts");
         let action = core
@@ -944,6 +1002,8 @@ mod tests {
                 provider: Some("openai".to_owned()),
                 model: Some("gpt-5.5".to_owned()),
                 title: None,
+
+                session_id: None,
             })
             .expect("chat starts");
         core.record_event(&SessionEvent::Plan {
@@ -1004,6 +1064,8 @@ mod tests {
                 provider: Some("openai".to_owned()),
                 model: Some("gpt-5.5".to_owned()),
                 title: None,
+
+                session_id: None,
             })
             .expect("chat starts");
         assert!(!core
@@ -1027,5 +1089,65 @@ mod tests {
                 .status,
             SessionStatus::Cancelled
         );
+    }
+    #[test]
+    fn continues_finished_session_with_follow_up() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Explain this project".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+                session_id: None,
+            })
+            .expect("chat starts");
+        core.complete_chat(session.id, "First answer.")
+            .expect("first turn completes");
+
+        let continued = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "What about the CLI?".to_owned(),
+                mode: None,
+                provider: None,
+                model: None,
+                title: None,
+                session_id: Some(session.id),
+            })
+            .expect("follow-up continues");
+
+        assert_eq!(continued.id, session.id);
+        assert_eq!(continued.status, SessionStatus::Running);
+        let messages = core.messages(session.id).expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].role, MessageRole::User);
+        assert_eq!(messages[2].content, "What about the CLI?");
+
+        let blocked = core.start_chat(ChatParams {
+            workspace_root: "D:/work/demo".to_owned(),
+            message: "again".to_owned(),
+            mode: None,
+            provider: None,
+            model: None,
+            title: None,
+            session_id: Some(session.id),
+        });
+        assert!(blocked.is_err(), "running session cannot continue again");
+
+        core.complete_chat(session.id, "Second answer.")
+            .expect("second turn completes");
+        let wrong_workspace = core.start_chat(ChatParams {
+            workspace_root: "D:/other".to_owned(),
+            message: "nope".to_owned(),
+            mode: None,
+            provider: None,
+            model: None,
+            title: None,
+            session_id: Some(session.id),
+        });
+        assert!(wrong_workspace.is_err(), "workspace mismatch rejected");
     }
 }

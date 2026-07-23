@@ -232,6 +232,7 @@ async function runChatCommand(
     mode: option(args, "--mode") as ChatParams["mode"],
     provider: option(args, "--provider"),
     model: option(args, "--model"),
+    session_id: option(args, "--session"),
   };
   const result = await runWithEvents<ChatResult>(client, "session.chat", withoutUndefined(params));
   console.log(`Session ${result.session.id}: ${result.session.status}`);
@@ -537,7 +538,7 @@ Usage:
   xcoding session reject <session-id> <action-id> [--workspace <path>]
   xcoding session rollback <session-id> <restore-point-id> [--workspace <path>]
   xcoding session cancel <session-id> [--workspace <path>]
-  xcoding chat "<message>" [--workspace <path>] [--provider openai] [--model <model>]
+  xcoding chat "<message>" [--workspace <path>] [--session <id>] [--mode ask|auto-edit] [--provider openai] [--model <model>]
 
 Environment:
   OPENAI_API_KEY           API key for the OpenAI-compatible cloud provider

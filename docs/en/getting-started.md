@@ -127,3 +127,14 @@ Hard-denied commands never enter the approval queue; they return a tool error to
 - [Session Recovery And Safety](./session-safety.md)
 - [Desktop](../desktop.md)
 - [Protocol](./protocol.md)
+
+## Continue a session
+
+Follow up in an existing finished session (same id, shared history):
+
+```powershell
+pnpm cli -- chat "What about the CLI package?" --workspace . --session <session-id>
+```
+
+Desktop: select a finished session, then send another message (button shows **Continue**). Use **New chat** to start a fresh session.
+

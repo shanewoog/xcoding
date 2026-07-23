@@ -30,3 +30,8 @@ When the agent proposes a shell-style or force-push command, Desktop shows a **H
 ## Task completion summary
 
 When a task finishes, Desktop shows a completion panel with changed files (created/modified/deleted), approximate `+/-` line counts, command success/failure counts, and optional git status/diff snapshots. Use **Copy summary** for the full text report, or **Copy git** for only the git snapshot.
+
+## Multi-turn sessions
+
+Select a finished session in the left list to review history. Sending another message continues that session (shared transcript and restore points). **New chat** clears the selection and starts a new task.
+

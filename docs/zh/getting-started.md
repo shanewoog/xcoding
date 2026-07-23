@@ -127,3 +127,14 @@ pm publish 等
 - [会话恢复与安全](./session-safety.md)
 - [Desktop](./desktop.md)
 - [协议](./protocol.md)
+
+## 会话续聊
+
+在已完成的会话上追加提问（同一 session id，共享历史）：
+
+```powershell
+pnpm cli -- chat "CLI 包是做什么的？" --workspace . --session <session-id>
+```
+
+Desktop：选中已完成的会话后再发送（按钮显示 **Continue**）。点 **New chat** 开启新会话。
+
