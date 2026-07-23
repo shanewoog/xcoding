@@ -22,17 +22,35 @@ pub enum PermissionDecision {
 pub struct CommandAssessment {
     pub decision: PermissionDecision,
     pub high_risk: bool,
+    pub allowlisted: bool,
     pub reason: String,
 }
 
+/// Backward-compatible evaluation that never treats commands as allowlisted.
 pub fn evaluate(mode: &Mode, kind: PermissionKind, high_risk: bool) -> PermissionDecision {
+    evaluate_detailed(mode, kind, high_risk, false)
+}
+
+/// Mode-aware permission evaluation.
+///
+/// `command_allowlisted` only affects `PermissionKind::Exec` under `auto-edit`.
+pub fn evaluate_detailed(
+    mode: &Mode,
+    kind: PermissionKind,
+    high_risk: bool,
+    command_allowlisted: bool,
+) -> PermissionDecision {
     match kind {
         PermissionKind::Read => PermissionDecision::Allow,
         PermissionKind::Network => PermissionDecision::Deny,
-        PermissionKind::Exec => PermissionDecision::AskUser,
         PermissionKind::Write if high_risk => PermissionDecision::AskUser,
         PermissionKind::Write if matches!(mode, Mode::AutoEdit) => PermissionDecision::Allow,
         PermissionKind::Write => PermissionDecision::AskUser,
+        PermissionKind::Exec if high_risk => PermissionDecision::AskUser,
+        PermissionKind::Exec if command_allowlisted && matches!(mode, Mode::AutoEdit) => {
+            PermissionDecision::Allow
+        }
+        PermissionKind::Exec => PermissionDecision::AskUser,
     }
 }
 
@@ -40,6 +58,8 @@ pub fn evaluate(mode: &Mode, kind: PermissionKind, high_risk: bool) -> Permissio
 ///
 /// Hard-denied commands never reach the user approval prompt.
 /// High-risk commands still require approval but are labeled for review UX.
+/// Safe allowlisted commands are marked `decision=Allow` and `allowlisted=true`;
+/// mode policy still decides whether they auto-run.
 pub fn assess_command(executable: &str, args: &[String]) -> CommandAssessment {
     let executable = executable.trim();
     if executable.is_empty() {
@@ -137,7 +157,9 @@ pub fn assess_command(executable: &str, args: &[String]) -> CommandAssessment {
         }
         if args_lower.iter().any(|arg| arg == "reset")
             && args_lower.iter().any(|arg| arg == "--hard")
-            && args_lower.iter().any(|arg| arg == "head~" || arg.starts_with("head~"))
+            && args_lower
+                .iter()
+                .any(|arg| arg == "head~" || arg.starts_with("head~"))
         {
             high_risk = true;
         }
@@ -165,21 +187,107 @@ pub fn assess_command(executable: &str, args: &[String]) -> CommandAssessment {
         high_risk = true;
     }
 
+    if high_risk {
+        return CommandAssessment {
+            decision: PermissionDecision::AskUser,
+            high_risk: true,
+            allowlisted: false,
+            reason: format!("high-risk command `{exe}` requires explicit approval"),
+        };
+    }
+
+    if is_command_allowlisted(&exe, args) {
+        return CommandAssessment {
+            decision: PermissionDecision::Allow,
+            high_risk: false,
+            allowlisted: true,
+            reason: format!("allowlisted command `{exe}` may auto-run under auto-edit"),
+        };
+    }
+
     CommandAssessment {
         decision: PermissionDecision::AskUser,
-        high_risk,
-        reason: if high_risk {
-            format!("high-risk command `{exe}` requires explicit approval")
-        } else {
-            format!("command `{exe}` requires approval before execution")
-        },
+        high_risk: false,
+        allowlisted: false,
+        reason: format!("command `{exe}` requires approval before execution"),
     }
+}
+
+/// Strict allowlist for safe, commonly used developer commands.
+///
+/// Never allowlists high-risk shells/interpreters. Rejects shell metacharacters
+/// in arguments so callers cannot smuggle extra execution.
+pub fn is_command_allowlisted(executable: &str, args: &[String]) -> bool {
+    let exe = strip_windows_extension(&executable.trim().to_ascii_lowercase());
+    if exe.is_empty() {
+        return false;
+    }
+    if args.iter().any(|arg| contains_shell_metacharacters(arg)) {
+        return false;
+    }
+
+    let first = args.first().map(|arg| arg.as_str()).unwrap_or("");
+    let first_lower = first.to_ascii_lowercase();
+
+    match exe.as_str() {
+        "cargo" => {
+            if args.is_empty() {
+                return false;
+            }
+            matches!(
+                first_lower.as_str(),
+                "check"
+                    | "test"
+                    | "build"
+                    | "clippy"
+                    | "fmt"
+                    | "tree"
+                    | "metadata"
+                    | "nextest"
+                    | "--version"
+                    | "-v"
+                    | "--help"
+                    | "-h"
+            )
+        }
+        "git" => matches!(
+            first_lower.as_str(),
+            "status" | "diff" | "log" | "show" | "branch" | "rev-parse" | "describe"
+        ),
+        "pnpm" | "npm" | "yarn" => {
+            if args.iter().any(|arg| arg.eq_ignore_ascii_case("publish")) {
+                return false;
+            }
+            matches!(
+                first_lower.as_str(),
+                "test" | "run" | "lint" | "build" | "exec" | "typecheck" | "vitest"
+            )
+        }
+        "go" => matches!(
+            first_lower.as_str(),
+            "test" | "build" | "vet" | "fmt" | "list" | "env" | "version"
+        ),
+        "tsc" => true,
+        "pytest" => true,
+        "dotnet" => matches!(first_lower.as_str(), "test" | "build" | "restore"),
+        _ => false,
+    }
+}
+
+fn contains_shell_metacharacters(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch,
+            '&' | '|' | ';' | '`' | '$' | '\n' | '\r' | '>' | '<' | '(' | ')'
+        )
+    })
 }
 
 fn denied(reason: impl Into<String>) -> CommandAssessment {
     CommandAssessment {
         decision: PermissionDecision::Deny,
         high_risk: true,
+        allowlisted: false,
         reason: reason.into(),
     }
 }
@@ -241,19 +349,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_edit_allows_normal_writes_but_not_commands() {
+    fn auto_edit_allows_normal_writes_but_not_non_allowlisted_commands() {
         assert_eq!(
             evaluate(&Mode::AutoEdit, PermissionKind::Write, false),
             PermissionDecision::Allow
         );
         assert_eq!(
-            evaluate(&Mode::AutoEdit, PermissionKind::Exec, false),
+            evaluate_detailed(&Mode::AutoEdit, PermissionKind::Exec, false, false),
             PermissionDecision::AskUser
         );
     }
 
     #[test]
-    fn auto_edit_still_asks_for_high_risk_writes() {
+    fn auto_edit_allows_allowlisted_commands() {
+        assert_eq!(
+            evaluate_detailed(&Mode::AutoEdit, PermissionKind::Exec, false, true),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            evaluate_detailed(&Mode::Ask, PermissionKind::Exec, false, true),
+            PermissionDecision::AskUser
+        );
+    }
+
+    #[test]
+    fn auto_edit_still_asks_for_high_risk_writes_and_commands() {
         assert_eq!(
             evaluate(&Mode::AutoEdit, PermissionKind::Write, true),
             PermissionDecision::AskUser
@@ -262,12 +382,17 @@ mod tests {
             evaluate(&Mode::Ask, PermissionKind::Write, true),
             PermissionDecision::AskUser
         );
+        assert_eq!(
+            evaluate_detailed(&Mode::AutoEdit, PermissionKind::Exec, true, true),
+            PermissionDecision::AskUser
+        );
     }
 
     #[test]
     fn denies_destructive_system_commands() {
         let assessment = assess_command("format", &["C:".to_owned()]);
         assert_eq!(assessment.decision, PermissionDecision::Deny);
+        assert!(!assessment.allowlisted);
         assert!(assessment.reason.contains("blocked"));
     }
 
@@ -295,16 +420,23 @@ mod tests {
         );
         assert_eq!(assessment.decision, PermissionDecision::AskUser);
         assert!(assessment.high_risk);
+        assert!(!assessment.allowlisted);
     }
 
     #[test]
     fn marks_force_push_high_risk() {
         let assessment = assess_command(
             "git",
-            &["push".to_owned(), "--force".to_owned(), "origin".to_owned(), "main".to_owned()],
+            &[
+                "push".to_owned(),
+                "--force".to_owned(),
+                "origin".to_owned(),
+                "main".to_owned(),
+            ],
         );
         assert_eq!(assessment.decision, PermissionDecision::AskUser);
         assert!(assessment.high_risk);
+        assert!(!assessment.allowlisted);
     }
 
     #[test]
@@ -314,9 +446,40 @@ mod tests {
     }
 
     #[test]
-    fn allows_common_build_commands_after_approval() {
-        let assessment = assess_command("cargo", &["test".to_owned(), "-p".to_owned(), "xcoding-policy".to_owned()]);
-        assert_eq!(assessment.decision, PermissionDecision::AskUser);
+    fn allowlists_common_build_commands() {
+        let assessment = assess_command(
+            "cargo",
+            &["test".to_owned(), "-p".to_owned(), "xcoding-policy".to_owned()],
+        );
+        assert_eq!(assessment.decision, PermissionDecision::Allow);
+        assert!(assessment.allowlisted);
         assert!(!assessment.high_risk);
+
+        let version = assess_command("cargo", &["--version".to_owned()]);
+        assert!(version.allowlisted);
+
+        let git_status = assess_command("git", &["status".to_owned(), "--short".to_owned()]);
+        assert!(git_status.allowlisted);
+    }
+
+    #[test]
+    fn rejects_allowlist_when_args_contain_shell_metacharacters() {
+        assert!(!is_command_allowlisted(
+            "cargo",
+            &["test".to_owned(), "&&".to_owned(), "rm".to_owned(), "-rf".to_owned(), "/".to_owned()]
+        ));
+        let assessment = assess_command(
+            "cargo",
+            &["test".to_owned(), ";".to_owned(), "evil".to_owned()],
+        );
+        assert!(!assessment.allowlisted);
+        assert_eq!(assessment.decision, PermissionDecision::AskUser);
+    }
+
+    #[test]
+    fn does_not_allowlist_publish_or_shell_wrappers() {
+        assert!(!is_command_allowlisted("pnpm", &["publish".to_owned()]));
+        assert!(!is_command_allowlisted("cmd", &["/c".to_owned(), "echo".to_owned(), "hi".to_owned()]));
+        assert!(!is_command_allowlisted("node", &["-e".to_owned(), "1".to_owned()]));
     }
 }

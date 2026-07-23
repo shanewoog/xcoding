@@ -62,6 +62,7 @@ async function runDeterministic() {
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/read-only-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/guarded-write-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/auto-edit-mode.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/command-allowlist.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/running-cancel-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/session-replay-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/write-loop-agent.mjs")]);

@@ -6,7 +6,7 @@ XCoding 会把每个会话持久化到本地 SQLite 数据库：CLI 使用 `<wor
 
 默认模式是 `ask`。XCoding 可以自动读取工作区，但在每次写文件或执行命令前暂停。待审批动作和补丁预览都会保存下来，因此即使 CLI 或 Desktop 重启，也能继续审批。
 
-`auto-edit` 会自动应用普通文件补丁。命令仍然必须审批，`.git`、`.xcoding` 等高风险路径依然受保护。只应在允许 XCoding 修改的工作区中启用该模式。
+`auto-edit` 会自动应用普通文件补丁。少量安全开发命令（例如 `cargo test`、`git status`、`pnpm test`）也可自动执行。非白名单命令、Shell 解释器，以及 `.git` / `.xcoding` 等高风险路径仍需审批。只应在允许 XCoding 修改的工作区中启用该模式。
 
 ## 工作区默认配置
 
@@ -63,16 +63,26 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 
 ## 命令策略
 
-所有 `run_command` 在执行前都需要审批。策略引擎会硬拒绝明显危险的系统命令（例如 `format`、`shutdown`、`git clean -fdx`），并对 shell / force-push 等高风险调用在审批摘要中标注 **HIGH-RISK**。Desktop 会用徽章、完整命令文本和更醒目的确认按钮突出这些审批；CLI 会打印 HIGH-RISK 警告和完整命令行。
+`run_command` 由严格白名单与风险标注共同约束：
+
+- 对明显危险的系统命令硬拒绝（例如 `format`、`shutdown`、`git clean -fdx`）。
+- Shell / force-push 等高风险调用始终需要审批，并在审批摘要中标注 **HIGH-RISK**。
+- 在 `ask` 模式下，其余命令仍全部需要审批。
+- 在 `auto-edit` 模式下，仅白名单内的安全命令可自动执行，其他命令仍需审批。
+
+白名单覆盖只读 `git` 查询、`cargo`/`go`/`dotnet` 构建测试类命令、包管理器的 `test`/`build`/`lint`/`exec`（不含 `publish`），以及 `tsc`、`pytest`。参数中含有 shell 元字符的调用不会进入白名单。
+
+Desktop 会用徽章、完整命令文本和更醒目的确认按钮突出高风险审批；CLI 会打印 HIGH-RISK 警告和完整命令行。
 
 ## 模式策略信号
 
 任务进行中，工具活动摘要会标明策略判定：
 
 - `Auto-applying apply_patch` — 在 `auto-edit` 下自动应用了普通写操作
+- `Auto-running run_command` — 在 `auto-edit` 下自动执行了白名单命令
 - `Awaiting approval for apply_patch` / `run_command` — 已暂停等待用户审批
 - `Running ...` — 立即允许（只读，或已获准执行路径）
 - `Blocked ...` — 被策略硬拒绝
 
-`auto-edit` 下的普通补丁不会发出 `approval_requested`。无论何种模式，命令都会请求审批。即使在 `auto-edit` 下，`.git` / `.xcoding` 路径的写入仍需审批。
+`auto-edit` 下的普通补丁与白名单命令不会发出 `approval_requested`。非白名单命令、高风险命令，以及 `.git` / `.xcoding` 路径的写入仍需审批。
 

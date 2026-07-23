@@ -8,7 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use xcoding_context::ContextSnapshot;
 use xcoding_core::{CoreError, CoreService};
-use xcoding_policy::{PermissionDecision, PermissionKind, evaluate};
+use xcoding_policy::{PermissionDecision, PermissionKind, evaluate_detailed};
 use xcoding_protocol::{
     ChatParams, ChatResult, MessageRole, PlanStep, ResolveActionParams, ResolveActionResult,
     RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionEvent, SessionStatus,
@@ -367,7 +367,7 @@ impl<'a> AgentService<'a> {
             for provider_call in tool_calls {
                 self.ensure_not_cancelled(session.id)?;
                 let tool_call = protocol_tool_call(provider_call)?;
-                let (kind, high_risk) = match tools.permission_for(&tool_call) {
+                let (kind, high_risk, allowlisted) = match tools.permission_for(&tool_call) {
                     Ok(value) => value,
                     Err(error) => {
                         self.emit(
@@ -383,7 +383,7 @@ impl<'a> AgentService<'a> {
                         continue;
                     }
                 };
-                let decision = evaluate(&session.mode, kind, high_risk);
+                let decision = evaluate_detailed(&session.mode, kind, high_risk, allowlisted);
                 self.emit(
                     on_event,
                     SessionEvent::ToolStart {
@@ -686,6 +686,12 @@ fn tool_start_summary(
                 && matches!(kind, PermissionKind::Write) =>
         {
             format!("Auto-applying {name}")
+        }
+        PermissionDecision::Allow
+            if matches!(mode, xcoding_protocol::Mode::AutoEdit)
+                && matches!(kind, PermissionKind::Exec) =>
+        {
+            format!("Auto-running {name}")
         }
         PermissionDecision::Allow => format!("Running {name}"),
         PermissionDecision::AskUser => format!("Awaiting approval for {name}"),

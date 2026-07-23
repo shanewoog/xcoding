@@ -6,7 +6,7 @@ XCoding persists each session in the local SQLite database at `<workspace>/.xcod
 
 `ask` is the default. XCoding reads the workspace automatically, but pauses before every patch or command. The pending action and its patch preview are stored, so approval can continue after the CLI or Desktop restarts.
 
-`auto-edit` applies ordinary file patches without a prompt. Commands still require approval, and high-risk paths such as `.git` and `.xcoding` remain protected. Use this mode only for a workspace you are ready to let XCoding modify.
+`auto-edit` applies ordinary file patches without a prompt. A small allowlist of safe developer commands (for example `cargo test`, `git status`, `pnpm test`) may also auto-run. Non-allowlisted commands, shell interpreters, and high-risk paths such as `.git` and `.xcoding` still require approval. Use this mode only for a workspace you are ready to let XCoding modify.
 
 ## Workspace Defaults
 
@@ -63,16 +63,26 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
 
 ## Command Policy
 
-Every `run_command` requires approval before execution. The policy engine hard-denies clearly destructive system commands (for example `format`, `shutdown`, `git clean -fdx`) and labels high-risk shell or force-push invocations as **HIGH-RISK** in the approval summary. Desktop highlights those approvals with a badge, the rendered command, and a stronger confirm action; the CLI prints a HIGH-RISK warning plus the full command line.
+`run_command` is gated by a strict allowlist plus risk labels:
+
+- Hard deny for clearly destructive system commands (for example `format`, `shutdown`, `git clean -fdx`).
+- High-risk shells and force-push style invocations always need approval and are labeled **HIGH-RISK** in the approval summary.
+- Under `ask`, every remaining command still needs approval.
+- Under `auto-edit`, only allowlisted safe commands auto-run; everything else still needs approval.
+
+Allowlisted families include read-only `git` inspection, `cargo`/`go`/`dotnet` build-test helpers, package-manager `test`/`build`/`lint`/`exec` (not `publish`), plus `tsc` and `pytest`. Arguments containing shell metacharacters are never allowlisted.
+
+Desktop highlights high-risk approvals with a badge, the rendered command, and a stronger confirm action; the CLI prints a HIGH-RISK warning plus the full command line.
 
 ## Mode policy signals
 
 During a task, tool activity summaries show how policy decided:
 
 - `Auto-applying apply_patch` — ordinary write auto-ran under `auto-edit`
+- `Auto-running run_command` — allowlisted command auto-ran under `auto-edit`
 - `Awaiting approval for apply_patch` / `run_command` — paused for user review
 - `Running ...` — allowed immediately (reads, or approved execution path)
 - `Blocked ...` — hard-denied by policy
 
-Ordinary patches under `auto-edit` never emit `approval_requested`. Commands always do, regardless of mode. Writes under `.git` / `.xcoding` still require approval even in `auto-edit`.
+Ordinary patches and allowlisted commands under `auto-edit` never emit `approval_requested`. Non-allowlisted commands, high-risk commands, and writes under `.git` / `.xcoding` still require approval.
 

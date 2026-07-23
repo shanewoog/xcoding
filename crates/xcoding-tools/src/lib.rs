@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
-use xcoding_policy::{PermissionDecision, PermissionKind, assess_command, evaluate};
+use xcoding_policy::{PermissionDecision, PermissionKind, assess_command, evaluate_detailed};
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
@@ -83,26 +83,27 @@ impl ToolRegistry {
     }
 
     pub fn execute(&self, mode: &Mode, tool_call: &ToolCall) -> Result<ToolExecution, ToolError> {
-        let (kind, high_risk) = self.permission_for(tool_call)?;
-        if evaluate(mode, kind, high_risk) != PermissionDecision::Allow {
+        let (kind, high_risk, allowlisted) = self.permission_for(tool_call)?;
+        if evaluate_detailed(mode, kind, high_risk, allowlisted) != PermissionDecision::Allow {
             return Err(ToolError::PermissionDenied);
         }
         self.execute_authorized(tool_call)
     }
 
+    /// Returns `(kind, high_risk, command_allowlisted)`.
     pub fn permission_for(
         &self,
         tool_call: &ToolCall,
-    ) -> Result<(PermissionKind, bool), ToolError> {
+    ) -> Result<(PermissionKind, bool, bool), ToolError> {
         match tool_call.name {
             ToolName::ListDir
             | ToolName::ReadFile
             | ToolName::SearchCode
             | ToolName::GitStatus
-            | ToolName::GitDiff => Ok((PermissionKind::Read, false)),
+            | ToolName::GitDiff => Ok((PermissionKind::Read, false, false)),
             ToolName::ApplyPatch => {
                 let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
-                Ok((PermissionKind::Write, is_high_risk_path(&args.path)))
+                Ok((PermissionKind::Write, is_high_risk_path(&args.path), false))
             }
             ToolName::RunCommand => {
                 let args: RunCommandArgs = parse_arguments(&tool_call.arguments)?;
@@ -110,7 +111,11 @@ impl ToolRegistry {
                 if assessment.decision == PermissionDecision::Deny {
                     return Err(ToolError::InvalidCommand(assessment.reason));
                 }
-                Ok((PermissionKind::Exec, assessment.high_risk))
+                Ok((
+                    PermissionKind::Exec,
+                    assessment.high_risk,
+                    assessment.allowlisted,
+                ))
             }
         }
     }
@@ -988,7 +993,7 @@ mod tests {
     fn marks_high_risk_shell_commands() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("tools");
-        let (kind, high_risk) = tools
+        let (kind, high_risk, _allowlisted) = tools
             .permission_for(&ToolCall {
                 id: "1".to_owned(),
                 name: ToolName::RunCommand,
@@ -1006,7 +1011,7 @@ mod tests {
     fn marks_dot_xcoding_paths_high_risk() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("tools");
-        let (kind, high_risk) = tools
+        let (kind, high_risk, _allowlisted) = tools
             .permission_for(&ToolCall {
                 id: "1".to_owned(),
                 name: ToolName::ApplyPatch,
@@ -1019,6 +1024,26 @@ mod tests {
             .expect("patch");
         assert_eq!(kind, xcoding_policy::PermissionKind::Write);
         assert!(high_risk);
+    }
+
+    #[test]
+    fn marks_allowlisted_build_commands() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let (kind, high_risk, allowlisted) = tools
+            .permission_for(&ToolCall {
+                id: "1".to_owned(),
+                name: ToolName::RunCommand,
+                arguments: json!({
+                    "executable": "cargo",
+                    "args": ["--version"]
+                }),
+            })
+            .expect("allowlisted");
+        assert_eq!(kind, xcoding_policy::PermissionKind::Exec);
+        assert!(!high_risk);
+        assert!(allowlisted);
+        fs::remove_dir_all(root).expect("workspace removes");
     }
 
     #[test]
