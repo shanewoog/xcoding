@@ -50,6 +50,11 @@ On Windows, replacing an existing file requires deleting the destination before 
 - Running commands are killed: `run_command` executes off the async runtime, polls the cancel probe, and terminates the child process when cancelled.
 - The stdio JSON-RPC server accepts `session.cancel` (and other short requests) while `session.chat` / `session.resolve` are in progress.
 
+
+## Workspace Skills
+
+Optional skills live at `.xcoding/skills/<name>/SKILL.md`. XCoding lists their names and descriptions in the system prompt and loads full instructions only when the agent calls the read-only `load_skill` tool.
+
 ## Credentials
 
 XCoding does not store cloud credentials in the repository or its session database. Configure the OpenAI-compatible provider through environment variables:

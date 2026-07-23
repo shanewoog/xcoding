@@ -709,6 +709,32 @@ Output:
 }
 ```
 
+
+### `load_skill`
+
+Read-only. Loads full instructions for a workspace skill under `.xcoding/skills/<name>/SKILL.md`.
+
+Input:
+
+```json
+{
+  "name": "hello-style"
+}
+```
+
+Output:
+
+```json
+{
+  "name": "hello-style",
+  "path": ".xcoding/skills/hello-style/SKILL.md",
+  "description": "Prefer concise Chinese summaries",
+  "content": "# Hello Style\n..."
+}
+```
+
+Skill names are folder names: `1-64` chars of `[A-Za-z0-9._-]`, starting with alphanumeric. Optional YAML frontmatter may set `name` (must match folder) and `description`; the body after frontmatter is the skill content.
+
 ## 6.6 `git_status` / `git_diff` / `git_log` / `git_show` / `git_add` / `git_commit` / `git_push` / `git_fetch` / `git_pull`
 
 Read-only helpers for context, history, and final summaries.

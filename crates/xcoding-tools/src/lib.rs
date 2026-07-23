@@ -29,6 +29,8 @@ const DEFAULT_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_SEARCH_CONTEXT_LINES: usize = 3;
+const MAX_SKILL_CONTENT_CHARS: usize = 20_000;
+const MAX_SKILL_DESCRIPTION_CHARS: usize = 240;
 const MAX_SEARCH_CANDIDATES: usize = 500;
 const DEFAULT_GIT_LOG_COUNT: usize = 20;
 const MAX_GIT_LOG_COUNT: usize = 50;
@@ -157,6 +159,7 @@ impl ToolRegistry {
             ToolName::ListDir
             | ToolName::ReadFile
             | ToolName::SearchCode
+            | ToolName::LoadSkill
             | ToolName::GitStatus
             | ToolName::GitDiff
             | ToolName::GitLog
@@ -230,6 +233,7 @@ impl ToolRegistry {
             ToolName::ListDir => self.list_dir(parse_arguments(&tool_call.arguments)?),
             ToolName::ReadFile => self.read_file(parse_arguments(&tool_call.arguments)?),
             ToolName::SearchCode => self.search_code(parse_arguments(&tool_call.arguments)?),
+            ToolName::LoadSkill => self.load_skill(parse_arguments(&tool_call.arguments)?),
             ToolName::ApplyPatch => self.apply_patch(parse_arguments(&tool_call.arguments)?),
             ToolName::RunCommand => {
                 self.run_command(parse_arguments(&tool_call.arguments)?, is_cancelled)
@@ -582,6 +586,46 @@ impl ToolRegistry {
             } else {
                 "Command failed".to_owned()
             },
+        })
+    }
+
+    fn load_skill(&self, args: LoadSkillArgs) -> Result<ToolExecution, ToolError> {
+        let name = args.name.trim();
+        if !is_valid_skill_name(name) {
+            return Err(ToolError::InvalidArguments(
+                "skill name must be 1-64 chars of [A-Za-z0-9._-] starting with alphanumeric".to_owned(),
+            ));
+        }
+        let relative = format!(".xcoding/skills/{name}/SKILL.md");
+        let path = self.resolve(&relative)?;
+        if !path.is_file() {
+            return Err(ToolError::NotFile(self.relative_path(&path)));
+        }
+        if path.metadata()?.len() > MAX_READ_BYTES {
+            return Err(ToolError::FileTooLarge(self.relative_path(&path)));
+        }
+        let raw = fs::read_to_string(&path)?;
+        let parsed = parse_skill_file(name, &raw);
+        let content = if parsed.body.chars().count() > MAX_SKILL_CONTENT_CHARS {
+            let mut truncated = parsed
+                .body
+                .chars()
+                .take(MAX_SKILL_CONTENT_CHARS)
+                .collect::<String>();
+            truncated.push_str("\n...[truncated skill content]...");
+            truncated
+        } else {
+            parsed.body
+        };
+        let path = self.relative_path(&path);
+        Ok(ToolExecution {
+            output: json!({
+                "name": name,
+                "path": path,
+                "description": parsed.description,
+                "content": content,
+            }),
+            summary: format!("Loaded skill {name}"),
         })
     }
 
@@ -1254,6 +1298,12 @@ struct SearchCodeArgs {
 }
 
 #[derive(Deserialize)]
+struct LoadSkillArgs {
+    name: String,
+}
+
+
+#[derive(Deserialize)]
 struct GitStatusArgs {
     #[serde(default)]
     path: Option<String>,
@@ -1484,6 +1534,88 @@ fn load_command_allowlist(workspace_root: &Path) -> Vec<String> {
     }
 }
 
+fn is_valid_skill_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    name.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+}
+
+struct ParsedSkillFile {
+    description: String,
+    body: String,
+}
+
+fn parse_skill_file(folder_name: &str, raw: &str) -> ParsedSkillFile {
+    let normalized = raw.replace("\r\n", "\n");
+    let (description, body) = if let Some(rest) = normalized.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---\n") {
+            let frontmatter = &rest[..end];
+            let body = rest[end + "\n---\n".len()..].to_owned();
+            let mut description = None;
+            for line in frontmatter.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    let key = key.trim();
+                    let value = value.trim().trim_matches('"').trim_matches('\'').to_owned();
+                    if key == "description" && !value.is_empty() {
+                        description = Some(value);
+                    }
+                }
+            }
+            (
+                description.unwrap_or_else(|| skill_fallback_description(&body)),
+                body,
+            )
+        } else {
+            (
+                skill_fallback_description(&normalized),
+                normalized.clone(),
+            )
+        }
+    } else {
+        (
+            skill_fallback_description(&normalized),
+            normalized.clone(),
+        )
+    };
+    let description = if description.chars().count() > MAX_SKILL_DESCRIPTION_CHARS {
+        description
+            .chars()
+            .take(MAX_SKILL_DESCRIPTION_CHARS)
+            .collect::<String>()
+    } else {
+        description
+    };
+    let _ = folder_name;
+    ParsedSkillFile { description, body }
+}
+
+fn skill_fallback_description(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .or_else(|| {
+            body.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.trim_start_matches('#').trim())
+        })
+        .unwrap_or("Workspace skill")
+        .to_owned()
+}
+
 fn is_high_risk_path(path: &str) -> bool {
     path.split(['/', '\\'])
         .any(|part| part == ".git" || part == ".xcoding")
@@ -1704,6 +1836,56 @@ mod tests {
         let root = std::env::temp_dir().join(format!("xcoding-tools-{unique}"));
         fs::create_dir_all(&root).expect("workspace creates");
         root
+    }
+
+    #[test]
+    fn loads_workspace_skill_as_read_only_tool() {
+        let root = workspace();
+        let skill_dir = root.join(".xcoding/skills/demo-skill");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Demo skill for tests\n---\n# Demo\nUse this skill.\n",
+        )
+        .expect("skill writes");
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+
+        let loaded = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "skill_1".to_owned(),
+                    name: ToolName::LoadSkill,
+                    arguments: json!({ "name": "demo-skill" }),
+                },
+            )
+            .expect("skill loads");
+        assert_eq!(loaded.output["name"], "demo-skill");
+        assert_eq!(loaded.output["description"], "Demo skill for tests");
+        assert!(loaded.output["content"].as_str().unwrap().contains("Use this skill."));
+        assert_eq!(loaded.summary, "Loaded skill demo-skill");
+
+        let missing = tools.execute(
+            &Mode::Ask,
+            &ToolCall {
+                id: "skill_missing".to_owned(),
+                name: ToolName::LoadSkill,
+                arguments: json!({ "name": "nope" }),
+            },
+        );
+        assert!(missing.is_err());
+
+        let bad = tools.execute(
+            &Mode::Ask,
+            &ToolCall {
+                id: "skill_bad".to_owned(),
+                name: ToolName::LoadSkill,
+                arguments: json!({ "name": "../escape" }),
+            },
+        );
+        assert!(bad.is_err());
+
+        fs::remove_dir_all(root).expect("workspace removes");
     }
 
     #[test]

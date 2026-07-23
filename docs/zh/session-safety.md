@@ -94,3 +94,6 @@ Desktop 会用徽章、完整命令文本和更醒目的确认按钮突出高风
 
 `auto-edit` 下的普通补丁与白名单命令不会发出 `approval_requested`。非白名单命令、高风险命令，以及 `.git` / `.xcoding` 路径的写入仍需审批。
 
+## 工作区 Skills
+
+可选 skill 放在 `.xcoding/skills/<name>/SKILL.md`。XCoding 只在系统提示中列出名称与描述；完整说明在 Agent 调用只读工具 `load_skill` 时加载。

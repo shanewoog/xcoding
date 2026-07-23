@@ -122,6 +122,9 @@ eady is false.
 Hard-denied commands never enter the approval queue; they return a tool error to the model.
 Ordinary high-risk workspace writes under `.git` / `.xcoding` always need approval, even in auto-edit.
 
+
+Optional: add workspace skills under `.xcoding/skills/<name>/SKILL.md` so the agent can call `load_skill`.
+
 ## Next Reading
 
 - [Session Recovery And Safety](./session-safety.md)

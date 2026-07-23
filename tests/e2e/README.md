@@ -11,6 +11,7 @@ The tests start the real `xcoding-server` binary, use a local OpenAI-compatible 
 ## Suites
 
 - `read-only-agent.mjs`: grounded read-only answer from fixture workspace.
+- `skills-agent.mjs`: catalog + `load_skill` for `.xcoding/skills/*/SKILL.md`.
 - `command-allowlist.mjs`: ask still gates allowlisted commands; auto-edit auto-runs allowlist and still gates high-risk shells.
 - `guarded-write-agent.mjs`: ask-mode approvals, reject, auto-edit patch auto-apply, command still gated.
 - `running-cancel-agent.mjs`: mid-stream cancel, mid-command cancel, failed command refeed, auto-edit still gates commands.

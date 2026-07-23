@@ -154,7 +154,7 @@
 - 更好的相关文件召回（Wave R：搜索选项 + 工作区 sketch；向量检索后续）
 - 更强命令策略引擎
 - 更多云供应商
-- skills 系统
+- skills 系统（Wave Y：工作区 `.xcoding/skills/*/SKILL.md` 目录 + 只读 `load_skill`）
 - MCP 支持
 - 更好的补丁置信度与冲突体验（Wave X：结构化 `patch_conflict` 工具错误、Agent 重读指引、Desktop CONFLICT 标记、CLI 重试提示）
 - 更丰富 git 工作流（Wave S：结构化 `git_log` + `git_show`；Wave T：需审批的 `git_add` + `git_commit`；Wave U：需审批且不 force 的 `git_push`；Wave V：需审批的 `git_fetch` + `git_pull`（默认 ff-only）；Wave W：Desktop/CLI 对 git 工具的专用审批展示；reset/force/rebase 稍后）

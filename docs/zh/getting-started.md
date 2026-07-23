@@ -138,3 +138,4 @@ pnpm cli -- chat "CLI 包是做什么的？" --workspace . --session <session-id
 
 Desktop：选中已完成的会话后再发送（按钮显示 **Continue**）。点 **New chat** 开启新会话。
 
+可选：在 `.xcoding/skills/<name>/SKILL.md` 添加工作区 skill，Agent 可通过 `load_skill` 加载。

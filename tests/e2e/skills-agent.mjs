@@ -7,13 +7,31 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const fixtureRoot = resolve(repositoryRoot, "tests/e2e/fixtures/read-only-agent");
+const fixtureRoot = resolve(repositoryRoot, "tests/e2e/fixtures/skills-agent");
 const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcoding-server";
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
+const EXPECTED_TOOLS = [
+  "list_dir",
+  "read_file",
+  "search_code",
+  "load_skill",
+  "apply_patch",
+  "run_command",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "git_show",
+  "git_add",
+  "git_commit",
+  "git_push",
+  "git_fetch",
+  "git_pull",
+];
+
 async function main() {
   const mock = await startMockProvider();
-  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-"));
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-skills-"));
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
@@ -26,35 +44,39 @@ async function main() {
   try {
     const result = await rpc.request("session.chat", {
       workspace_root: fixtureRoot,
-      message: "What source files are in this repository?",
+      message: "Use the hello-style skill and summarize this workspace.",
       model: "fixture-model",
     });
 
     assert.equal(result.session.status, "done");
-    assert.match(result.message.content, /src\/auth\.ts/);
-    assert.ok(rpc.events.some((event) => event.type === "plan"));
+    assert.match(result.message.content, /DONE/);
 
     const toolStart = rpc.events.find((event) => event.type === "tool_start");
     assert.deepEqual(toolStart?.tool_call, {
-      id: "call_list_root",
-      name: "list_dir",
-      arguments: { path: "." },
+      id: "call_load_skill",
+      name: "load_skill",
+      arguments: { name: "hello-style" },
     });
     assert.equal(rpc.events.find((event) => event.type === "tool_end")?.success, true);
-    assert.ok(rpc.events.some((event) => event.type === "text_delta"));
 
     assert.equal(mock.requests.length, 2);
     assert.deepEqual(
       mock.requests[0].tools.map((tool) => tool.function.name),
-      ["list_dir", "read_file", "search_code", "load_skill", "apply_patch", "run_command", "git_status", "git_diff", "git_log", "git_show", "git_add", "git_commit", "git_push", "git_fetch", "git_pull"],
+      EXPECTED_TOOLS,
     );
-    const secondTurnMessages = mock.requests[1].messages;
-    assert.ok(secondTurnMessages.some((message) => message.role === "assistant" && message.tool_calls));
-    const toolResult = secondTurnMessages.find((message) => message.role === "tool");
-    assert.equal(toolResult?.tool_call_id, "call_list_root");
-    assert.match(toolResult?.content ?? "", /src/);
 
-    console.log("Read-only agent E2E passed.");
+    const system = mock.requests[0].messages.find((message) => message.role === "system");
+    assert.match(system?.content ?? "", /Workspace skills/);
+    assert.match(system?.content ?? "", /hello-style/);
+    assert.match(system?.content ?? "", /Prefer concise Chinese summaries/);
+    assert.match(system?.content ?? "", /load_skill/);
+
+    const toolResult = mock.requests[1].messages.find((message) => message.role === "tool");
+    assert.equal(toolResult?.tool_call_id, "call_load_skill");
+    assert.match(toolResult?.content ?? "", /Always end answers with DONE/);
+    assert.match(toolResult?.content ?? "", /hello-style/);
+
+    console.log("Skills agent E2E passed.");
   } finally {
     await rpc.close();
     await mock.close();
@@ -159,11 +181,11 @@ async function startMockProvider() {
     });
     if (turn++ === 0) {
       response.write(
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_list_root","type":"function","function":{"name":"list_dir","arguments":"{\\"path\\":\\".\\"}"}}]}}]}\n\n',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_load_skill","type":"function","function":{"name":"load_skill","arguments":"{\\"name\\":\\"hello-style\\"}"}}]}}]}\n\n',
       );
     } else {
       response.write(
-        'data: {"choices":[{"delta":{"content":"The repository contains src/auth.ts."}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"Workspace has the hello-style skill. DONE"}}]}\n\n',
       );
     }
     response.end("data: [DONE]\n\n");
@@ -179,7 +201,10 @@ async function startMockProvider() {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requests,
-    close: () => new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose())),
+    close: () =>
+      new Promise((resolveClose, rejectClose) =>
+        server.close((error) => (error ? rejectClose(error) : resolveClose())),
+      ),
   };
 }
 

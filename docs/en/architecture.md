@@ -183,6 +183,7 @@ V1 tools:
 | `list_dir` | read | inspect workspace structure |
 | `read_file` | read | read file contents |
 | `search_code` | read | built-in text search with optional glob/context |
+| `load_skill` | read | load full workspace skill instructions from `.xcoding/skills/<name>/SKILL.md` |
 | `apply_patch` | write | apply unified diff / patch |
 | `run_command` | exec | run tests or build commands |
 | `git_status` | read | inspect workspace git state |

@@ -861,6 +861,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             parameters: json!({ "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string", "description": "Workspace-relative directory; defaults to ." }, "max_results": { "type": "integer", "minimum": 1, "maximum": 100 }, "case_insensitive": { "type": "boolean", "description": "Match query ignoring case; defaults to false" }, "glob": { "type": "string", "description": "Optional simple glob on file name (e.g. *.rs) or relative path (e.g. src/*.ts)" }, "context_lines": { "type": "integer", "minimum": 0, "maximum": 3, "description": "Lines of context before and after each match" } }, "required": ["query"] }),
         },
         ToolDefinition {
+            name: "load_skill".to_owned(),
+            description: "Load full instructions for a workspace skill from .xcoding/skills/<name>/SKILL.md. Use when a cataloged skill matches the task.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "name": { "type": "string", "description": "Skill folder name under .xcoding/skills" } }, "required": ["name"] }),
+        },
+        ToolDefinition {
             name: "apply_patch".to_owned(),
             description: "Atomically replace a workspace-relative text file only when old_text exactly matches its current content. Use an empty old_text to create a new file.".to_owned(),
             parameters: json!({ "type": "object", "properties": { "path": { "type": "string" }, "old_text": { "type": "string" }, "new_text": { "type": "string" } }, "required": ["path", "old_text", "new_text"] }),
@@ -964,6 +969,7 @@ mod tests {
                 "list_dir",
                 "read_file",
                 "search_code",
+                "load_skill",
                 "apply_patch",
                 "run_command",
                 "git_status",

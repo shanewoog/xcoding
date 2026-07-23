@@ -134,6 +134,7 @@ async function main() {
         "list_dir",
         "read_file",
         "search_code",
+        "load_skill",
         "apply_patch",
         "run_command",
         "git_status",
