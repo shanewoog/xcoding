@@ -15,8 +15,9 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_policy::{
-    PermissionDecision, PermissionKind, assess_command_with_extra, evaluate_detailed,
-    parse_command_allowlist, COMMAND_ALLOWLIST_RELATIVE_PATH,
+    PermissionDecision, PermissionKind, assess_command_with_lists, evaluate_detailed,
+    parse_command_allowlist, parse_command_denylist, COMMAND_ALLOWLIST_RELATIVE_PATH,
+    COMMAND_DENYLIST_RELATIVE_PATH,
 };
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
 
@@ -57,6 +58,8 @@ pub enum ToolError {
     PatchConflict(String),
     #[error("command arguments are invalid: {0}")]
     InvalidCommand(String),
+    #[error("command blocked by policy ({code}): {reason}")]
+    CommandPolicyDenied { code: String, reason: String },
     #[error("command was cancelled")]
     Cancelled,
     #[error(transparent)]
@@ -73,6 +76,7 @@ impl ToolError {
             Self::Cancelled => Some("cancelled"),
             Self::InvalidArguments(_) => Some("invalid_arguments"),
             Self::InvalidCommand(_) => Some("invalid_command"),
+            Self::CommandPolicyDenied { .. } => Some("command_policy_denied"),
             _ => None,
         }
     }
@@ -97,6 +101,13 @@ impl ToolError {
         if let Some(path) = self.path() {
             value["path"] = json!(path);
         }
+        if let Self::CommandPolicyDenied { code, reason } = self {
+            value["policy_code"] = json!(code);
+            value["reason"] = json!(reason);
+            value["hint"] = json!(
+                "This command is hard-denied by XCoding policy or the workspace denylist. Choose a safer command."
+            );
+        }
         if matches!(self, Self::PatchConflict(_)) {
             value["hint"] = json!(
                 "Re-read the file with read_file, then retry apply_patch using the current contents as old_text."
@@ -115,6 +126,7 @@ pub struct ToolExecution {
 pub struct ToolRegistry {
     workspace_root: PathBuf,
     command_allowlist: Vec<String>,
+    command_denylist: Vec<String>,
 }
 
 impl ToolRegistry {
@@ -128,9 +140,11 @@ impl ToolRegistry {
 
         let workspace_root = workspace_root.canonicalize()?;
         let command_allowlist = load_command_allowlist(&workspace_root);
+        let command_denylist = load_command_denylist(&workspace_root);
         Ok(Self {
             workspace_root,
             command_allowlist,
+            command_denylist,
         })
     }
 
@@ -140,6 +154,10 @@ impl ToolRegistry {
 
     pub fn command_allowlist(&self) -> &[String] {
         &self.command_allowlist
+    }
+
+    pub fn command_denylist(&self) -> &[String] {
+        &self.command_denylist
     }
 
     pub fn execute(&self, mode: &Mode, tool_call: &ToolCall) -> Result<ToolExecution, ToolError> {
@@ -178,13 +196,17 @@ impl ToolRegistry {
             }
             ToolName::RunCommand => {
                 let args: RunCommandArgs = parse_arguments(&tool_call.arguments)?;
-                let assessment = assess_command_with_extra(
+                let assessment = assess_command_with_lists(
                     &args.executable,
                     &args.args,
                     &self.command_allowlist,
+                    &self.command_denylist,
                 );
                 if assessment.decision == PermissionDecision::Deny {
-                    return Err(ToolError::InvalidCommand(assessment.reason));
+                    return Err(ToolError::CommandPolicyDenied {
+                        code: assessment.code.as_str().to_owned(),
+                        reason: assessment.reason,
+                    });
                 }
                 Ok((
                     PermissionKind::Exec,
@@ -515,13 +537,17 @@ impl ToolRegistry {
         args: RunCommandArgs,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<ToolExecution, ToolError> {
-        let assessment = assess_command_with_extra(
+        let assessment = assess_command_with_lists(
             &args.executable,
             &args.args,
             &self.command_allowlist,
+            &self.command_denylist,
         );
         if assessment.decision == PermissionDecision::Deny {
-            return Err(ToolError::InvalidCommand(assessment.reason));
+            return Err(ToolError::CommandPolicyDenied {
+                code: assessment.code.as_str().to_owned(),
+                reason: assessment.reason,
+            });
         }
 
         // Never inherit the server RPC stdin pipe: some tools (notably git on
@@ -1530,6 +1556,14 @@ fn load_command_allowlist(workspace_root: &Path) -> Vec<String> {
     let path = workspace_root.join(COMMAND_ALLOWLIST_RELATIVE_PATH);
     match fs::read_to_string(path) {
         Ok(text) => parse_command_allowlist(&text),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn load_command_denylist(workspace_root: &Path) -> Vec<String> {
+    let path = workspace_root.join(COMMAND_DENYLIST_RELATIVE_PATH);
+    match fs::read_to_string(path) {
+        Ok(text) => parse_command_denylist(&text),
         Err(_) => Vec::new(),
     }
 }
@@ -2840,10 +2874,16 @@ mod tests {
                 arguments: json!({ "executable": "format", "args": ["C:"] }),
             })
             .expect_err("blocked");
-        match error {
-            ToolError::InvalidCommand(message) => assert!(message.contains("blocked")),
+        match &error {
+            ToolError::CommandPolicyDenied { code, reason } => {
+                assert_eq!(code, "denied_executable");
+                assert!(reason.contains("blocked"));
+            }
             other => panic!("unexpected error: {other}"),
         }
+        let value = error.tool_result_value();
+        assert_eq!(value["code"], "command_policy_denied");
+        assert_eq!(value["policy_code"], "denied_executable");
     }
 
     #[test]
@@ -2914,6 +2954,40 @@ mod tests {
         .expect("rewrite");
         let tools = ToolRegistry::new(&root).expect("reload");
         assert!(tools.command_allowlist().is_empty());
+    }
+
+    #[test]
+    fn honors_workspace_command_denylist_file() {
+        let root = workspace();
+        fs::create_dir_all(root.join(".xcoding")).expect("dir");
+        fs::write(
+            root.join(".xcoding/command-denylist"),
+            "cargo:--version\n# comment\n",
+        )
+        .expect("denylist writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+        assert_eq!(tools.command_denylist(), &["cargo:--version".to_owned()]);
+        let error = tools
+            .permission_for(&ToolCall {
+                id: "t-deny".to_owned(),
+                name: ToolName::RunCommand,
+                arguments: json!({
+                    "executable": "cargo",
+                    "args": ["--version"]
+                }),
+            })
+            .expect_err("denylisted cargo --version");
+        let value = error.tool_result_value();
+        match &error {
+            ToolError::CommandPolicyDenied { code, reason } => {
+                assert_eq!(code, "denied_workspace_denylist");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected CommandPolicyDenied, got {other:?}"),
+        }
+        assert_eq!(value["code"], "command_policy_denied");
+        assert_eq!(value["policy_code"], "denied_workspace_denylist");
+        fs::remove_dir_all(root).expect("workspace removes");
     }
 
     #[test]

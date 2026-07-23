@@ -40,6 +40,7 @@ const optionNames = new Set([
   "--mode",
   "--session",
   "--command-allowlist",
+  "--command-denylist",
 ]);
 
 type CliMode = "ask" | "auto-edit";
@@ -55,6 +56,10 @@ function parseCommandAllowlistOption(value: string): string[] {
     .split(/[\n,]/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0 && !item.startsWith("#"));
+}
+
+function parseCommandDenylistOption(value: string): string[] {
+  return parseCommandAllowlistOption(value);
 }
 
 async function main(): Promise<void> {
@@ -130,9 +135,10 @@ async function runConfigCommand(
     const provider = option(args, "--provider");
     const model = option(args, "--model");
     const commandAllowlistRaw = option(args, "--command-allowlist");
-    if (!mode && !provider && !model && commandAllowlistRaw === undefined) {
+    const commandDenylistRaw = option(args, "--command-denylist");
+    if (!mode && !provider && !model && commandAllowlistRaw === undefined && commandDenylistRaw === undefined) {
       throw new Error(
-        "expected at least one of `--mode`, `--provider`, `--model`, or `--command-allowlist`",
+        "expected at least one of `--mode`, `--provider`, `--model`, `--command-allowlist`, or `--command-denylist`",
       );
     }
     const current = await client.request<GetConfigResult>("config.get", { workspace_root: workspace });
@@ -144,6 +150,9 @@ async function runConfigCommand(
     };
     if (commandAllowlistRaw !== undefined) {
       params.command_allowlist = parseCommandAllowlistOption(commandAllowlistRaw);
+    }
+    if (commandDenylistRaw !== undefined) {
+      params.command_denylist = parseCommandDenylistOption(commandDenylistRaw);
     }
     const result = await client.request<SetConfigResult>("config.set", params);
     console.log(JSON.stringify(result.config, null, 2));
@@ -548,7 +557,9 @@ async function runDoctorCommand(
         " model=" +
         config.config.model +
         " allowlist=" +
-        (config.config.command_allowlist?.length ?? 0),
+        (config.config.command_allowlist?.length ?? 0) +
+        " denylist=" +
+        (config.config.command_denylist?.length ?? 0),
     });
   } catch (error) {
     checks.push({
@@ -625,7 +636,7 @@ Usage:
   xcoding auth [--workspace <path>] [--server <path>]
   xcoding doctor [--workspace <path>] [--server <path>]
   xcoding config show [--workspace <path>]
-  xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>] [--command-allowlist <patterns>]
+  xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>] [--command-allowlist <patterns>] [--command-denylist <patterns>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
   xcoding session list [--workspace <path>]
   xcoding session show <session-id> [--workspace <path>]
@@ -652,6 +663,11 @@ Command allowlist:
   Workspace file .xcoding/command-allowlist extends the builtin auto-edit command allowlist.
   Patterns are one per line or comma-separated via --command-allowlist (exe or exe:subcommand).
   Shells/interpreters and destructive system commands cannot be allowlisted.
+
+Command denylist:
+  Workspace file .xcoding/command-denylist hard-denies matching commands (overrides allowlist).
+  Patterns are one per line or comma-separated via --command-denylist (exe or exe:subcommand).
+  Shells may be listed on the denylist. Hard-denied commands return structured tool errors and never ask for approval.
 `);
 }
 

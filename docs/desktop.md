@@ -21,7 +21,7 @@ The app stores local session history and workspace defaults in its operating-sys
 4. Review the plan, streamed response, tool activity, patch previews, and approval controls.
 5. Select saved sessions to review their events, restore points, and task completion summary.
 
-Desktop uses the same guarded agent service as the CLI. The default mode is `ask`; `auto-edit` applies ordinary file patches and allowlisted safe commands automatically. High-risk writes and non-allowlisted commands still require approval. The defaults panel can edit workspace `.xcoding/command-allowlist` patterns.
+Desktop uses the same guarded agent service as the CLI. The default mode is `ask`; `auto-edit` applies ordinary file patches and allowlisted safe commands automatically. High-risk writes and non-allowlisted commands still require approval. The defaults panel can edit workspace `.xcoding/command-allowlist` and `.xcoding/command-denylist` patterns.
 
 ## Defaults and diagnostics
 
@@ -39,13 +39,14 @@ Mode help text updates when you switch modes:
 - **ask** — propose patches and commands; both need approval
 - **auto-edit** — apply ordinary file patches and allowlisted safe commands automatically; **high-risk writes and other commands still need approval**
 - **Command allowlist** — optional workspace patterns (`exe` or `exe:subcommand`) saved to `.xcoding/command-allowlist`; shells/interpreters cannot be allowlisted
+- **Command denylist** — optional workspace block patterns saved to `.xcoding/command-denylist`; denylist overrides allowlist and never auto-runs
 
 **Diagnostics** is a client-side checklist (workspace path, provider auth, base URL, defaults). Green means ready enough to start a task; it does not replace `pnpm cli -- doctor` for deeper server checks.
 
 
 ## High-risk command review
 
-When the agent proposes a shell-style or force-push command, Desktop shows a **HIGH-RISK** badge, the full command text, and a stronger approve button label. Hard-denied commands never reach this panel; they fail as tool errors instead.
+When the agent proposes a shell-style or force-push command, Desktop shows a **HIGH-RISK** badge, the full command text, and a stronger approve button label. Hard-denied and denylisted commands never reach this panel; they fail as structured tool errors (`command_policy_denied` + `policy_code`) instead.
 
 ## Task completion summary
 

@@ -168,9 +168,11 @@ impl CoreService {
                 provider: "openai".to_owned(),
                 model: "gpt-5.5".to_owned(),
                 command_allowlist: Vec::new(),
+                command_denylist: Vec::new(),
                 updated_at: Utc::now(),
             });
         config.command_allowlist = load_command_allowlist(workspace_root);
+        config.command_denylist = load_command_denylist(workspace_root);
         Ok(config)
     }
 
@@ -194,16 +196,23 @@ impl CoreService {
         } else {
             load_command_allowlist(&params.workspace_root)
         };
+        let command_denylist = if let Some(patterns) = params.command_denylist {
+            write_command_denylist(&params.workspace_root, &patterns)?
+        } else {
+            load_command_denylist(&params.workspace_root)
+        };
         let saved = self.store.set_workspace_config(WorkspaceConfig {
             workspace_root: params.workspace_root,
             mode: params.mode,
             provider: params.provider,
             model: params.model.trim().to_owned(),
             command_allowlist: Vec::new(),
+            command_denylist: Vec::new(),
             updated_at: Utc::now(),
         })?;
         Ok(WorkspaceConfig {
             command_allowlist,
+            command_denylist,
             ..saved
         })
     }
@@ -726,6 +735,45 @@ fn write_command_allowlist(
     Ok(normalized)
 }
 
+fn load_command_denylist(workspace_root: &str) -> Vec<String> {
+    let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_DENYLIST_RELATIVE_PATH);
+    match std::fs::read_to_string(path) {
+        Ok(text) => xcoding_policy::parse_command_denylist(&text),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn write_command_denylist(
+    workspace_root: &str,
+    patterns: &[String],
+) -> Result<Vec<String>, CoreError> {
+    let mut normalized = Vec::new();
+    for pattern in patterns {
+        let value = xcoding_policy::normalize_denylist_pattern(pattern)
+            .map_err(CoreError::InvalidInput)?;
+        if !normalized.iter().any(|existing| existing == &value) {
+            normalized.push(value);
+        }
+    }
+    let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_DENYLIST_RELATIVE_PATH);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            CoreError::InvalidInput(format!(
+                "failed to create {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let body = xcoding_policy::render_command_denylist_file(&normalized);
+    std::fs::write(&path, body).map_err(|error| {
+        CoreError::InvalidInput(format!(
+            "failed to write {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(normalized)
+}
+
 fn validate_workspace_root(workspace_root: &str) -> Result<(), CoreError> {
     if workspace_root.trim().is_empty() {
         return Err(CoreError::InvalidInput(
@@ -835,6 +883,7 @@ mod tests {
                 provider: "openai".to_owned(),
                 model: "configured-model".to_owned(),
                 command_allowlist: None,
+                command_denylist: None,
             })
             .expect("config saves");
         assert_eq!(saved.mode, Mode::AutoEdit);

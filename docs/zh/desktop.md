@@ -21,7 +21,7 @@ pnpm --filter @xcoding/desktop exec tauri dev
 4. 查看计划、流式回答、工具活动、补丁预览和审批控件。
 5. 选择已保存会话，查看事件、恢复点和任务完成摘要。
 
-Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁与白名单安全命令。高风险写入与非白名单命令仍需审批。左侧默认设置面板可编辑工作区 `.xcoding/command-allowlist` 模式。
+Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁与白名单安全命令。高风险写入与非白名单命令仍需审批。左侧默认设置面板可编辑工作区 `.xcoding/command-allowlist` 与 `.xcoding/command-denylist` 模式。
 
 ## 默认值与诊断
 
@@ -39,13 +39,14 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
 - **ask** — 提出补丁与命令，二者都需审批
 - **auto-edit** — 自动应用普通文件补丁与白名单安全命令；**高风险写入与其他命令仍需审批**
 - **命令白名单** — 可选工作区模式（`exe` 或 `exe:subcommand`），保存到 `.xcoding/command-allowlist`；Shell/解释器不可加入
+- **命令黑名单** — 可选工作区拦截模式，保存到 `.xcoding/command-denylist`；黑名单优先于白名单，且不会自动执行
 
 **Diagnostics** 是客户端检查清单（工作区路径、鉴权、Base URL、默认值）。全部就绪表示可以开始任务；更深入的服务端检查仍请使用 `pnpm cli -- doctor`。
 
 
 ## 高风险命令审批
 
-当 Agent 提出 shell 类或 force-push 命令时，Desktop 会显示 **HIGH-RISK** 标记、完整命令文本，以及更醒目的批准按钮文案。硬拒绝命令不会进入审批面板，而是作为工具错误返回给模型。
+当 Agent 提出 shell 类或 force-push 命令时，Desktop 会显示 **HIGH-RISK** 标记、完整命令文本，以及更醒目的批准按钮文案。硬拒绝与黑名单拦截不会进入审批面板，而是作为结构化工具错误返回给模型（`command_policy_denied` + `policy_code`）。
 
 ## 任务完成摘要
 

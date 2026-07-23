@@ -68,22 +68,35 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
 
 ## Command Policy
 
-`run_command` is gated by a strict allowlist plus risk labels:
+`run_command` is gated by a hard denylist, an allowlist, optional workspace lists, and risk labels:
 
-- Hard deny for clearly destructive system commands (for example `format`, `shutdown`, `git clean -fdx`).
-- High-risk shells and force-push style invocations always need approval and are labeled **HIGH-RISK** in the approval summary.
+- **Hard deny** for clearly destructive system commands (for example `format`, `shutdown`, recursive root deletes, registry machine-wide edits, `git clean -fdx`, mirror push). Hard-denied commands never enter the approval queue.
+- **Workspace denylist** (`.xcoding/command-denylist`) always blocks matching patterns, even if they also appear on the allowlist.
+- High-risk shells and force-push style invocations always need approval and are labeled **HIGH-RISK** in the approval summary (with a structured policy code).
 - Under `ask`, every remaining command still needs approval.
 - Under `auto-edit`, only allowlisted safe commands auto-run; everything else still needs approval.
 
 Allowlisted families include read-only `git` inspection, `cargo`/`go`/`dotnet` build-test helpers, package-manager `test`/`build`/`lint`/`exec` (not `publish`), plus `tsc` and `pytest`. Arguments containing shell metacharacters are never allowlisted.
 
-Workspace file `.xcoding/command-allowlist` can extend the builtin list with patterns such as `rg` or `git:--version` (one per line; `#` comments allowed). Configure via:
+Workspace files:
+
+- `.xcoding/command-allowlist` — extend the builtin allowlist (`rg` or `git:--version`; one per line; `#` comments)
+- `.xcoding/command-denylist` — block patterns even under `auto-edit` (shells allowed here; denylist overrides allowlist)
+
+Configure via:
 
 ```powershell
 xcoding config set --workspace <path> --command-allowlist "rg,git:--version"
+xcoding config set --workspace <path> --command-denylist "cargo:--version,powershell"
 ```
 
 Shells/interpreters and destructive system commands cannot be allowlisted. `publish` package-manager invocations also stay gated.
+
+When policy blocks a command, the tool result is structured as:
+
+- `code`: `command_policy_denied`
+- `policy_code`: machine-readable reason (for example `denied_executable`, `denied_workspace_denylist`, `denied_git_clean`)
+- `reason`: human-readable explanation
 
 Desktop highlights high-risk approvals with a badge, the rendered command, and a stronger confirm action; the CLI prints a HIGH-RISK warning plus the full command line.
 

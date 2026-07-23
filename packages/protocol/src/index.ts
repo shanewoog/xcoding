@@ -97,6 +97,8 @@ export interface WorkspaceConfig {
   model: string;
   /** Extra auto-edit command allowlist patterns from `.xcoding/command-allowlist`. */
   command_allowlist?: string[];
+  /** Workspace command denylist patterns from `.xcoding/command-denylist`. */
+  command_denylist?: string[];
   updated_at: string;
 }
 
@@ -137,6 +139,8 @@ export interface SetConfigParams {
   model: string;
   /** When set, rewrites `.xcoding/command-allowlist`. Omit to leave the file unchanged. */
   command_allowlist?: string[];
+  /** When set, rewrites `.xcoding/command-denylist`. Omit to leave the file unchanged. */
+  command_denylist?: string[];
 }
 
 export interface SetConfigResult {

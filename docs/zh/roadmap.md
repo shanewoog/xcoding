@@ -152,7 +152,7 @@
 ### 候选能力
 
 - 更好的相关文件召回（Wave R：搜索选项 + 工作区 sketch；向量检索后续）
-- 更强命令策略引擎
+- 更强命令策略引擎（Wave Z：工作区黑名单、扩展硬拒绝、结构化 `policy_code`）
 - 更多云供应商
 - skills 系统（Wave Y：工作区 `.xcoding/skills/*/SKILL.md` 目录 + 只读 `load_skill`）
 - MCP 支持

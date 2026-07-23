@@ -68,6 +68,9 @@ async function main() {
     "export function commandAllowlistHelpText",
     "export function parseCommandAllowlistText",
     "export function formatCommandAllowlistText",
+    "export function commandDenylistHelpText",
+    "export function parseCommandDenylistText",
+    "export function formatCommandDenylistText",
   ]) {
     assert.ok(configSource.includes(needle), "config.ts missing " + needle);
   }
@@ -81,6 +84,9 @@ async function main() {
     'id="default-provider"',
     'id="default-model"',
     'id="command-allowlist"',
+    'id="command-denylist"',
+    'commandDenylistHelpText',
+    'parseCommandDenylistText',
     "commandAllowlistHelpText",
     "parseCommandAllowlistText",
     "doctor-panel",
@@ -110,6 +116,9 @@ async function main() {
     "CLI Mode policy should describe auto-edit allowlist behavior",
   );
   assert.ok(cliSource.includes("--command-allowlist"), "CLI missing command-allowlist flag");
+  assert.ok(cliSource.includes("--command-denylist"), "CLI missing command-denylist flag");
+  assert.ok(cliSource.includes("Command denylist:"), "CLI help missing Command denylist section");
+  assert.ok(cliSource.includes("parseCommandDenylistOption"), "CLI missing denylist parser");
   assert.ok(cliSource.includes("Command allowlist:"), "CLI help missing Command allowlist section");
   assert.ok(cliSource.includes("parseCommandAllowlistOption"), "CLI missing allowlist parser");
 

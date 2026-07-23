@@ -66,7 +66,7 @@ pnpm cli -- config set --workspace . --mode auto-edit --model gpt-5.5
 pnpm cli -- chat "Explain the structure of this repository" --workspace .
 ```
 
-The CLI database is `<workspace>/.xcoding/xcoding.db`. Configuration stores mode, provider, and model for that workspace. Extra auto-edit command patterns live in `.xcoding/command-allowlist` (editable via `config set --command-allowlist` or Desktop defaults). New chats use those defaults unless a command explicitly supplies a different value.
+The CLI database is `<workspace>/.xcoding/xcoding.db`. Configuration stores mode, provider, and model for that workspace. Extra auto-edit command patterns live in `.xcoding/command-allowlist`; blocks live in `.xcoding/command-denylist` (editable via `config set --command-allowlist` / `--command-denylist` or Desktop defaults). New chats use those defaults unless a command explicitly supplies a different value.
 
 ## Use Desktop
 
@@ -112,14 +112,15 @@ eady is false.
 
 ## Command Safety Policy
 
-`run_command` is gated by mode, allowlist, and risk labels:
+`run_command` is gated by mode, allowlist, denylist, and risk labels:
 
 - **ask** — every command needs approval
 - **auto-edit** — allowlisted safe developer commands auto-run (builtin plus `.xcoding/command-allowlist`); high-risk and non-allowlisted commands still need approval
-- **Hard-denies** commands such as format, shutdown, git clean -fdx, and absolute executables
+- **Workspace denylist** (`.xcoding/command-denylist`) always blocks matches, even when also allowlisted
+- **Hard-denies** commands such as format, shutdown, git clean -fdx, recursive root deletes, and absolute executables
 - **Flags high-risk** shells/network-style helpers such as powershell -Command, cmd /c, git push --force, and pnpm publish
 
-Hard-denied commands never enter the approval queue; they return a tool error to the model.
+Hard-denied and denylisted commands never enter the approval queue; they return a structured tool error (`code: command_policy_denied`, plus `policy_code`) to the model.
 Ordinary high-risk workspace writes under `.git` / `.xcoding` always need approval, even in auto-edit.
 
 

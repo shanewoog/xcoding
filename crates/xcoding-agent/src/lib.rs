@@ -426,7 +426,7 @@ impl<'a> AgentService<'a> {
                             SessionEvent::ApprovalRequested {
                                 session_id: session.id,
                                 action,
-                                summary: approval_summary(&tool_call),
+                                summary: approval_summary(&tools, &tool_call),
                             },
                         );
                         return Ok(ChatResult {
@@ -700,7 +700,7 @@ fn tool_start_summary(
     }
 }
 
-fn approval_summary(tool_call: &ToolCall) -> String {
+fn approval_summary(tools: &ToolRegistry, tool_call: &ToolCall) -> String {
     match tool_call.name {
         ToolName::ApplyPatch => {
             let path = tool_call
@@ -733,24 +733,33 @@ fn approval_summary(tool_call: &ToolCall) -> String {
             } else {
                 format!("{executable} {args}")
             };
-            let assessment = xcoding_policy::assess_command(
+            let arg_list = tool_call
+                .arguments
+                .get("args")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let assessment = xcoding_policy::assess_command_with_lists(
                 executable,
-                &tool_call
-                    .arguments
-                    .get("args")
-                    .and_then(|value| value.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.as_str().map(str::to_owned))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                &arg_list,
+                tools.command_allowlist(),
+                tools.command_denylist(),
             );
             if assessment.high_risk {
-                format!("Review HIGH-RISK command: {rendered}")
+                format!(
+                    "Review HIGH-RISK command ({}): {rendered}",
+                    assessment.code.as_str()
+                )
             } else {
-                format!("Review and approve command: {rendered}")
+                format!(
+                    "Review and approve command ({}): {rendered}",
+                    assessment.code.as_str()
+                )
             }
         }
         ToolName::GitAdd => {

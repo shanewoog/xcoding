@@ -34,6 +34,9 @@ import {
   commandAllowlistHelpText,
   parseCommandAllowlistText,
   formatCommandAllowlistText,
+  commandDenylistHelpText,
+  parseCommandDenylistText,
+  formatCommandDenylistText,
 } from "./config";
 import {
   formatMessageRole,
@@ -147,6 +150,7 @@ export function App() {
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState(defaultModel);
   const [commandAllowlistText, setCommandAllowlistText] = useState("");
+  const [commandDenylistText, setCommandDenylistText] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -193,6 +197,7 @@ export function App() {
       setMode(config.mode);
       setModel(config.model);
       setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
+      setCommandDenylistText(formatCommandDenylistText(config.command_denylist));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -455,11 +460,13 @@ export function App() {
           provider: defaultProvider,
           model,
           command_allowlist: parseCommandAllowlistText(commandAllowlistText),
+          command_denylist: parseCommandDenylistText(commandDenylistText),
         },
       });
       setMode(config.mode);
       setModel(config.model);
       setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
+      setCommandDenylistText(formatCommandDenylistText(config.command_denylist));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -533,6 +540,18 @@ export function App() {
               placeholder={"rg\nmake:test\ngit:--version"}
             />
             <p className="mode-help">{commandAllowlistHelpText()}</p>
+            <label className="field-label" htmlFor="command-denylist">Command denylist</label>
+            <textarea
+              id="command-denylist"
+              className="command-allowlist-input"
+              value={commandDenylistText}
+              onChange={(event) => setCommandDenylistText(event.target.value)}
+              disabled={isRunning || isSavingConfig}
+              spellCheck={false}
+              rows={3}
+              placeholder={"powershell\ncurl"}
+            />
+            <p className="mode-help">{commandDenylistHelpText()}</p>
             <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>
             <div className={`doctor-panel ${doctorReady ? "ready" : "blocked"}`} aria-label="Workspace diagnostics">
               <p className="panel-title">Diagnostics</p>

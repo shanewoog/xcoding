@@ -63,22 +63,35 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 
 ## 命令策略
 
-`run_command` 由严格白名单与风险标注共同约束：
+`run_command` 由硬拒绝名单、白名单、可选工作区名单与风险标注共同约束：
 
-- 对明显危险的系统命令硬拒绝（例如 `format`、`shutdown`、`git clean -fdx`）。
-- Shell / force-push 等高风险调用始终需要审批，并在审批摘要中标注 **HIGH-RISK**。
+- **硬拒绝**：明显危险的系统命令（例如 `format`、`shutdown`、递归删除根路径、注册表机器范围修改、`git clean -fdx`、mirror push）。硬拒绝命令不会进入审批队列。
+- **工作区黑名单**（`.xcoding/command-denylist`）：匹配模式一律拦截，即使同时出现在白名单中。
+- Shell / force-push 等高风险调用始终需要审批，并在审批摘要中标注 **HIGH-RISK**（含结构化策略码）。
 - 在 `ask` 模式下，其余命令仍全部需要审批。
 - 在 `auto-edit` 模式下，仅白名单内的安全命令可自动执行，其他命令仍需审批。
 
 白名单覆盖只读 `git` 查询、`cargo`/`go`/`dotnet` 构建测试类命令、包管理器的 `test`/`build`/`lint`/`exec`（不含 `publish`），以及 `tsc`、`pytest`。参数中含有 shell 元字符的调用不会进入白名单。
 
-工作区文件 `.xcoding/command-allowlist` 可扩展内置白名单，模式形如 `rg` 或 `git:--version`（每行一条，支持 `#` 注释）。可通过：
+工作区文件：
+
+- `.xcoding/command-allowlist` — 扩展内置白名单（`rg` 或 `git:--version`；每行一条；支持 `#` 注释）
+- `.xcoding/command-denylist` — 拦截模式，即使在 `auto-edit` 下（可包含 shell；黑名单优先于白名单）
+
+配置方式：
 
 ```powershell
 xcoding config set --workspace <path> --command-allowlist "rg,git:--version"
+xcoding config set --workspace <path> --command-denylist "cargo:--version,powershell"
 ```
 
 Shell/解释器与破坏性系统命令不可加入白名单；包管理器的 `publish` 也始终保持受控。
+
+策略拦截命令时，工具结果结构为：
+
+- `code`：`command_policy_denied`
+- `policy_code`：机器可读原因（例如 `denied_executable`、`denied_workspace_denylist`、`denied_git_clean`）
+- `reason`：人类可读说明
 
 Desktop 会用徽章、完整命令文本和更醒目的确认按钮突出高风险审批；CLI 会打印 HIGH-RISK 警告和完整命令行。
 

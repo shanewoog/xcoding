@@ -27,6 +27,18 @@ export function formatCommandAllowlistText(patterns: string[] | undefined): stri
   return (patterns ?? []).join("\n");
 }
 
+export function commandDenylistHelpText(): string {
+  return "One pattern per line (exe or exe:subcommand). Hard-denies matching commands via .xcoding/command-denylist and overrides the allowlist. Shells may be listed.";
+}
+
+export function parseCommandDenylistText(text: string): string[] {
+  return parseCommandAllowlistText(text);
+}
+
+export function formatCommandDenylistText(patterns: string[] | undefined): string {
+  return formatCommandAllowlistText(patterns);
+}
+
 export function formatModeOption(mode: Mode): string {
   return mode === "auto-edit" ? "Auto edit" : "Ask";
 }

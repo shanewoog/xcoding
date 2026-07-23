@@ -66,7 +66,7 @@ pnpm cli -- config set --workspace . --mode auto-edit --model gpt-5.5
 pnpm cli -- chat "说明这个仓库的结构" --workspace .
 ```
 
-CLI 数据库位于 `<workspace>/.xcoding/xcoding.db`。配置保存该工作区的模式、供应商和模型偏好；额外 auto-edit 命令白名单保存在 `.xcoding/command-allowlist`（可用 `config set --command-allowlist` 或 Desktop 默认设置编辑）。除非命令显式传入其他值，新建聊天都会使用这些默认配置。
+CLI 数据库位于 `<workspace>/.xcoding/xcoding.db`。配置保存该工作区的模式、供应商和模型偏好；额外 auto-edit 命令白名单保存在 `.xcoding/command-allowlist`，黑名单保存在 `.xcoding/command-denylist`（可用 `config set --command-allowlist` / `--command-denylist` 或 Desktop 默认设置编辑）。除非命令显式传入其他值，新建聊天都会使用这些默认配置。
 
 ## 使用 Desktop
 
@@ -112,14 +112,15 @@ eady=false 时退出码为 2。
 
 ## 命令安全策略
 
-`run_command` 由模式、白名单与风险标注共同约束：
+`run_command` 由模式、白名单、黑名单与风险标注共同约束：
 
 - **ask** — 每条命令都需要审批
 - **auto-edit** — 白名单内安全开发命令可自动执行（内置 + `.xcoding/command-allowlist`）；高风险与非白名单命令仍需审批
-- **硬拒绝**：format / shutdown / git clean -fdx / 绝对路径可执行文件等
+- **工作区黑名单**（`.xcoding/command-denylist`）始终拦截匹配项，即使同时在白名单中
+- **硬拒绝**：format / shutdown / git clean -fdx / 递归删除根路径 / 绝对路径可执行文件等
 - **高风险标注**：powershell -Command、cmd /c、git push --force、pnpm publish 等
 
-硬拒绝不会进入审批队列，会作为工具错误回传给模型。
+硬拒绝与黑名单拦截不会进入审批队列，会作为结构化工具错误回传给模型（`code: command_policy_denied`，以及 `policy_code`）。
 即使在 auto-edit 下，`.git` / `.xcoding` 等高风险工作区写入也始终需要审批。
 
 ## 延伸阅读

@@ -152,7 +152,7 @@ Duration target: continuous after V1
 ### Candidates
 
 - better relevant-file retrieval (Wave R: search options + workspace sketch; embeddings later)
-- stronger command policy engine
+- stronger command policy engine (Wave Z: workspace denylist, expanded hard denials, structured `policy_code`)
 - more cloud providers
 - skills system (Wave Y: workspace `.xcoding/skills/*/SKILL.md` catalog + read-only `load_skill`)
 - MCP support
