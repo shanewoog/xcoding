@@ -31,7 +31,16 @@ const defaultServerPath = resolve(
   process.env.XCODING_SERVER_PATH ??
     resolve(currentDirectory, "../../../target/debug/xcoding-server.exe"),
 );
-const optionNames = new Set(["--workspace", "--server", "--provider", "--model", "--title", "--mode", "--session"]);
+const optionNames = new Set([
+  "--workspace",
+  "--server",
+  "--provider",
+  "--model",
+  "--title",
+  "--mode",
+  "--session",
+  "--command-allowlist",
+]);
 
 type CliMode = "ask" | "auto-edit";
 
@@ -39,6 +48,13 @@ function parseModeOption(value: string | undefined): CliMode | undefined {
   if (value === undefined) return undefined;
   if (value === "ask" || value === "auto-edit") return value;
   throw new Error(`invalid mode: ${value} (expected ask or auto-edit)`);
+}
+
+function parseCommandAllowlistOption(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && !item.startsWith("#"));
 }
 
 async function main(): Promise<void> {
@@ -113,8 +129,11 @@ async function runConfigCommand(
     const mode = parseModeOption(option(args, "--mode"));
     const provider = option(args, "--provider");
     const model = option(args, "--model");
-    if (!mode && !provider && !model) {
-      throw new Error("expected at least one of `--mode`, `--provider`, or `--model`");
+    const commandAllowlistRaw = option(args, "--command-allowlist");
+    if (!mode && !provider && !model && commandAllowlistRaw === undefined) {
+      throw new Error(
+        "expected at least one of `--mode`, `--provider`, `--model`, or `--command-allowlist`",
+      );
     }
     const current = await client.request<GetConfigResult>("config.get", { workspace_root: workspace });
     const params: SetConfigParams = {
@@ -123,6 +142,9 @@ async function runConfigCommand(
       provider: provider ?? current.config.provider,
       model: model ?? current.config.model,
     };
+    if (commandAllowlistRaw !== undefined) {
+      params.command_allowlist = parseCommandAllowlistOption(commandAllowlistRaw);
+    }
     const result = await client.request<SetConfigResult>("config.set", params);
     console.log(JSON.stringify(result.config, null, 2));
     return;
@@ -460,7 +482,9 @@ async function runDoctorCommand(
         " provider=" +
         config.config.provider +
         " model=" +
-        config.config.model,
+        config.config.model +
+        " allowlist=" +
+        (config.config.command_allowlist?.length ?? 0),
     });
   } catch (error) {
     checks.push({
@@ -537,7 +561,7 @@ Usage:
   xcoding auth [--workspace <path>] [--server <path>]
   xcoding doctor [--workspace <path>] [--server <path>]
   xcoding config show [--workspace <path>]
-  xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>]
+  xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>] [--command-allowlist <patterns>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
   xcoding session list [--workspace <path>]
   xcoding session show <session-id> [--workspace <path>]
@@ -559,6 +583,11 @@ Dotenv:
 Mode policy:
   ask         Propose patches and commands; both need approval
   auto-edit   Apply ordinary patches and allowlisted safe commands automatically; high-risk and other commands need approval
+
+Command allowlist:
+  Workspace file .xcoding/command-allowlist extends the builtin auto-edit command allowlist.
+  Patterns are one per line or comma-separated via --command-allowlist (exe or exe:subcommand).
+  Shells/interpreters and destructive system commands cannot be allowlisted.
 `);
 }
 

@@ -95,6 +95,8 @@ export interface WorkspaceConfig {
   mode: Mode;
   provider: string;
   model: string;
+  /** Extra auto-edit command allowlist patterns from `.xcoding/command-allowlist`. */
+  command_allowlist?: string[];
   updated_at: string;
 }
 
@@ -133,6 +135,8 @@ export interface SetConfigParams {
   mode: Mode;
   provider: string;
   model: string;
+  /** When set, rewrites `.xcoding/command-allowlist`. Omit to leave the file unchanged. */
+  command_allowlist?: string[];
 }
 
 export interface SetConfigResult {

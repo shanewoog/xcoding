@@ -72,6 +72,14 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
 
 Allowlisted families include read-only `git` inspection, `cargo`/`go`/`dotnet` build-test helpers, package-manager `test`/`build`/`lint`/`exec` (not `publish`), plus `tsc` and `pytest`. Arguments containing shell metacharacters are never allowlisted.
 
+Workspace file `.xcoding/command-allowlist` can extend the builtin list with patterns such as `rg` or `git:--version` (one per line; `#` comments allowed). Configure via:
+
+```powershell
+xcoding config set --workspace <path> --command-allowlist "rg,git:--version"
+```
+
+Shells/interpreters and destructive system commands cannot be allowlisted. `publish` package-manager invocations also stay gated.
+
 Desktop highlights high-risk approvals with a badge, the rendered command, and a stronger confirm action; the CLI prints a HIGH-RISK warning plus the full command line.
 
 ## Mode policy signals

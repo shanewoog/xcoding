@@ -441,3 +441,23 @@ details.trace-section:not([open]) > summary.panel-title::after { content: "▸";
   text-transform: none;
   overflow-wrap: anywhere;
 }
+
+
+.command-allowlist-input {
+  width: 100%;
+  min-height: 5.5rem;
+  resize: vertical;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  border: 1px solid #c9ced6;
+  border-radius: 6px;
+  padding: 0.55rem 0.65rem;
+  background: #fff;
+  color: inherit;
+}
+
+.command-allowlist-input:focus {
+  outline: 2px solid #4c7dff55;
+  border-color: #4c7dff;
+}

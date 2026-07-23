@@ -72,6 +72,14 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 
 白名单覆盖只读 `git` 查询、`cargo`/`go`/`dotnet` 构建测试类命令、包管理器的 `test`/`build`/`lint`/`exec`（不含 `publish`），以及 `tsc`、`pytest`。参数中含有 shell 元字符的调用不会进入白名单。
 
+工作区文件 `.xcoding/command-allowlist` 可扩展内置白名单，模式形如 `rg` 或 `git:--version`（每行一条，支持 `#` 注释）。可通过：
+
+```powershell
+xcoding config set --workspace <path> --command-allowlist "rg,git:--version"
+```
+
+Shell/解释器与破坏性系统命令不可加入白名单；包管理器的 `publish` 也始终保持受控。
+
 Desktop 会用徽章、完整命令文本和更醒目的确认按钮突出高风险审批；CLI 会打印 HIGH-RISK 警告和完整命令行。
 
 ## 模式策略信号

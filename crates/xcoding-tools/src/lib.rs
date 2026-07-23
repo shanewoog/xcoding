@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
-use xcoding_policy::{PermissionDecision, PermissionKind, assess_command, evaluate_detailed};
+use xcoding_policy::{
+    PermissionDecision, PermissionKind, assess_command_with_extra, evaluate_detailed,
+    parse_command_allowlist, COMMAND_ALLOWLIST_RELATIVE_PATH,
+};
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
@@ -62,6 +65,7 @@ pub struct ToolExecution {
 
 pub struct ToolRegistry {
     workspace_root: PathBuf,
+    command_allowlist: Vec<String>,
 }
 
 impl ToolRegistry {
@@ -73,13 +77,20 @@ impl ToolRegistry {
             ));
         }
 
+        let workspace_root = workspace_root.canonicalize()?;
+        let command_allowlist = load_command_allowlist(&workspace_root);
         Ok(Self {
-            workspace_root: workspace_root.canonicalize()?,
+            workspace_root,
+            command_allowlist,
         })
     }
 
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    pub fn command_allowlist(&self) -> &[String] {
+        &self.command_allowlist
     }
 
     pub fn execute(&self, mode: &Mode, tool_call: &ToolCall) -> Result<ToolExecution, ToolError> {
@@ -107,7 +118,11 @@ impl ToolRegistry {
             }
             ToolName::RunCommand => {
                 let args: RunCommandArgs = parse_arguments(&tool_call.arguments)?;
-                let assessment = assess_command(&args.executable, &args.args);
+                let assessment = assess_command_with_extra(
+                    &args.executable,
+                    &args.args,
+                    &self.command_allowlist,
+                );
                 if assessment.decision == PermissionDecision::Deny {
                     return Err(ToolError::InvalidCommand(assessment.reason));
                 }
@@ -358,16 +373,27 @@ impl ToolRegistry {
         args: RunCommandArgs,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<ToolExecution, ToolError> {
-        let assessment = assess_command(&args.executable, &args.args);
+        let assessment = assess_command_with_extra(
+            &args.executable,
+            &args.args,
+            &self.command_allowlist,
+        );
         if assessment.decision == PermissionDecision::Deny {
             return Err(ToolError::InvalidCommand(assessment.reason));
         }
 
+        // Never inherit the server RPC stdin pipe: some tools (notably git on
+        // Windows) can hang when stdin is an open parent pipe still owned by the
+        // JSON-RPC loop.
         let mut child = Command::new(&args.executable)
             .args(&args.args)
             .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat")
             .spawn()?;
 
         let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
@@ -434,6 +460,7 @@ impl ToolRegistry {
             .arg("--branch")
             .arg("--untracked-files=all")
             .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(path) = pathspec {
@@ -483,6 +510,7 @@ impl ToolRegistry {
             .arg("--no-ext-diff")
             .arg("--no-color")
             .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(path) = pathspec {
@@ -495,6 +523,7 @@ impl ToolRegistry {
             .arg("--no-ext-diff")
             .arg("--no-color")
             .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(path) = pathspec {
@@ -723,6 +752,14 @@ fn parse_git_status_lines(stdout: &str) -> Vec<Value> {
         }));
     }
     entries
+}
+
+fn load_command_allowlist(workspace_root: &Path) -> Vec<String> {
+    let path = workspace_root.join(COMMAND_ALLOWLIST_RELATIVE_PATH);
+    match fs::read_to_string(path) {
+        Ok(text) => parse_command_allowlist(&text),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn is_high_risk_path(path: &str) -> bool {
@@ -1024,6 +1061,39 @@ mod tests {
             .expect("patch");
         assert_eq!(kind, xcoding_policy::PermissionKind::Write);
         assert!(high_risk);
+    }
+
+    #[test]
+    fn honors_workspace_command_allowlist_file() {
+        let root = workspace();
+        fs::create_dir_all(root.join(".xcoding")).expect("dir");
+        fs::write(
+            root.join(".xcoding/command-allowlist"),
+            "git:--version\n# comment\n",
+        )
+        .expect("allowlist writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+        assert_eq!(tools.command_allowlist(), &["git:--version".to_owned()]);
+        let (kind, high_risk, allowlisted) = tools
+            .permission_for(&ToolCall {
+                id: "t-custom".to_owned(),
+                name: ToolName::RunCommand,
+                arguments: json!({
+                    "executable": "git",
+                    "args": ["--version"]
+                }),
+            })
+            .expect("custom allowlisted");
+        assert_eq!(kind, PermissionKind::Exec);
+        assert!(!high_risk);
+        assert!(allowlisted);
+        fs::write(
+            root.join(".xcoding/command-allowlist"),
+            "powershell\ncmd\n",
+        )
+        .expect("rewrite");
+        let tools = ToolRegistry::new(&root).expect("reload");
+        assert!(tools.command_allowlist().is_empty());
     }
 
     #[test]

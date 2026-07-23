@@ -159,7 +159,7 @@ impl CoreService {
     }
     pub fn workspace_config(&self, workspace_root: &str) -> Result<WorkspaceConfig, CoreError> {
         validate_workspace_root(workspace_root)?;
-        Ok(self
+        let mut config = self
             .store
             .get_workspace_config(workspace_root)?
             .unwrap_or_else(|| WorkspaceConfig {
@@ -167,8 +167,11 @@ impl CoreService {
                 mode: xcoding_protocol::Mode::Ask,
                 provider: "openai".to_owned(),
                 model: "gpt-5.5".to_owned(),
+                command_allowlist: Vec::new(),
                 updated_at: Utc::now(),
-            }))
+            });
+        config.command_allowlist = load_command_allowlist(workspace_root);
+        Ok(config)
     }
 
     pub fn set_workspace_config(
@@ -186,13 +189,23 @@ impl CoreService {
                 "model must not be empty".to_owned(),
             ));
         }
-        Ok(self.store.set_workspace_config(WorkspaceConfig {
+        let command_allowlist = if let Some(patterns) = params.command_allowlist {
+            write_command_allowlist(&params.workspace_root, &patterns)?
+        } else {
+            load_command_allowlist(&params.workspace_root)
+        };
+        let saved = self.store.set_workspace_config(WorkspaceConfig {
             workspace_root: params.workspace_root,
             mode: params.mode,
             provider: params.provider,
             model: params.model.trim().to_owned(),
+            command_allowlist: Vec::new(),
             updated_at: Utc::now(),
-        })?)
+        })?;
+        Ok(WorkspaceConfig {
+            command_allowlist,
+            ..saved
+        })
     }
 
     pub fn task_summary(&self, session_id: uuid::Uuid) -> Result<TaskSummary, CoreError> {
@@ -674,6 +687,45 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
     steps
 }
 
+fn load_command_allowlist(workspace_root: &str) -> Vec<String> {
+    let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_ALLOWLIST_RELATIVE_PATH);
+    match std::fs::read_to_string(path) {
+        Ok(text) => xcoding_policy::parse_command_allowlist(&text),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn write_command_allowlist(
+    workspace_root: &str,
+    patterns: &[String],
+) -> Result<Vec<String>, CoreError> {
+    let mut normalized = Vec::new();
+    for pattern in patterns {
+        let value = xcoding_policy::normalize_allowlist_pattern(pattern)
+            .map_err(CoreError::InvalidInput)?;
+        if !normalized.iter().any(|existing| existing == &value) {
+            normalized.push(value);
+        }
+    }
+    let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_ALLOWLIST_RELATIVE_PATH);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            CoreError::InvalidInput(format!(
+                "failed to create {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let body = xcoding_policy::render_command_allowlist_file(&normalized);
+    std::fs::write(&path, body).map_err(|error| {
+        CoreError::InvalidInput(format!(
+            "failed to write {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(normalized)
+}
+
 fn validate_workspace_root(workspace_root: &str) -> Result<(), CoreError> {
     if workspace_root.trim().is_empty() {
         return Err(CoreError::InvalidInput(
@@ -782,10 +834,12 @@ mod tests {
                 mode: Mode::AutoEdit,
                 provider: "openai".to_owned(),
                 model: "configured-model".to_owned(),
+                command_allowlist: None,
             })
             .expect("config saves");
         assert_eq!(saved.mode, Mode::AutoEdit);
         assert_eq!(saved.model, "configured-model");
+        assert!(saved.command_allowlist.is_empty());
 
         let session = core
             .start_chat(ChatParams {

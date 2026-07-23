@@ -66,7 +66,7 @@ pnpm cli -- config set --workspace . --mode auto-edit --model gpt-5.5
 pnpm cli -- chat "Explain the structure of this repository" --workspace .
 ```
 
-The CLI database is `<workspace>/.xcoding/xcoding.db`. Configuration stores only the selected mode, provider, and model for that workspace. New chats use those defaults unless a command explicitly supplies a different value.
+The CLI database is `<workspace>/.xcoding/xcoding.db`. Configuration stores mode, provider, and model for that workspace. Extra auto-edit command patterns live in `.xcoding/command-allowlist` (editable via `config set --command-allowlist` or Desktop defaults). New chats use those defaults unless a command explicitly supplies a different value.
 
 ## Use Desktop
 
@@ -115,7 +115,7 @@ eady is false.
 `run_command` is gated by mode, allowlist, and risk labels:
 
 - **ask** — every command needs approval
-- **auto-edit** — allowlisted safe developer commands auto-run; high-risk and non-allowlisted commands still need approval
+- **auto-edit** — allowlisted safe developer commands auto-run (builtin plus `.xcoding/command-allowlist`); high-risk and non-allowlisted commands still need approval
 - **Hard-denies** commands such as format, shutdown, git clean -fdx, and absolute executables
 - **Flags high-risk** shells/network-style helpers such as powershell -Command, cmd /c, git push --force, and pnpm publish
 

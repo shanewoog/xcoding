@@ -61,6 +61,15 @@ pub fn evaluate_detailed(
 /// Safe allowlisted commands are marked `decision=Allow` and `allowlisted=true`;
 /// mode policy still decides whether they auto-run.
 pub fn assess_command(executable: &str, args: &[String]) -> CommandAssessment {
+    assess_command_with_extra(executable, args, &[])
+}
+
+/// Like [`assess_command`] but also checks workspace-provided extra allowlist patterns.
+pub fn assess_command_with_extra(
+    executable: &str,
+    args: &[String],
+    extra_allowlist: &[String],
+) -> CommandAssessment {
     let executable = executable.trim();
     if executable.is_empty() {
         return denied("executable must not be empty");
@@ -196,7 +205,7 @@ pub fn assess_command(executable: &str, args: &[String]) -> CommandAssessment {
         };
     }
 
-    if is_command_allowlisted(&exe, args) {
+    if is_command_allowlisted_with_extra(&exe, args, extra_allowlist) {
         return CommandAssessment {
             decision: PermissionDecision::Allow,
             high_risk: false,
@@ -218,6 +227,22 @@ pub fn assess_command(executable: &str, args: &[String]) -> CommandAssessment {
 /// Never allowlists high-risk shells/interpreters. Rejects shell metacharacters
 /// in arguments so callers cannot smuggle extra execution.
 pub fn is_command_allowlisted(executable: &str, args: &[String]) -> bool {
+    is_command_allowlisted_with_extra(executable, args, &[])
+}
+
+/// Builtin allowlist plus validated workspace extra patterns.
+pub fn is_command_allowlisted_with_extra(
+    executable: &str,
+    args: &[String],
+    extra_allowlist: &[String],
+) -> bool {
+    if is_builtin_command_allowlisted(executable, args) {
+        return true;
+    }
+    matches_extra_allowlist(executable, args, extra_allowlist)
+}
+
+fn is_builtin_command_allowlisted(executable: &str, args: &[String]) -> bool {
     let exe = strip_windows_extension(&executable.trim().to_ascii_lowercase());
     if exe.is_empty() {
         return false;
@@ -273,6 +298,148 @@ pub fn is_command_allowlisted(executable: &str, args: &[String]) -> bool {
         _ => false,
     }
 }
+
+
+/// Parse a `.xcoding/command-allowlist` file body into normalized patterns.
+pub fn parse_command_allowlist(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| normalize_allowlist_pattern(line).ok())
+        .collect()
+}
+
+/// Validate and normalize one allowlist pattern (`exe` or `exe:subcommand`).
+pub fn normalize_allowlist_pattern(pattern: &str) -> Result<String, String> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err("allowlist pattern must not be empty".to_owned());
+    }
+    if pattern.contains("..") || pattern.contains('/') || pattern.contains('\\') {
+        return Err("allowlist patterns must be bare command names without path separators".to_owned());
+    }
+    if contains_shell_metacharacters(pattern) {
+        return Err("allowlist patterns must not contain shell metacharacters".to_owned());
+    }
+
+    let (exe_raw, sub) = match pattern.split_once(':') {
+        Some((exe, sub)) => (exe.trim(), Some(sub.trim())),
+        None => (pattern, None),
+    };
+    if exe_raw.is_empty() {
+        return Err("allowlist executable must not be empty".to_owned());
+    }
+    if let Some(sub) = sub {
+        if sub.is_empty() {
+            return Err("allowlist subcommand after ':' must not be empty".to_owned());
+        }
+        if sub.contains(':') {
+            return Err("allowlist patterns support at most one ':' separator".to_owned());
+        }
+    }
+
+    let exe = strip_windows_extension(&exe_raw.to_ascii_lowercase());
+    if exe.is_empty() {
+        return Err("allowlist executable must not be empty".to_owned());
+    }
+    if is_never_custom_allowlisted(&exe) {
+        return Err(format!(
+            "command `{exe}` cannot be added to the workspace allowlist"
+        ));
+    }
+
+    Ok(match sub {
+        Some(sub) => format!("{exe}:{}", sub.to_ascii_lowercase()),
+        None => exe,
+    })
+}
+
+fn is_never_custom_allowlisted(exe: &str) -> bool {
+    matches!(
+        exe,
+        "format"
+            | "mkfs"
+            | "mkfs.ext4"
+            | "mkfs.xfs"
+            | "diskpart"
+            | "shutdown"
+            | "reboot"
+            | "halt"
+            | "poweroff"
+            | "bcdedit"
+            | "cipher"
+            | "curl"
+            | "wget"
+            | "ssh"
+            | "scp"
+            | "sftp"
+            | "ftp"
+            | "nc"
+            | "ncat"
+            | "netcat"
+            | "powershell"
+            | "pwsh"
+            | "cmd"
+            | "bash"
+            | "sh"
+            | "zsh"
+            | "python"
+            | "python3"
+            | "node"
+            | "perl"
+            | "ruby"
+    )
+}
+
+fn matches_extra_allowlist(executable: &str, args: &[String], extra_allowlist: &[String]) -> bool {
+    if extra_allowlist.is_empty() {
+        return false;
+    }
+    if args.iter().any(|arg| contains_shell_metacharacters(arg)) {
+        return false;
+    }
+    let exe = strip_windows_extension(&executable.trim().to_ascii_lowercase());
+    if exe.is_empty() || is_never_custom_allowlisted(&exe) {
+        return false;
+    }
+    // Package publish remains high-friction even if a user listed the package manager.
+    if matches!(exe.as_str(), "pnpm" | "npm" | "yarn")
+        && args.iter().any(|arg| arg.eq_ignore_ascii_case("publish"))
+    {
+        return false;
+    }
+
+    let first = args
+        .first()
+        .map(|arg| arg.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    extra_allowlist.iter().any(|pattern| {
+        let Ok(normalized) = normalize_allowlist_pattern(pattern) else {
+            return false;
+        };
+        if let Some((pat_exe, pat_sub)) = normalized.split_once(':') {
+            exe == pat_exe && first == pat_sub
+        } else {
+            exe == normalized
+        }
+    })
+}
+
+pub fn render_command_allowlist_file(patterns: &[String]) -> String {
+    let mut body = String::from(
+        "# XCoding workspace command allowlist\n# One pattern per line: executable or executable:subcommand\n# Example:\n#   rg\n#   make:test\n#   git:--version\n# Shells/interpreters and destructive system commands are rejected.\n",
+    );
+    for pattern in patterns {
+        if let Ok(normalized) = normalize_allowlist_pattern(pattern) {
+            body.push_str(&normalized);
+            body.push('\n');
+        }
+    }
+    body
+}
+
+pub const COMMAND_ALLOWLIST_RELATIVE_PATH: &str = ".xcoding/command-allowlist";
 
 fn contains_shell_metacharacters(value: &str) -> bool {
     value.chars().any(|ch| {
@@ -371,6 +538,44 @@ mod tests {
             PermissionDecision::AskUser
         );
     }
+    #[test]
+    fn custom_allowlist_patterns_extend_builtin() {
+        let extra = vec!["git:--version".to_owned(), "rg".to_owned()];
+        assert!(is_command_allowlisted_with_extra(
+            "git",
+            &["--version".to_owned()],
+            &extra
+        ));
+        assert!(is_command_allowlisted_with_extra(
+            "rg",
+            &["TODO".to_owned(), "src".to_owned()],
+            &extra
+        ));
+        assert!(!is_command_allowlisted_with_extra(
+            "git",
+            &["--version".to_owned()],
+            &[]
+        ));
+        assert!(matches!(
+            normalize_allowlist_pattern("powershell"),
+            Err(_)
+        ));
+        assert!(matches!(normalize_allowlist_pattern("git:--version"), Ok(_)));
+        let assessment = assess_command_with_extra(
+            "git",
+            &["--version".to_owned()],
+            &extra,
+        );
+        assert!(assessment.allowlisted);
+        assert_eq!(assessment.decision, PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn parse_command_allowlist_ignores_comments() {
+        let parsed = parse_command_allowlist("# comment\nrg\n\nmake:test\n");
+        assert_eq!(parsed, vec!["rg".to_owned(), "make:test".to_owned()]);
+    }
+
 
     #[test]
     fn auto_edit_still_asks_for_high_risk_writes_and_commands() {

@@ -260,6 +260,9 @@ pub struct WorkspaceConfig {
     pub mode: Mode,
     pub provider: String,
     pub model: String,
+    /// Extra auto-edit command allowlist patterns from `.xcoding/command-allowlist`.
+    #[serde(default)]
+    pub command_allowlist: Vec<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -439,6 +442,9 @@ pub struct SetConfigParams {
     pub mode: Mode,
     pub provider: String,
     pub model: String,
+    /// When `Some`, rewrite `.xcoding/command-allowlist`. `None` leaves the file unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

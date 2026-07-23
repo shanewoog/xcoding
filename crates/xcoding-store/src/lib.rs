@@ -463,6 +463,7 @@ impl SessionStore {
                 .map_err(|error| parse(StoreError::InvalidData(error)))?,
             provider: row.get(2)?,
             model: row.get(3)?,
+            command_allowlist: Vec::new(),
             updated_at: DateTime::parse_from_rfc3339(&updated_at)
                 .map_err(|error| parse(StoreError::Timestamp(error)))?
                 .with_timezone(&Utc),
@@ -643,6 +644,7 @@ mod tests {
             mode: Mode::AutoEdit,
             provider: "openai".to_owned(),
             model: "configured-model".to_owned(),
+            command_allowlist: Vec::new(),
             updated_at: Utc::now(),
         };
 

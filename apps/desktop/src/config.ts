@@ -12,6 +12,21 @@ export function modeHelpText(mode: Mode): string {
     : "Ask proposes patches and commands for approval before applying.";
 }
 
+export function commandAllowlistHelpText(): string {
+  return "One pattern per line (exe or exe:subcommand). Extends the builtin auto-edit allowlist via .xcoding/command-allowlist. Shells and destructive commands are rejected.";
+}
+
+export function parseCommandAllowlistText(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+export function formatCommandAllowlistText(patterns: string[] | undefined): string {
+  return (patterns ?? []).join("\n");
+}
+
 export function formatModeOption(mode: Mode): string {
   return mode === "auto-edit" ? "Auto edit" : "Ask";
 }

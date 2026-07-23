@@ -65,6 +65,9 @@ async function main() {
     "export function isValidMode",
     "export function buildDesktopDoctorChecks",
     "export function desktopDoctorReady",
+    "export function commandAllowlistHelpText",
+    "export function parseCommandAllowlistText",
+    "export function formatCommandAllowlistText",
   ]) {
     assert.ok(configSource.includes(needle), "config.ts missing " + needle);
   }
@@ -77,6 +80,9 @@ async function main() {
     'id="default-mode"',
     'id="default-provider"',
     'id="default-model"',
+    'id="command-allowlist"',
+    "commandAllowlistHelpText",
+    "parseCommandAllowlistText",
     "doctor-panel",
     "Workspace diagnostics",
     "mode/model defaults, diagnostics",
@@ -90,6 +96,7 @@ async function main() {
     ".doctor-list",
     ".workspace-settings select",
     "input[readonly]",
+    ".command-allowlist-input",
   ]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }
@@ -102,6 +109,9 @@ async function main() {
       cliSource.includes("allowlisted safe command"),
     "CLI Mode policy should describe auto-edit allowlist behavior",
   );
+  assert.ok(cliSource.includes("--command-allowlist"), "CLI missing command-allowlist flag");
+  assert.ok(cliSource.includes("Command allowlist:"), "CLI help missing Command allowlist section");
+  assert.ok(cliSource.includes("parseCommandAllowlistOption"), "CLI missing allowlist parser");
 
   assert.equal(isValidMode("ask"), true);
   assert.equal(isValidMode("auto-edit"), true);

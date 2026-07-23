@@ -31,6 +31,9 @@ import {
   buildDesktopDoctorChecks,
   desktopDoctorReady,
   modeHelpText,
+  commandAllowlistHelpText,
+  parseCommandAllowlistText,
+  formatCommandAllowlistText,
 } from "./config";
 import {
   formatMessageRole,
@@ -143,6 +146,7 @@ export function App() {
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState(defaultModel);
+  const [commandAllowlistText, setCommandAllowlistText] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -188,6 +192,7 @@ export function App() {
       const config = await invoke<WorkspaceConfig>("workspace_config", { workspaceRoot: root });
       setMode(config.mode);
       setModel(config.model);
+      setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -444,10 +449,17 @@ export function App() {
     setIsSavingConfig(true);
     try {
       const config = await invoke<WorkspaceConfig>("set_workspace_config", {
-        params: { workspace_root: root, mode, provider: defaultProvider, model },
+        params: {
+          workspace_root: root,
+          mode,
+          provider: defaultProvider,
+          model,
+          command_allowlist: parseCommandAllowlistText(commandAllowlistText),
+        },
       });
       setMode(config.mode);
       setModel(config.model);
+      setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -509,6 +521,18 @@ export function App() {
             <input id="default-provider" value={defaultProvider} readOnly spellCheck={false} title="V1 supports the OpenAI-compatible provider named openai" />
             <label className="field-label" htmlFor="default-model">Model</label>
             <input id="default-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={isRunning || isSavingConfig} spellCheck={false} />
+            <label className="field-label" htmlFor="command-allowlist">Command allowlist</label>
+            <textarea
+              id="command-allowlist"
+              className="command-allowlist-input"
+              value={commandAllowlistText}
+              onChange={(event) => setCommandAllowlistText(event.target.value)}
+              disabled={isRunning || isSavingConfig}
+              spellCheck={false}
+              rows={4}
+              placeholder={"rg\nmake:test\ngit:--version"}
+            />
+            <p className="mode-help">{commandAllowlistHelpText()}</p>
             <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>
             <div className={`doctor-panel ${doctorReady ? "ready" : "blocked"}`} aria-label="Workspace diagnostics">
               <p className="panel-title">Diagnostics</p>

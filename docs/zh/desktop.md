@@ -21,7 +21,7 @@ pnpm --filter @xcoding/desktop exec tauri dev
 4. 查看计划、流式回答、工具活动、补丁预览和审批控件。
 5. 选择已保存会话，查看事件、恢复点和任务完成摘要。
 
-Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁，但执行命令仍然需要审批。
+Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁与白名单安全命令。高风险写入与非白名单命令仍需审批。左侧默认设置面板可编辑工作区 `.xcoding/command-allowlist` 模式。
 
 ## 默认值与诊断
 
@@ -37,7 +37,8 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
 切换模式时会更新说明文案：
 
 - **ask** — 提出补丁与命令，二者都需审批
-- **auto-edit** — 自动应用普通文件补丁；**命令仍需审批**
+- **auto-edit** — 自动应用普通文件补丁与白名单安全命令；**高风险写入与其他命令仍需审批**
+- **命令白名单** — 可选工作区模式（`exe` 或 `exe:subcommand`），保存到 `.xcoding/command-allowlist`；Shell/解释器不可加入
 
 **Diagnostics** 是客户端检查清单（工作区路径、鉴权、Base URL、默认值）。全部就绪表示可以开始任务；更深入的服务端检查仍请使用 `pnpm cli -- doctor`。
 
