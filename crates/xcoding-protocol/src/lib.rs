@@ -194,6 +194,8 @@ pub enum ToolName {
     GitDiff,
     GitLog,
     GitShow,
+    GitAdd,
+    GitCommit,
 }
 
 impl ToolName {
@@ -208,6 +210,8 @@ impl ToolName {
             Self::GitDiff => "git_diff",
             Self::GitLog => "git_log",
             Self::GitShow => "git_show",
+            Self::GitAdd => "git_add",
+            Self::GitCommit => "git_commit",
         }
     }
 }

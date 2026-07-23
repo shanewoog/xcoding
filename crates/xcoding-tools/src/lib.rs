@@ -118,6 +118,10 @@ impl ToolRegistry {
             | ToolName::GitDiff
             | ToolName::GitLog
             | ToolName::GitShow => Ok((PermissionKind::Read, false, false)),
+            ToolName::GitAdd | ToolName::GitCommit => {
+                // Mutates .git index/refs; always high-risk write.
+                Ok((PermissionKind::Write, true, false))
+            }
             ToolName::ApplyPatch => {
                 let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
                 Ok((PermissionKind::Write, is_high_risk_path(&args.path), false))
@@ -187,6 +191,8 @@ impl ToolRegistry {
             ToolName::GitDiff => self.git_diff(parse_arguments(&tool_call.arguments)?),
             ToolName::GitLog => self.git_log(parse_arguments(&tool_call.arguments)?),
             ToolName::GitShow => self.git_show(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitAdd => self.git_add(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitCommit => self.git_commit(parse_arguments(&tool_call.arguments)?),
         }
     }
 
@@ -759,6 +765,124 @@ impl ToolRegistry {
         })
     }
 
+    fn git_add(&self, args: GitAddArgs) -> Result<ToolExecution, ToolError> {
+        if args.paths.is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "paths must not be empty".to_owned(),
+            ));
+        }
+
+        let mut normalized = Vec::with_capacity(args.paths.len());
+        for path in &args.paths {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Err(ToolError::InvalidArguments(
+                    "paths must not contain empty entries".to_owned(),
+                ));
+            }
+            let relative = checked_relative_path(trimmed)?;
+            if is_high_risk_path(trimmed) {
+                return Err(ToolError::InvalidArguments(format!(
+                    "refusing to stage high-risk path: {trimmed}"
+                )));
+            }
+            normalized.push(relative.display().to_string());
+        }
+
+        let mut command = Command::new("git");
+        command
+            .arg("add")
+            .arg("--")
+            .args(&normalized)
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat");
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
+                format!("git add failed with exit code {:?}", output.status.code())
+            } else {
+                truncate_output(&stderr)
+            }));
+        }
+
+        Ok(ToolExecution {
+            output: json!({
+                "paths": normalized,
+                "success": true,
+                "stdout": truncate_output(&stdout),
+                "stderr": truncate_output(&stderr),
+            }),
+            summary: format!(
+                "Staged {} path{}",
+                normalized.len(),
+                if normalized.len() == 1 { "" } else { "s" }
+            ),
+        })
+    }
+
+    fn git_commit(&self, args: GitCommitArgs) -> Result<ToolExecution, ToolError> {
+        let message = args.message.trim();
+        if message.is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "message must not be empty".to_owned(),
+            ));
+        }
+        let allow_empty = args.allow_empty.unwrap_or(false);
+
+        let mut command = Command::new("git");
+        command.arg("commit").arg("-m").arg(message);
+        if allow_empty {
+            command.arg("--allow-empty");
+        }
+        command
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat");
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
+                format!("git commit failed with exit code {:?}", output.status.code())
+            } else {
+                truncate_output(&stderr)
+            }));
+        }
+
+        let hash = git_rev_parse_head(&self.workspace_root).ok();
+        let subject = message.lines().next().unwrap_or(message).to_owned();
+        Ok(ToolExecution {
+            output: json!({
+                "message": message,
+                "subject": subject,
+                "hash": hash,
+                "allow_empty": allow_empty,
+                "stdout": truncate_output(&stdout),
+                "stderr": truncate_output(&stderr),
+            }),
+            summary: match hash.as_deref() {
+                Some(value) if value.len() >= 7 => {
+                    format!("Committed {} ({})", &value[..7], subject)
+                }
+                Some(value) => format!("Committed {value} ({subject})"),
+                None => format!("Committed ({subject})"),
+            },
+        })
+    }
+
     fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
         let parent = path.parent().expect("workspace file has a parent");
         fs::create_dir_all(parent)?;
@@ -901,6 +1025,18 @@ struct GitShowArgs {
     revision: String,
     #[serde(default)]
     path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitAddArgs {
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct GitCommitArgs {
+    message: String,
+    #[serde(default)]
+    allow_empty: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -1070,6 +1206,26 @@ fn load_command_allowlist(workspace_root: &Path) -> Vec<String> {
 fn is_high_risk_path(path: &str) -> bool {
     path.split(['/', '\\'])
         .any(|part| part == ".git" || part == ".xcoding")
+}
+
+fn git_rev_parse_head(workspace_root: &Path) -> Result<String, ToolError> {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(workspace_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat")
+        .output()?;
+    if !output.status.success() {
+        return Err(ToolError::InvalidCommand(
+            "git rev-parse HEAD failed after commit".to_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn truncate_output(value: &str) -> String {
@@ -1519,6 +1675,157 @@ mod tests {
             )
             .expect_err("bad revision fails");
         assert!(matches!(missing, ToolError::InvalidCommand(_)));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn marks_git_add_and_commit_as_high_risk_writes() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+
+        let (kind, high_risk, allowlisted) = tools
+            .permission_for(&ToolCall {
+                id: "add_perm".to_owned(),
+                name: ToolName::GitAdd,
+                arguments: json!({ "paths": ["hello.txt"] }),
+            })
+            .expect("git_add permission");
+        assert_eq!(kind, PermissionKind::Write);
+        assert!(high_risk);
+        assert!(!allowlisted);
+
+        let (kind, high_risk, allowlisted) = tools
+            .permission_for(&ToolCall {
+                id: "commit_perm".to_owned(),
+                name: ToolName::GitCommit,
+                arguments: json!({ "message": "msg" }),
+            })
+            .expect("git_commit permission");
+        assert_eq!(kind, PermissionKind::Write);
+        assert!(high_risk);
+        assert!(!allowlisted);
+
+        // Even auto-edit must not auto-run high-risk git writes through execute().
+        let denied = tools
+            .execute(
+                &Mode::AutoEdit,
+                &ToolCall {
+                    id: "add_denied".to_owned(),
+                    name: ToolName::GitAdd,
+                    arguments: json!({ "paths": ["hello.txt"] }),
+                },
+            )
+            .expect_err("auto-edit still denies unauthorized high-risk write");
+        assert!(matches!(denied, ToolError::PermissionDenied));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn stages_and_commits_with_authorized_git_write_tools() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git init runs");
+        assert!(init.success());
+        let _ = Command::new("git")
+            .args(["config", "user.email", "xcoding@example.com"])
+            .current_dir(&root)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "XCoding"])
+            .current_dir(&root)
+            .status();
+        fs::write(root.join("hello.txt"), "hello
+").expect("file writes");
+        let bootstrap_add = Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("bootstrap add");
+        assert!(bootstrap_add.success());
+        let bootstrap_commit = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("bootstrap commit");
+        assert!(bootstrap_commit.success());
+
+        fs::write(root.join("hello.txt"), "hello staged
+").expect("mutate");
+        let empty_paths = tools
+            .execute_authorized(&ToolCall {
+                id: "add_empty".to_owned(),
+                name: ToolName::GitAdd,
+                arguments: json!({ "paths": [] }),
+            })
+            .expect_err("empty paths rejected");
+        assert!(matches!(empty_paths, ToolError::InvalidArguments(_)));
+
+        let high_risk_path = tools
+            .execute_authorized(&ToolCall {
+                id: "add_dotgit".to_owned(),
+                name: ToolName::GitAdd,
+                arguments: json!({ "paths": [".git/config"] }),
+            })
+            .expect_err("dotgit rejected");
+        assert!(matches!(high_risk_path, ToolError::InvalidArguments(_)));
+
+        let staged = tools
+            .execute_authorized(&ToolCall {
+                id: "add_ok".to_owned(),
+                name: ToolName::GitAdd,
+                arguments: json!({ "paths": ["hello.txt"] }),
+            })
+            .expect("git add authorized");
+        assert_eq!(staged.output["success"], true);
+        assert!(
+            staged.summary.contains("Staged"),
+            "summary={}",
+            staged.summary
+        );
+
+        let empty_message = tools
+            .execute_authorized(&ToolCall {
+                id: "commit_empty".to_owned(),
+                name: ToolName::GitCommit,
+                arguments: json!({ "message": "   " }),
+            })
+            .expect_err("empty message rejected");
+        assert!(matches!(empty_message, ToolError::InvalidArguments(_)));
+
+        let committed = tools
+            .execute_authorized(&ToolCall {
+                id: "commit_ok".to_owned(),
+                name: ToolName::GitCommit,
+                arguments: json!({ "message": "stage and commit via tools" }),
+            })
+            .expect("git commit authorized");
+        let hash = committed.output["hash"].as_str().expect("hash");
+        assert!(!hash.is_empty(), "{:?}", committed.output);
+        assert_eq!(
+            committed.output["subject"].as_str().unwrap(),
+            "stage and commit via tools"
+        );
+
+        let subject = Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&root)
+            .output()
+            .expect("git log");
+        assert!(subject.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "stage and commit via tools"
+        );
 
         fs::remove_dir_all(root).expect("workspace removes");
     }

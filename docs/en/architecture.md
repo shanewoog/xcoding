@@ -189,6 +189,8 @@ V1 tools:
 | `git_diff` | read | inspect local changes |
 | `git_log` | read | inspect recent commit history |
 | `git_show` | read | show one revision metadata and patch |
+| `git_add` | write (high-risk) | stage workspace paths (always requires approval) |
+| `git_commit` | write (high-risk) | create a commit (always requires approval) |
 
 Tool requirements:
 

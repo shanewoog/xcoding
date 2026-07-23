@@ -752,6 +752,33 @@ fn approval_summary(tool_call: &ToolCall) -> String {
                 format!("Review and approve command: {rendered}")
             }
         }
+        ToolName::GitAdd => {
+            let paths = tool_call
+                .arguments
+                .get("paths")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "<paths>".to_owned());
+            format!("Review HIGH-RISK git add: {paths}")
+        }
+        ToolName::GitCommit => {
+            let message = tool_call
+                .arguments
+                .get("message")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("<message>");
+            let subject = message.lines().next().unwrap_or(message);
+            format!("Review HIGH-RISK git commit: {subject}")
+        }
         _ => format!("Review {}", tool_call.name.as_str()),
     }
 }
@@ -802,6 +829,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             name: "git_show".to_owned(),
             description: "Show one git revision (metadata + patch). Optionally limit to a workspace-relative path.".to_owned(),
             parameters: json!({ "type": "object", "properties": { "revision": { "type": "string", "description": "Commit-ish such as HEAD, a SHA, or branch name" }, "path": { "type": "string", "description": "Optional workspace-relative pathspec" } }, "required": ["revision"] }),
+        },
+        ToolDefinition {
+            name: "git_add".to_owned(),
+            description: "Stage workspace-relative paths with git add. Always requires approval because it mutates .git.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Non-empty list of workspace-relative paths to stage" } }, "required": ["paths"] }),
+        },
+        ToolDefinition {
+            name: "git_commit".to_owned(),
+            description: "Create a git commit with a message. Always requires approval because it mutates .git. Does not amend, skip hooks, or force.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "message": { "type": "string", "description": "Commit message (required, non-empty)" }, "allow_empty": { "type": "boolean", "description": "Allow empty commits; defaults to false" } }, "required": ["message"] }),
         },
     ]
 }
@@ -857,7 +894,9 @@ mod tests {
                 "git_status",
                 "git_diff",
                 "git_log",
-                "git_show"
+                "git_show",
+                "git_add",
+                "git_commit"
             ]
         );
     }

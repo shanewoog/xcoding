@@ -189,6 +189,8 @@ V1 工具：
 | `git_diff` | read | 查看本地变更 |
 | `git_log` | read | 查看近期提交历史 |
 | `git_show` | read | 查看单个 revision 元数据与补丁 |
+| `git_add` | write (high-risk) | 暂存工作区路径（始终需要审批） |
+| `git_commit` | write (high-risk) | 创建提交（始终需要审批） |
 
 工具要求：
 

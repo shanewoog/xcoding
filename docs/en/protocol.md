@@ -709,7 +709,7 @@ Output:
 }
 ```
 
-## 6.6 `git_status` / `git_diff` / `git_log` / `git_show`
+## 6.6 `git_status` / `git_diff` / `git_log` / `git_show` / `git_add` / `git_commit`
 
 Read-only helpers for context, history, and final summaries.
 
@@ -821,6 +821,59 @@ Output:
   "body": "",
   "patch": "diff --git a/src/lib.rs b/src/lib.rs\n...",
   "raw": "..."
+}
+```
+
+### `git_add`
+
+Stage workspace-relative paths. Always classified as **high-risk write** (mutates `.git`), so both `ask` and `auto-edit` require approval.
+
+Input:
+
+```json
+{
+  "paths": ["src/lib.rs", "README.md"]
+}
+```
+
+`paths` is required and must be a non-empty array of workspace-relative paths. Absolute paths, `..`, and `.git` / `.xcoding` path segments are rejected.
+
+Output:
+
+```json
+{
+  "paths": ["src/lib.rs", "README.md"],
+  "success": true,
+  "stdout": "",
+  "stderr": ""
+}
+```
+
+### `git_commit`
+
+Create a commit with a message. Always classified as **high-risk write**. No amend / `--no-verify` / force flags in this version.
+
+Input:
+
+```json
+{
+  "message": "Fix workspace retrieval ranking",
+  "allow_empty": false
+}
+```
+
+`message` is required (non-empty after trim). `allow_empty` defaults to false.
+
+Output:
+
+```json
+{
+  "message": "Fix workspace retrieval ranking",
+  "subject": "Fix workspace retrieval ranking",
+  "hash": "abc123…",
+  "allow_empty": false,
+  "stdout": "[main abc123] Fix workspace retrieval ranking\n…",
+  "stderr": ""
 }
 ```
 
