@@ -779,6 +779,23 @@ fn approval_summary(tool_call: &ToolCall) -> String {
             let subject = message.lines().next().unwrap_or(message);
             format!("Review HIGH-RISK git commit: {subject}")
         }
+        ToolName::GitPush => {
+            let remote = tool_call
+                .arguments
+                .get("remote")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("origin");
+            let branch = tool_call
+                .arguments
+                .get("branch")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("<current-branch>");
+            format!("Review HIGH-RISK git push: {remote} {branch}")
+        }
         _ => format!("Review {}", tool_call.name.as_str()),
     }
 }
@@ -840,6 +857,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             description: "Create a git commit with a message. Always requires approval because it mutates .git. Does not amend, skip hooks, or force.".to_owned(),
             parameters: json!({ "type": "object", "properties": { "message": { "type": "string", "description": "Commit message (required, non-empty)" }, "allow_empty": { "type": "boolean", "description": "Allow empty commits; defaults to false" } }, "required": ["message"] }),
         },
+        ToolDefinition {
+            name: "git_push".to_owned(),
+            description: "Push the current or specified branch to a remote. Always requires approval. Does not force-push; rejects force-like remotes/branches.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "remote": { "type": "string", "description": "Remote name; defaults to origin" }, "branch": { "type": "string", "description": "Branch to push; defaults to the current branch" }, "set_upstream": { "type": "boolean", "description": "Pass --set-upstream; defaults to false" } } }),
+        },
     ]
 }
 
@@ -896,7 +918,8 @@ mod tests {
                 "git_log",
                 "git_show",
                 "git_add",
-                "git_commit"
+                "git_commit",
+                "git_push"
             ]
         );
     }

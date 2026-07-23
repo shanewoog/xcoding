@@ -709,7 +709,7 @@ Output:
 }
 ```
 
-## 6.6 `git_status` / `git_diff` / `git_log` / `git_show` / `git_add` / `git_commit`
+## 6.6 `git_status` / `git_diff` / `git_log` / `git_show` / `git_add` / `git_commit` / `git_push`
 
 Read-only helpers for context, history, and final summaries.
 
@@ -876,6 +876,42 @@ Output:
   "stderr": ""
 }
 ```
+
+
+
+### `git_push`
+
+Push a branch to a remote. Always classified as **high-risk write** (updates remote refs). Both `ask` and `auto-edit` require approval. This version never force-pushes.
+
+Input:
+
+```json
+{
+  "remote": "origin",
+  "branch": "main",
+  "set_upstream": false
+}
+```
+
+- `remote` optional; defaults to `origin`. Must be a single remote name (no leading `-`, no whitespace, no `:` / `..`).
+- `branch` optional; defaults to the current branch. Detached HEAD requires an explicit branch.
+- `set_upstream` optional; defaults to false (`git push --set-upstream` when true).
+
+Output:
+
+```json
+{
+  "remote": "origin",
+  "branch": "main",
+  "set_upstream": false,
+  "head": "abc123…",
+  "success": true,
+  "stdout": "…",
+  "stderr": "…"
+}
+```
+
+Auth / network failures surface as tool errors via git stderr (for example missing credentials or rejected non-fast-forward).
 
 ## 7. Permission Evaluation Rules
 

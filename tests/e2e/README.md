@@ -18,6 +18,7 @@ The tests start the real `xcoding-server` binary, use a local OpenAI-compatible 
 - `write-loop-agent.mjs`: feature (patch + test), bugfix (repro-first), refactor (baseline + rewrite + retest).
 - `git-tools-agent.mjs`: read-only `git_status` + `git_diff` + `git_log` + `git_show` against a temporary git fixture.
 - `git-write-agent.mjs`: approved `git_add` + `git_commit` (high-risk write) in ask and auto-edit modes.
+- `git-push-agent.mjs`: approved `git_push` (high-risk write, no force) in ask and auto-edit modes against a local bare remote.
 - `provider-auth-error.mjs`: mock HTTP 401 maps to actionable OPENAI_API_KEY / XCODING_OPENAI_BASE_URL guidance.
 - `surface-parity.mjs`: static CLI / Desktop / server method surface parity for shared workflows.
 

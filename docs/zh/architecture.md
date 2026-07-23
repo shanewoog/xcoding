@@ -191,6 +191,7 @@ V1 工具：
 | `git_show` | read | 查看单个 revision 元数据与补丁 |
 | `git_add` | write (high-risk) | 暂存工作区路径（始终需要审批） |
 | `git_commit` | write (high-risk) | 创建提交（始终需要审批） |
+| `git_push` | write (high-risk) | 推送分支到远端（始终需要审批；不 force） |
 
 工具要求：
 

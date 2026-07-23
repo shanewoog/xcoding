@@ -196,6 +196,7 @@ pub enum ToolName {
     GitShow,
     GitAdd,
     GitCommit,
+    GitPush,
 }
 
 impl ToolName {
@@ -212,6 +213,7 @@ impl ToolName {
             Self::GitShow => "git_show",
             Self::GitAdd => "git_add",
             Self::GitCommit => "git_commit",
+            Self::GitPush => "git_push",
         }
     }
 }

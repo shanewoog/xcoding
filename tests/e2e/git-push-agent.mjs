@@ -11,9 +11,10 @@ const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcodin
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
 async function main() {
-  const fixtureRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-write-fixture-"));
-  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-git-write-"));
-  await prepareGitFixture(fixtureRoot);
+  const fixtureRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-push-fixture-"));
+  const bareRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-push-remote-"));
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-git-push-"));
+  await prepareGitFixture(fixtureRoot, bareRoot);
   const mock = await startMockProvider();
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
@@ -25,70 +26,53 @@ async function main() {
   });
 
   try {
-    // --- ask mode: both git_add and git_commit require approval ---
+    // ask mode: git_push always requires approval
     const started = await rpc.request("session.chat", {
       workspace_root: fixtureRoot,
-      message: "Stage and commit the modified hello.txt",
+      message: "Push main to origin",
       model: "fixture-model",
       mode: "ask",
     });
     assert.equal(started.session.status, "need_user");
-    const addApproval = latestApproval(rpc, started.session.id);
-    assert.equal(addApproval.action.tool_call.name, "git_add");
-    assert.match(addApproval.summary ?? "", /git add|HIGH-RISK/i);
-
-    const afterAdd = await rpc.request("session.resolve", {
-      session_id: started.session.id,
-      action_id: addApproval.action.id,
-      approved: true,
-    });
-    assert.equal(afterAdd.session.status, "need_user");
-    const commitApproval = latestApproval(rpc, started.session.id);
-    assert.equal(commitApproval.action.tool_call.name, "git_commit");
-    assert.notEqual(commitApproval.action.id, addApproval.action.id);
-    assert.match(commitApproval.summary ?? "", /git commit|HIGH-RISK/i);
+    const pushApproval = latestApproval(rpc, started.session.id);
+    assert.equal(pushApproval.action.tool_call.name, "git_push");
+    assert.match(pushApproval.summary ?? "", /git push|HIGH-RISK/i);
 
     const completed = await rpc.request("session.resolve", {
       session_id: started.session.id,
-      action_id: commitApproval.action.id,
+      action_id: pushApproval.action.id,
       approved: true,
     });
     assert.equal(completed.session.status, "done");
-    assert.match(completed.message?.content ?? "", /committed|staged/i);
+    assert.match(completed.message?.content ?? "", /push/i);
 
     assert.ok(
       rpc.events.some(
         (event) =>
           event.type === "tool_end" &&
-          event.tool_call?.name === "git_add" &&
+          event.tool_call?.name === "git_push" &&
           event.success === true,
       ),
-      "expected successful git_add tool_end",
-    );
-    assert.ok(
-      rpc.events.some(
-        (event) =>
-          event.type === "tool_end" &&
-          event.tool_call?.name === "git_commit" &&
-          event.success === true,
-      ),
-      "expected successful git_commit tool_end",
+      "expected successful git_push tool_end",
     );
 
-    const subject = execFileSync("git", ["log", "-1", "--pretty=%s"], {
+    const localHead = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: fixtureRoot,
       encoding: "utf8",
     }).trim();
-    assert.equal(subject, "Update hello.txt via approved git tools");
-
-    const porcelain = execFileSync("git", ["status", "--porcelain"], {
-      cwd: fixtureRoot,
+    const remoteHead = execFileSync("git", ["--git-dir", bareRoot, "rev-parse", "main"], {
       encoding: "utf8",
     }).trim();
-    assert.equal(porcelain, "", `working tree should be clean, got: ${porcelain}`);
+    assert.equal(remoteHead, localHead);
 
-    // --- auto-edit mode: high-risk git writes still require approval ---
-    await writeFile(resolve(fixtureRoot, "hello.txt"), "hello auto-edit\n", "utf8");
+    // auto-edit mode: still requires approval
+    await writeFile(resolve(fixtureRoot, "hello.txt"), "hello auto push\n", "utf8");
+    execFileSync("git", ["add", "hello.txt"], { cwd: fixtureRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "auto push prep"], {
+      cwd: fixtureRoot,
+      stdio: "ignore",
+    });
+
     await rpc.request("config.set", {
       workspace_root: fixtureRoot,
       mode: "auto-edit",
@@ -98,60 +82,57 @@ async function main() {
 
     const autoStarted = await rpc.request("session.chat", {
       workspace_root: fixtureRoot,
-      message: "Stage and commit the auto-edit change",
+      message: "Push the new commit",
       model: "fixture-model",
     });
     assert.equal(autoStarted.session.mode, "auto-edit");
     assert.equal(autoStarted.session.status, "need_user");
-    const autoAdd = latestApproval(rpc, autoStarted.session.id);
-    assert.equal(autoAdd.action.tool_call.name, "git_add");
-
-    const afterAutoAdd = await rpc.request("session.resolve", {
-      session_id: autoStarted.session.id,
-      action_id: autoAdd.action.id,
-      approved: true,
-    });
-    assert.equal(afterAutoAdd.session.status, "need_user");
-    const autoCommit = latestApproval(rpc, autoStarted.session.id);
-    assert.equal(autoCommit.action.tool_call.name, "git_commit");
+    const autoPush = latestApproval(rpc, autoStarted.session.id);
+    assert.equal(autoPush.action.tool_call.name, "git_push");
 
     const autoDone = await rpc.request("session.resolve", {
       session_id: autoStarted.session.id,
-      action_id: autoCommit.action.id,
+      action_id: autoPush.action.id,
       approved: true,
     });
     assert.equal(autoDone.session.status, "done");
 
-    const autoSubject = execFileSync("git", ["log", "-1", "--pretty=%s"], {
+    const localHead2 = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: fixtureRoot,
       encoding: "utf8",
     }).trim();
-    assert.equal(autoSubject, "Update hello.txt via approved git tools");
+    const remoteHead2 = execFileSync("git", ["--git-dir", bareRoot, "rev-parse", "main"], {
+      encoding: "utf8",
+    }).trim();
+    assert.equal(remoteHead2, localHead2);
 
-    assert.deepEqual(
-      mock.requests[0].tools.map((tool) => tool.function.name),
-      [
-        "list_dir",
-        "read_file",
-        "search_code",
-        "apply_patch",
-        "run_command",
-        "git_status",
-        "git_diff",
-        "git_log",
-        "git_show",
-        "git_add",
-        "git_commit",
-        "git_push",
-      ],
+    const tools = mock.requests.flatMap((payload) =>
+      (payload.tools ?? []).map((tool) => tool.function?.name ?? tool.name),
     );
+    for (const name of [
+      "list_dir",
+      "read_file",
+      "search_code",
+      "apply_patch",
+      "run_command",
+      "git_status",
+      "git_diff",
+      "git_log",
+      "git_show",
+      "git_add",
+      "git_commit",
+      "git_push",
+    ]) {
+      assert.ok(tools.includes(name), `expected tool definition ${name}`);
+    }
 
-    console.log("Git write agent E2E passed.");
+    console.log("Git push agent E2E passed.");
   } finally {
     await rpc.close();
     await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(bareRoot, { recursive: true, force: true });
   }
 }
 
@@ -163,14 +144,18 @@ function latestApproval(rpc, sessionId) {
   return approvals[approvals.length - 1];
 }
 
-async function prepareGitFixture(root) {
-  execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
-  execFileSync("git", ["config", "user.email", "xcoding@example.com"], { cwd: root, stdio: "ignore" });
+async function prepareGitFixture(root, bareRoot) {
+  execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["init", "--bare", "-b", "main", bareRoot], { stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "xcoding@example.com"], {
+    cwd: root,
+    stdio: "ignore",
+  });
   execFileSync("git", ["config", "user.name", "XCoding"], { cwd: root, stdio: "ignore" });
   await writeFile(resolve(root, "hello.txt"), "hello\n", "utf8");
   execFileSync("git", ["add", "hello.txt"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
-  await writeFile(resolve(root, "hello.txt"), "hello staged\n", "utf8");
+  execFileSync("git", ["remote", "add", "origin", bareRoot], { cwd: root, stdio: "ignore" });
 }
 
 function startRpcClient({ databasePath, environment }) {
@@ -253,7 +238,6 @@ async function startMockProvider() {
     const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(payload);
     const messages = payload.messages ?? [];
-    // The agent may refeed only the latest tool result, so branch on the last tool message.
     const lastTool = [...messages].reverse().find((message) => message.role === "tool");
 
     response.writeHead(200, {
@@ -270,34 +254,14 @@ async function startMockProvider() {
                 tool_calls: [
                   {
                     index: 0,
-                    id: "call_git_add",
+                    id: "call_git_push",
                     type: "function",
                     function: {
-                      name: "git_add",
-                      arguments: JSON.stringify({ paths: ["hello.txt"] }),
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        })}\n\n`,
-      );
-    } else if (lastTool.tool_call_id === "call_git_add") {
-      response.write(
-        `data: ${JSON.stringify({
-          choices: [
-            {
-              delta: {
-                tool_calls: [
-                  {
-                    index: 0,
-                    id: "call_git_commit",
-                    type: "function",
-                    function: {
-                      name: "git_commit",
+                      name: "git_push",
                       arguments: JSON.stringify({
-                        message: "Update hello.txt via approved git tools",
+                        remote: "origin",
+                        branch: "main",
+                        set_upstream: true,
                       }),
                     },
                   },
@@ -313,7 +277,7 @@ async function startMockProvider() {
           choices: [
             {
               delta: {
-                content: "Staged and committed hello.txt with the approved git tools.",
+                content: "Pushed main to origin with the approved git_push tool.",
               },
             },
           ],

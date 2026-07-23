@@ -67,6 +67,8 @@ async function runDeterministic() {
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/session-replay-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/write-loop-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-tools-agent.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-write-agent.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-push-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-auth-error.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-status.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/doctor.mjs")]);

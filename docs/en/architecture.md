@@ -191,6 +191,7 @@ V1 tools:
 | `git_show` | read | show one revision metadata and patch |
 | `git_add` | write (high-risk) | stage workspace paths (always requires approval) |
 | `git_commit` | write (high-risk) | create a commit (always requires approval) |
+| `git_push` | write (high-risk) | push branch to remote (always requires approval; no force) |
 
 Tool requirements:
 

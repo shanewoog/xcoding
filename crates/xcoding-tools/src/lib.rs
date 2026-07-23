@@ -118,8 +118,8 @@ impl ToolRegistry {
             | ToolName::GitDiff
             | ToolName::GitLog
             | ToolName::GitShow => Ok((PermissionKind::Read, false, false)),
-            ToolName::GitAdd | ToolName::GitCommit => {
-                // Mutates .git index/refs; always high-risk write.
+            ToolName::GitAdd | ToolName::GitCommit | ToolName::GitPush => {
+                // Mutates .git index/refs or pushes to a remote; always high-risk write.
                 Ok((PermissionKind::Write, true, false))
             }
             ToolName::ApplyPatch => {
@@ -193,6 +193,7 @@ impl ToolRegistry {
             ToolName::GitShow => self.git_show(parse_arguments(&tool_call.arguments)?),
             ToolName::GitAdd => self.git_add(parse_arguments(&tool_call.arguments)?),
             ToolName::GitCommit => self.git_commit(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitPush => self.git_push(parse_arguments(&tool_call.arguments)?),
         }
     }
 
@@ -883,6 +884,74 @@ impl ToolRegistry {
         })
     }
 
+
+    fn git_push(&self, args: GitPushArgs) -> Result<ToolExecution, ToolError> {
+        let remote = args
+            .remote
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("origin");
+        validate_git_name("remote", remote)?;
+
+        let set_upstream = args.set_upstream.unwrap_or(false);
+        let branch = if let Some(branch) = args.branch.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            validate_git_name("branch", branch)?;
+            branch.to_owned()
+        } else {
+            current_branch_name(&self.workspace_root)?
+        };
+
+        let mut command = Command::new("git");
+        command.arg("push");
+        if set_upstream {
+            command.arg("--set-upstream");
+        }
+        command
+            .arg(remote)
+            .arg(&branch)
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat");
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            let detail = if !stderr.trim().is_empty() {
+                truncate_output(stderr.trim())
+            } else if !stdout.trim().is_empty() {
+                truncate_output(stdout.trim())
+            } else {
+                format!("git push failed with exit code {:?}", output.status.code())
+            };
+            return Err(ToolError::InvalidCommand(detail));
+        }
+
+        let head = git_rev_parse_head(&self.workspace_root).ok();
+        Ok(ToolExecution {
+            output: json!({
+                "remote": remote,
+                "branch": branch,
+                "set_upstream": set_upstream,
+                "head": head,
+                "success": true,
+                "stdout": truncate_output(&stdout),
+                "stderr": truncate_output(&stderr),
+            }),
+            summary: format!(
+                "Pushed {} to {}{}",
+                branch,
+                remote,
+                if set_upstream { " (set upstream)" } else { "" }
+            ),
+        })
+    }
+
     fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
         let parent = path.parent().expect("workspace file has a parent");
         fs::create_dir_all(parent)?;
@@ -1037,6 +1106,16 @@ struct GitCommitArgs {
     message: String,
     #[serde(default)]
     allow_empty: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitPushArgs {
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    set_upstream: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -1206,6 +1285,63 @@ fn load_command_allowlist(workspace_root: &Path) -> Vec<String> {
 fn is_high_risk_path(path: &str) -> bool {
     path.split(['/', '\\'])
         .any(|part| part == ".git" || part == ".xcoding")
+}
+
+
+fn validate_git_name(kind: &str, value: &str) -> Result<(), ToolError> {
+    if value.is_empty() {
+        return Err(ToolError::InvalidArguments(format!(
+            "{kind} must not be empty"
+        )));
+    }
+    if value.starts_with('-') {
+        return Err(ToolError::InvalidArguments(format!(
+            "{kind} must not start with '-'"
+        )));
+    }
+    if value.chars().any(|ch| ch.is_whitespace() || ch == '\0') {
+        return Err(ToolError::InvalidArguments(format!(
+            "{kind} must not contain whitespace"
+        )));
+    }
+    // Block force-ish tokens and multi-arg smuggling via a single field.
+    if value.contains(':') || value.contains("..") {
+        return Err(ToolError::InvalidArguments(format!(
+            "{kind} must not contain ':' or '..'"
+        )));
+    }
+    Ok(())
+}
+
+fn current_branch_name(workspace_root: &Path) -> Result<String, ToolError> {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .current_dir(workspace_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat")
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
+            "failed to resolve current branch for git push".to_owned()
+        } else {
+            truncate_output(stderr.trim())
+        }));
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err(ToolError::InvalidArguments(
+            "detached HEAD: pass branch explicitly for git_push".to_owned(),
+        ));
+    }
+    validate_git_name("branch", &branch)?;
+    Ok(branch)
 }
 
 fn git_rev_parse_head(workspace_root: &Path) -> Result<String, ToolError> {
@@ -1680,7 +1816,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_git_add_and_commit_as_high_risk_writes() {
+    fn marks_git_write_tools_as_high_risk() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("registry starts");
 
@@ -1706,6 +1842,17 @@ mod tests {
         assert!(high_risk);
         assert!(!allowlisted);
 
+        let (kind, high_risk, allowlisted) = tools
+            .permission_for(&ToolCall {
+                id: "push_perm".to_owned(),
+                name: ToolName::GitPush,
+                arguments: json!({}),
+            })
+            .expect("git_push permission");
+        assert_eq!(kind, PermissionKind::Write);
+        assert!(high_risk);
+        assert!(!allowlisted);
+
         // Even auto-edit must not auto-run high-risk git writes through execute().
         let denied = tools
             .execute(
@@ -1718,6 +1865,18 @@ mod tests {
             )
             .expect_err("auto-edit still denies unauthorized high-risk write");
         assert!(matches!(denied, ToolError::PermissionDenied));
+
+        let denied_push = tools
+            .execute(
+                &Mode::AutoEdit,
+                &ToolCall {
+                    id: "push_denied".to_owned(),
+                    name: ToolName::GitPush,
+                    arguments: json!({ "remote": "origin", "branch": "main" }),
+                },
+            )
+            .expect_err("auto-edit still denies unauthorized git push");
+        assert!(matches!(denied_push, ToolError::PermissionDenied));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -1827,6 +1986,116 @@ mod tests {
             "stage and commit via tools"
         );
 
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+
+    #[test]
+    fn pushes_with_authorized_git_push_tool() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let bare = root.parent().unwrap().join(format!(
+            "{}_remote.git",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let init = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git init runs");
+        assert!(init.success());
+        let bare_init = Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&bare)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("bare init runs");
+        assert!(bare_init.success());
+        let _ = Command::new("git")
+            .args(["config", "user.email", "xcoding@example.com"])
+            .current_dir(&root)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "XCoding"])
+            .current_dir(&root)
+            .status();
+        fs::write(root.join("hello.txt"), "hello\\n").expect("file writes");
+        assert!(Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("commit")
+            .success());
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&bare)
+            .current_dir(&root)
+            .status()
+            .expect("remote add")
+            .success());
+
+        let bad_remote = tools
+            .execute_authorized(&ToolCall {
+                id: "push_bad".to_owned(),
+                name: ToolName::GitPush,
+                arguments: json!({ "remote": "--force" }),
+            })
+            .expect_err("flag remote rejected");
+        assert!(matches!(bad_remote, ToolError::InvalidArguments(_)));
+
+        let bad_branch = tools
+            .execute_authorized(&ToolCall {
+                id: "push_branch".to_owned(),
+                name: ToolName::GitPush,
+                arguments: json!({ "branch": "main:refs/heads/evil" }),
+            })
+            .expect_err("refspec smuggling rejected");
+        assert!(matches!(bad_branch, ToolError::InvalidArguments(_)));
+
+        let pushed = tools
+            .execute_authorized(&ToolCall {
+                id: "push_ok".to_owned(),
+                name: ToolName::GitPush,
+                arguments: json!({
+                    "remote": "origin",
+                    "branch": "main",
+                    "set_upstream": true
+                }),
+            })
+            .expect("git push authorized");
+        assert_eq!(pushed.output["success"], true);
+        assert_eq!(pushed.output["remote"], "origin");
+        assert_eq!(pushed.output["branch"], "main");
+        assert_eq!(pushed.output["set_upstream"], true);
+        assert!(
+            pushed.summary.contains("Pushed"),
+            "summary={}",
+            pushed.summary
+        );
+
+        let remote_head = Command::new("git")
+            .args(["--git-dir"])
+            .arg(&bare)
+            .args(["rev-parse", "main"])
+            .output()
+            .expect("remote rev-parse");
+        assert!(remote_head.status.success());
+        let remote_hash = String::from_utf8_lossy(&remote_head.stdout).trim().to_owned();
+        let local_hash = git_rev_parse_head(&root).expect("local head");
+        assert_eq!(remote_hash, local_hash);
+
+        let _ = fs::remove_dir_all(&bare);
         fs::remove_dir_all(root).expect("workspace removes");
     }
 
