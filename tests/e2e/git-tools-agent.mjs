@@ -51,11 +51,37 @@ async function main() {
       rpc.events.some((event) => event.type === "tool_start" && event.tool_call?.name === "git_diff"),
       "expected git_diff tool start",
     );
+    assert.ok(
+      rpc.events.some((event) => event.type === "tool_start" && event.tool_call?.name === "git_log"),
+      "expected git_log tool start",
+    );
+    assert.ok(
+      rpc.events.some(
+        (event) =>
+          event.type === "tool_end" &&
+          event.tool_call?.name === "git_log" &&
+          event.success === true,
+      ),
+      "expected git_log tool end",
+    );
+    assert.ok(
+      rpc.events.some((event) => event.type === "tool_start" && event.tool_call?.name === "git_show"),
+      "expected git_show tool start",
+    );
+    assert.ok(
+      rpc.events.some(
+        (event) =>
+          event.type === "tool_end" &&
+          event.tool_call?.name === "git_show" &&
+          event.success === true,
+      ),
+      "expected git_show tool end",
+    );
 
-    assert.equal(mock.requests.length, 3);
+    assert.equal(mock.requests.length, 5);
     assert.deepEqual(
       mock.requests[0].tools.map((tool) => tool.function.name),
-      ["list_dir", "read_file", "search_code", "apply_patch", "run_command", "git_status", "git_diff"],
+      ["list_dir", "read_file", "search_code", "apply_patch", "run_command", "git_status", "git_diff", "git_log", "git_show"],
     );
 
     const statusTool = mock.requests[1].messages.find(
@@ -69,6 +95,18 @@ async function main() {
     );
     assert.ok(diffTool, "diff tool result refeeded");
     assert.match(diffTool.content ?? "", /hello world/);
+
+    const logTool = mock.requests[3].messages.find(
+      (message) => message.role === "tool" && message.tool_call_id === "call_git_log",
+    );
+    assert.ok(logTool, "log tool result refeeded");
+    assert.match(logTool.content ?? "", /init/);
+
+    const showTool = mock.requests[4].messages.find(
+      (message) => message.role === "tool" && message.tool_call_id === "call_git_show",
+    );
+    assert.ok(showTool, "show tool result refeeded");
+    assert.match(showTool.content ?? "", /init|hello/);
 
 
     const taskCompleted = rpc.events.find((event) => event.type === "task_completed");
@@ -228,6 +266,50 @@ async function startMockProvider() {
                     function: {
                       name: "git_diff",
                       arguments: JSON.stringify({ path: "hello.txt" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\n`,
+      );
+    } else if (turn === 2) {
+      response.write(
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_git_log",
+                    type: "function",
+                    function: {
+                      name: "git_log",
+                      arguments: JSON.stringify({ max_count: 5 }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\n`,
+      );
+    } else if (turn === 3) {
+      response.write(
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_git_show",
+                    type: "function",
+                    function: {
+                      name: "git_show",
+                      arguments: JSON.stringify({ revision: "HEAD" }),
                     },
                   },
                 ],

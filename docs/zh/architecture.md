@@ -187,6 +187,8 @@ V1 工具：
 | `run_command` | exec | 运行测试或构建命令 |
 | `git_status` | read | 查看 git 状态 |
 | `git_diff` | read | 查看本地变更 |
+| `git_log` | read | 查看近期提交历史 |
+| `git_show` | read | 查看单个 revision 元数据与补丁 |
 
 工具要求：
 

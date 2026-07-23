@@ -187,6 +187,8 @@ V1 tools:
 | `run_command` | exec | run tests or build commands |
 | `git_status` | read | inspect workspace git state |
 | `git_diff` | read | inspect local changes |
+| `git_log` | read | inspect recent commit history |
+| `git_show` | read | show one revision metadata and patch |
 
 Tool requirements:
 

@@ -30,6 +30,8 @@ const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_SEARCH_CONTEXT_LINES: usize = 3;
 const MAX_SEARCH_CANDIDATES: usize = 500;
+const DEFAULT_GIT_LOG_COUNT: usize = 20;
+const MAX_GIT_LOG_COUNT: usize = 50;
 
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -113,7 +115,9 @@ impl ToolRegistry {
             | ToolName::ReadFile
             | ToolName::SearchCode
             | ToolName::GitStatus
-            | ToolName::GitDiff => Ok((PermissionKind::Read, false, false)),
+            | ToolName::GitDiff
+            | ToolName::GitLog
+            | ToolName::GitShow => Ok((PermissionKind::Read, false, false)),
             ToolName::ApplyPatch => {
                 let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
                 Ok((PermissionKind::Write, is_high_risk_path(&args.path), false))
@@ -181,6 +185,8 @@ impl ToolRegistry {
             }
             ToolName::GitStatus => self.git_status(parse_arguments(&tool_call.arguments)?),
             ToolName::GitDiff => self.git_diff(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitLog => self.git_log(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitShow => self.git_show(parse_arguments(&tool_call.arguments)?),
         }
     }
 
@@ -633,6 +639,126 @@ impl ToolRegistry {
         })
     }
 
+    fn git_log(&self, args: GitLogArgs) -> Result<ToolExecution, ToolError> {
+        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        if let Some(path) = pathspec {
+            let _ = checked_relative_path(path)?;
+        }
+        let max_count = bounded(args.max_count, DEFAULT_GIT_LOG_COUNT, MAX_GIT_LOG_COUNT);
+
+        let mut command = Command::new("git");
+        command
+            .arg("log")
+            .arg(format!("--max-count={max_count}"))
+            .arg("--pretty=format:%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%b%x1e")
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat");
+        if let Some(path) = pathspec {
+            command.arg("--").arg(path);
+        }
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
+                format!("git log failed with exit code {:?}", output.status.code())
+            } else {
+                truncate_output(&stderr)
+            }));
+        }
+
+        let commits = parse_git_log_records(&stdout);
+        Ok(ToolExecution {
+            output: json!({
+                "path": pathspec.unwrap_or("."),
+                "max_count": max_count,
+                "commits": commits,
+                "raw": truncate_output(&format_git_log_raw(&commits)),
+            }),
+            summary: format!(
+                "Git log ({} commit{}) for {}",
+                commits.len(),
+                if commits.len() == 1 { "" } else { "s" },
+                pathspec.unwrap_or(".")
+            ),
+        })
+    }
+
+    fn git_show(&self, args: GitShowArgs) -> Result<ToolExecution, ToolError> {
+        let revision = args.revision.trim();
+        if revision.is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "revision must not be empty".to_owned(),
+            ));
+        }
+        if revision.starts_with('-') {
+            return Err(ToolError::InvalidArguments(
+                "revision must not start with '-'".to_owned(),
+            ));
+        }
+        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        if let Some(path) = pathspec {
+            let _ = checked_relative_path(path)?;
+        }
+
+        let mut command = Command::new("git");
+        command
+            .arg("show")
+            .arg("--no-color")
+            .arg("--no-ext-diff")
+            .arg("--pretty=format:%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%b%x00")
+            .arg(revision)
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat");
+        if let Some(path) = pathspec {
+            command.arg("--").arg(path);
+        }
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
+                format!("git show failed with exit code {:?}", output.status.code())
+            } else {
+                truncate_output(&stderr)
+            }));
+        }
+
+        let (meta, patch) = parse_git_show_output(&stdout);
+        Ok(ToolExecution {
+            output: json!({
+                "revision": revision,
+                "path": pathspec,
+                "hash": meta.get("hash").cloned().unwrap_or(Value::Null),
+                "short_hash": meta.get("short_hash").cloned().unwrap_or(Value::Null),
+                "author": meta.get("author").cloned().unwrap_or(Value::Null),
+                "email": meta.get("email").cloned().unwrap_or(Value::Null),
+                "date": meta.get("date").cloned().unwrap_or(Value::Null),
+                "subject": meta.get("subject").cloned().unwrap_or(Value::Null),
+                "body": meta.get("body").cloned().unwrap_or(Value::Null),
+                "patch": truncate_output(&patch),
+                "raw": truncate_output(&stdout),
+            }),
+            summary: format!(
+                "Git show {}{}",
+                revision,
+                pathspec.map(|path| format!(" -- {path}")).unwrap_or_default()
+            ),
+        })
+    }
+
     fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
         let parent = path.parent().expect("workspace file has a parent");
         fs::create_dir_all(parent)?;
@@ -762,6 +888,21 @@ struct GitDiffArgs {
     path: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct GitLogArgs {
+    #[serde(default)]
+    max_count: Option<usize>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitShowArgs {
+    revision: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
 #[derive(Serialize)]
 struct DirectoryEntry {
     name: String,
@@ -844,6 +985,79 @@ fn parse_git_status_lines(stdout: &str) -> Vec<Value> {
     }
     entries
 }
+
+fn parse_git_log_records(stdout: &str) -> Vec<Value> {
+    let mut commits = Vec::new();
+    for record in stdout.split('\u{1e}') {
+        let record = record.trim_matches(|c| c == '\0' || c == '\n' || c == '\r');
+        if record.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = record.split('\0').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let body = if parts.len() > 6 {
+            parts[6..].join("\0").trim().to_owned()
+        } else {
+            String::new()
+        };
+        commits.push(json!({
+            "hash": parts[0],
+            "short_hash": parts[1],
+            "author": parts[2],
+            "email": parts[3],
+            "date": parts[4],
+            "subject": parts[5],
+            "body": body,
+        }));
+    }
+    commits
+}
+
+fn format_git_log_raw(commits: &[Value]) -> String {
+    let mut lines = Vec::new();
+    for commit in commits {
+        let short = commit
+            .get("short_hash")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let subject = commit.get("subject").and_then(Value::as_str).unwrap_or("");
+        let author = commit.get("author").and_then(Value::as_str).unwrap_or("");
+        let date = commit.get("date").and_then(Value::as_str).unwrap_or("");
+        lines.push(format!("{short} {subject} ({author}, {date})"));
+    }
+    lines.join("\n")
+}
+
+fn parse_git_show_output(stdout: &str) -> (serde_json::Map<String, Value>, String) {
+    let mut meta = serde_json::Map::new();
+    // pretty=format:%H%x00%h%x00%an%x00%ae%x00%aI%x00%s%x00%b%x00 then patch
+    let parts: Vec<&str> = stdout.splitn(8, '\0').collect();
+    if parts.len() >= 7 {
+        meta.insert("hash".to_owned(), json!(parts[0]));
+        meta.insert("short_hash".to_owned(), json!(parts[1]));
+        meta.insert("author".to_owned(), json!(parts[2]));
+        meta.insert("email".to_owned(), json!(parts[3]));
+        meta.insert("date".to_owned(), json!(parts[4]));
+        meta.insert("subject".to_owned(), json!(parts[5]));
+        meta.insert(
+            "body".to_owned(),
+            json!(parts[6].trim_end_matches(|c| c == '\n' || c == '\r')),
+        );
+        let patch = if parts.len() > 7 {
+            parts[7]
+                .trim_start_matches(|c| c == '\n' || c == '\r')
+                .to_owned()
+        } else {
+            String::new()
+        };
+        (meta, patch)
+    } else {
+        (meta, stdout.to_owned())
+    }
+}
+
 
 fn load_command_allowlist(workspace_root: &Path) -> Vec<String> {
     let path = workspace_root.join(COMMAND_ALLOWLIST_RELATIVE_PATH);
@@ -1199,6 +1413,112 @@ mod tests {
             .expect("git diff runs");
         let unstaged = diff.output["unstaged"].as_str().expect("unstaged diff");
         assert!(unstaged.contains("hello world"), "{unstaged}");
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn reports_git_log_and_show_for_workspace_history() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git init runs");
+        assert!(init.success());
+        let _ = Command::new("git")
+            .args(["config", "user.email", "xcoding@example.com"])
+            .current_dir(&root)
+            .status();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "XCoding"])
+            .current_dir(&root)
+            .status();
+        fs::write(root.join("hello.txt"), "hello\n").expect("file writes");
+        let add = Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add runs");
+        assert!(add.success());
+        let commit = Command::new("git")
+            .args(["commit", "-m", "init commit"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git commit runs");
+        assert!(commit.success());
+        fs::write(root.join("hello.txt"), "hello world\n").expect("file mutates");
+        let add2 = Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add runs");
+        assert!(add2.success());
+        let commit2 = Command::new("git")
+            .args(["commit", "-m", "second commit"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git commit runs");
+        assert!(commit2.success());
+
+        let log = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "log_1".to_owned(),
+                    name: ToolName::GitLog,
+                    arguments: json!({ "max_count": 5 }),
+                },
+            )
+            .expect("git log runs");
+        let commits = log.output["commits"].as_array().expect("commits array");
+        assert!(commits.len() >= 2, "{:?}", log.output);
+        let subjects: Vec<&str> = commits
+            .iter()
+            .filter_map(|c| c.get("subject").and_then(Value::as_str))
+            .collect();
+        assert!(
+            subjects.iter().any(|s| s.contains("second commit")),
+            "{subjects:?}"
+        );
+
+        let show = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "show_1".to_owned(),
+                    name: ToolName::GitShow,
+                    arguments: json!({ "revision": "HEAD", "path": "hello.txt" }),
+                },
+            )
+            .expect("git show runs");
+        let subject = show.output["subject"].as_str().expect("subject");
+        assert!(subject.contains("second commit"), "{subject}");
+        let patch = show.output["patch"].as_str().unwrap_or("");
+        let raw = show.output["raw"].as_str().unwrap_or("");
+        assert!(
+            patch.contains("hello world") || raw.contains("hello world"),
+            "patch={patch} raw={raw}"
+        );
+
+        let missing = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "show_missing".to_owned(),
+                    name: ToolName::GitShow,
+                    arguments: json!({ "revision": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" }),
+                },
+            )
+            .expect_err("bad revision fails");
+        assert!(matches!(missing, ToolError::InvalidCommand(_)));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }

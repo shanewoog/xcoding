@@ -157,7 +157,7 @@ Duration target: continuous after V1
 - skills system
 - MCP support
 - better patch confidence and conflict UX
-- richer git workflows
+- richer git workflows (Wave S: structured `git_log` + `git_show`; write/commit UX later)
 - performance work on large repos
 
 ### Still later

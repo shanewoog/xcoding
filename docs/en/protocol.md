@@ -709,9 +709,9 @@ Output:
 }
 ```
 
-## 6.6 `git_status` / `git_diff`
+## 6.6 `git_status` / `git_diff` / `git_log` / `git_show`
 
-Read-only helpers for context and final summaries.
+Read-only helpers for context, history, and final summaries.
 
 ### `git_status`
 
@@ -756,6 +756,71 @@ Output:
   "path": "src/lib.rs",
   "staged": "",
   "unstaged": "diff --git a/src/lib.rs b/src/lib.rs\n..."
+}
+```
+
+### `git_log`
+
+Input:
+
+```json
+{
+  "max_count": 20,
+  "path": "src/lib.rs"
+}
+```
+
+`max_count` defaults to 20 and is capped at 50. `path` is optional.
+
+Output:
+
+```json
+{
+  "path": "src/lib.rs",
+  "max_count": 20,
+  "commits": [
+    {
+      "hash": "…",
+      "short_hash": "abc1234",
+      "author": "Name",
+      "email": "name@example.com",
+      "date": "2026-07-22T12:00:00+08:00",
+      "subject": "Improve retrieval",
+      "body": ""
+    }
+  ],
+  "raw": "abc1234 Improve retrieval (Name, 2026-07-22T12:00:00+08:00)"
+}
+```
+
+### `git_show`
+
+Input:
+
+```json
+{
+  "revision": "HEAD",
+  "path": "src/lib.rs"
+}
+```
+
+`revision` is required (commit-ish). `path` is optional and workspace-relative.
+
+Output:
+
+```json
+{
+  "revision": "HEAD",
+  "path": "src/lib.rs",
+  "hash": "…",
+  "short_hash": "abc1234",
+  "author": "Name",
+  "email": "name@example.com",
+  "date": "2026-07-22T12:00:00+08:00",
+  "subject": "Improve retrieval",
+  "body": "",
+  "patch": "diff --git a/src/lib.rs b/src/lib.rs\n...",
+  "raw": "..."
 }
 ```
 

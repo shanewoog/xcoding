@@ -192,6 +192,8 @@ pub enum ToolName {
     RunCommand,
     GitStatus,
     GitDiff,
+    GitLog,
+    GitShow,
 }
 
 impl ToolName {
@@ -204,6 +206,8 @@ impl ToolName {
             Self::RunCommand => "run_command",
             Self::GitStatus => "git_status",
             Self::GitDiff => "git_diff",
+            Self::GitLog => "git_log",
+            Self::GitShow => "git_show",
         }
     }
 }

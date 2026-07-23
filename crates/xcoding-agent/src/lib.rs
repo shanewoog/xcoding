@@ -793,6 +793,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             description: "Read staged and unstaged git diffs for the workspace (or an optional pathspec).".to_owned(),
             parameters: json!({ "type": "object", "properties": { "path": { "type": "string", "description": "Optional workspace-relative pathspec" } } }),
         },
+        ToolDefinition {
+            name: "git_log".to_owned(),
+            description: "Read recent commit history for the workspace (or an optional pathspec). Returns structured commits.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "max_count": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Number of commits; defaults to 20" }, "path": { "type": "string", "description": "Optional workspace-relative pathspec" } } }),
+        },
+        ToolDefinition {
+            name: "git_show".to_owned(),
+            description: "Show one git revision (metadata + patch). Optionally limit to a workspace-relative path.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "revision": { "type": "string", "description": "Commit-ish such as HEAD, a SHA, or branch name" }, "path": { "type": "string", "description": "Optional workspace-relative pathspec" } }, "required": ["revision"] }),
+        },
     ]
 }
 
@@ -845,7 +855,9 @@ mod tests {
                 "apply_patch",
                 "run_command",
                 "git_status",
-                "git_diff"
+                "git_diff",
+                "git_log",
+                "git_show"
             ]
         );
     }
