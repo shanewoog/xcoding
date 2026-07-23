@@ -628,10 +628,11 @@ export function App() {
               {review.bodyKind === "command" ? (
                 <pre className="command-preview" aria-label="Command to approve">{review.commandText ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}</pre>
               ) : null}
-              {review.bodyKind === "generic" ? <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code> : null}
-              {review.highRisk ? (
-                <p className="risk-hint">Shell or force-push style commands can change the system or remote git history. Approve only if you trust the exact command.</p>
+              {review.bodyKind === "git" ? (
+                <pre className="command-preview git-preview" aria-label="Git operation to approve">{review.gitDetail ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}</pre>
               ) : null}
+              {review.bodyKind === "generic" ? <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code> : null}
+              {review.riskHint ? <p className="risk-hint">{review.riskHint}</p> : null}
               <div className="review-actions">
                 <button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button>
                 <button type="button" className={review.highRisk ? "approve-risk-button" : undefined} onClick={() => void resolveAction(true)} disabled={isRunning}>

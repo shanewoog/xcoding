@@ -157,7 +157,7 @@
 - skills 系统
 - MCP 支持
 - 更好的补丁置信度与冲突体验
-- 更丰富 git 工作流（Wave S：结构化 `git_log` + `git_show`；Wave T：需审批的 `git_add` + `git_commit`；Wave U：需审批且不 force 的 `git_push`；Wave V：需审批的 `git_fetch` + `git_pull`（默认 ff-only）；reset/force/rebase 稍后）
+- 更丰富 git 工作流（Wave S：结构化 `git_log` + `git_show`；Wave T：需审批的 `git_add` + `git_commit`；Wave U：需审批且不 force 的 `git_push`；Wave V：需审批的 `git_fetch` + `git_pull`（默认 ff-only）；Wave W：Desktop/CLI 对 git 工具的专用审批展示；reset/force/rebase 稍后）
 - 大仓库性能优化
 
 ### 更后面再做

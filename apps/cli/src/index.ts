@@ -294,6 +294,45 @@ async function runWithEvents<TResult>(
   }
 }
 
+
+function formatGitApprovalDetail(
+  toolCall: { name?: string; arguments?: Record<string, unknown> } | null | undefined,
+): string | null {
+  if (!toolCall?.name) return null;
+  const args = toolCall.arguments ?? {};
+  const asString = (value: unknown) =>
+    typeof value === "string" && value.trim() ? value : null;
+  const asStringArray = (value: unknown) =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  switch (toolCall.name) {
+    case "git_add": {
+      const paths = asStringArray(args.paths);
+      return paths.length > 0 ? paths.join(", ") : "<paths>";
+    }
+    case "git_commit": {
+      const message = asString(args.message) ?? "<message>";
+      return message.split(/\r?\n/)[0] ?? message;
+    }
+    case "git_push":
+    case "git_fetch":
+    case "git_pull": {
+      const remote = asString(args.remote) ?? "origin";
+      const branch =
+        asString(args.branch) ?? (toolCall.name === "git_fetch" ? "<all>" : "<current-branch>");
+      if (toolCall.name === "git_pull") {
+        const ffOnly = typeof args.ff_only === "boolean" ? args.ff_only : true;
+        return `${remote} ${branch} (${ffOnly ? "ff-only" : "no-rebase"})`;
+      }
+      if (toolCall.name === "git_push" && typeof args.set_upstream === "boolean") {
+        return `${remote} ${branch} (set-upstream=${args.set_upstream})`;
+      }
+      return `${remote} ${branch}`;
+    }
+    default:
+      return null;
+  }
+}
+
 function printEvent(event: SessionEvent): void {
   switch (event.type) {
     case "text_delta":
@@ -314,14 +353,30 @@ function printEvent(event: SessionEvent): void {
     case "approval_requested": {
       process.stderr.write(`Approval required: ${event.action.id} (${event.summary})\n`);
       if (typeof event.summary === "string" && event.summary.toUpperCase().includes("HIGH-RISK")) {
-        process.stderr.write("WARNING: HIGH-RISK command — review carefully before approving.\n");
-        const args = event.action.tool_call?.arguments;
-        if (args && typeof args === "object" && "executable" in args) {
-          const executable = typeof args.executable === "string" ? args.executable : "<command>";
-          const argList = Array.isArray(args.args)
-            ? args.args.filter((item) => typeof item === "string").join(" ")
-            : "";
-          process.stderr.write(`Command: ${argList ? `${executable} ${argList}` : executable}\n`);
+        const toolName = event.action.tool_call?.name ?? "";
+        const isGitWrite = [
+          "git_add",
+          "git_commit",
+          "git_push",
+          "git_fetch",
+          "git_pull",
+        ].includes(toolName);
+        if (isGitWrite) {
+          process.stderr.write(
+            "WARNING: HIGH-RISK git operation — review carefully before approving.\n",
+          );
+          const detail = formatGitApprovalDetail(event.action.tool_call);
+          if (detail) process.stderr.write(`Git: ${detail}\n`);
+        } else {
+          process.stderr.write("WARNING: HIGH-RISK command — review carefully before approving.\n");
+          const args = event.action.tool_call?.arguments;
+          if (args && typeof args === "object" && "executable" in args) {
+            const executable = typeof args.executable === "string" ? args.executable : "<command>";
+            const argList = Array.isArray(args.args)
+              ? args.args.filter((item) => typeof item === "string").join(" ")
+              : "";
+            process.stderr.write(`Command: ${argList ? `${executable} ${argList}` : executable}\n`);
+          }
         }
       }
       return;

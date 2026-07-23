@@ -157,7 +157,7 @@ Duration target: continuous after V1
 - skills system
 - MCP support
 - better patch confidence and conflict UX
-- richer git workflows (Wave S: structured `git_log` + `git_show`; Wave T: approved `git_add` + `git_commit`; Wave U: approved `git_push` without force; Wave V: approved `git_fetch` + `git_pull` (default ff-only); reset/force/rebase later)
+- richer git workflows (Wave S: structured `git_log` + `git_show`; Wave T: approved `git_add` + `git_commit`; Wave U: approved `git_push` without force; Wave V: approved `git_fetch` + `git_pull` (default ff-only); Wave W: Desktop/CLI dedicated git review presentation; reset/force/rebase later)
 - performance work on large repos
 
 ### Still later

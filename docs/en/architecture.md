@@ -331,7 +331,7 @@ Desktop responsibilities:
 
 - workspace picker
 - API key / model settings UI
-- confirmation dialogs
+- confirmation dialogs (dedicated review presentation for patch / command / git tools with HIGH-RISK badge)
 - diff accept/reject actions
 - session replay view
 

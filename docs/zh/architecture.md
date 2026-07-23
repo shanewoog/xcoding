@@ -331,7 +331,7 @@ Desktop 职责：
 
 - 工作区选择
 - API Key / 模型设置 UI
-- 确认弹窗
+- 确认弹窗（patch / 命令 / git 工具有专用审批展示与 HIGH-RISK 标记）
 - diff 接受/拒绝操作
 - 会话回放视图
 
