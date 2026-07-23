@@ -171,7 +171,7 @@ interface Message {
 {
   "mode": "ask",
   "provider": "openai",
-  "model": "gpt-4.1",
+  "model": "gpt-5.5",
   "permissions": {
     "write": "confirm",
     "exec": "confirm",
@@ -187,7 +187,7 @@ interface Message {
 ```json
 {
   "mode": "auto-edit",
-  "model": "gpt-4.1"
+  "model": "gpt-5.5"
 }
 ```
 
@@ -224,7 +224,7 @@ interface Message {
   "workspace_root": "D:/work/demo",
   "mode": "ask",
   "provider": "openai",
-  "model": "gpt-4.1",
+  "model": "gpt-5.5",
   "title": "Add health check"
 }
 ```
@@ -238,7 +238,7 @@ interface Message {
     "workspace_root": "D:/work/demo",
     "mode": "ask",
     "provider": "openai",
-    "model": "gpt-4.1",
+    "model": "gpt-5.5",
     "status": "created",
     "created_at": "2026-07-22T08:00:00Z",
     "updated_at": "2026-07-22T08:00:00Z",
@@ -269,12 +269,12 @@ interface Message {
   "message": "总结这个仓库",
   "mode": "ask",
   "provider": "openai",
-  "model": "gpt-4.1",
+  "model": "gpt-5.5",
   "title": "仓库总结"
 }
 ```
 
-请求不接受任何密钥字段。服务端从运行环境读取 `OPENAI_API_KEY`，可选读取 `XCODING_OPENAI_BASE_URL`；未设置后者时默认值为 `https://api.openai.com/v1`。
+请求不接受任何密钥字段。服务端从运行环境读取 `OPENAI_API_KEY`，可选读取 `XCODING_OPENAI_BASE_URL`；未设置后者时默认值为 `https://ai.v58.dev/v1`。
 
 服务端会按顺序发送以下 `session.event` 负载：
 

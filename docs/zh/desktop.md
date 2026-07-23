@@ -7,7 +7,7 @@
 ```powershell
 $env:OPENAI_API_KEY = "..."
 # 可选：使用 OpenAI 兼容的云服务时设置。
-$env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1"
+$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1"
 pnpm --filter @xcoding/desktop exec tauri dev
 ```
 

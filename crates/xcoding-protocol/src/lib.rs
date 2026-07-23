@@ -497,7 +497,7 @@ fn default_provider() -> String {
 }
 
 fn default_model() -> String {
-    "gpt-4.1".to_owned()
+    "gpt-5.5".to_owned()
 }
 
 #[cfg(test)]
@@ -524,7 +524,7 @@ mod tests {
 
         assert_eq!(params.mode, Mode::Ask);
         assert_eq!(params.provider, "openai");
-        assert_eq!(params.model, "gpt-4.1");
+        assert_eq!(params.model, "gpt-5.5");
     }
 
     #[test]

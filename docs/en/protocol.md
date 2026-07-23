@@ -171,7 +171,7 @@ Result example:
 {
   "mode": "ask",
   "provider": "openai",
-  "model": "gpt-4.1",
+  "model": "gpt-5.5",
   "permissions": {
     "write": "confirm",
     "exec": "confirm",
@@ -187,7 +187,7 @@ Params example:
 ```json
 {
   "mode": "auto-edit",
-  "model": "gpt-4.1"
+  "model": "gpt-5.5"
 }
 ```
 
@@ -224,7 +224,7 @@ Params:
   "workspace_root": "D:/work/demo",
   "mode": "ask",
   "provider": "openai",
-  "model": "gpt-4.1",
+  "model": "gpt-5.5",
   "title": "Add health check"
 }
 ```
@@ -238,7 +238,7 @@ Result:
     "workspace_root": "D:/work/demo",
     "mode": "ask",
     "provider": "openai",
-    "model": "gpt-4.1",
+    "model": "gpt-5.5",
     "status": "created",
     "created_at": "2026-07-22T08:00:00Z",
     "updated_at": "2026-07-22T08:00:00Z",
@@ -269,12 +269,12 @@ Params:
   "message": "Summarize this repository",
   "mode": "ask",
   "provider": "openai",
-  "model": "gpt-4.1",
+  "model": "gpt-5.5",
   "title": "Repository summary"
 }
 ```
 
-No credential fields are accepted. The server reads `OPENAI_API_KEY` from its environment and optionally reads `XCODING_OPENAI_BASE_URL`; the latter defaults to `https://api.openai.com/v1`.
+No credential fields are accepted. The server reads `OPENAI_API_KEY` from its environment and optionally reads `XCODING_OPENAI_BASE_URL`; the latter defaults to `https://ai.v58.dev/v1`.
 
 The server emits these `session.event` payloads in order:
 

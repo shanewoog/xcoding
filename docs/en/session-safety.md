@@ -14,7 +14,7 @@ Each workspace has local defaults for mode, provider, and model. Only the `opena
 
 ```powershell
 xcoding config show --workspace <path>
-xcoding config set --workspace <path> --mode ask --model gpt-4.1
+xcoding config set --workspace <path> --mode ask --model gpt-5.5
 xcoding config set --workspace <path> --mode auto-edit
 ```
 
@@ -56,7 +56,7 @@ XCoding does not store cloud credentials in the repository or its session databa
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # optional
+$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
 ```
 
 `OPENAI_API_KEY` stays in the environment of the CLI or Desktop process. The RPC protocol accepts no credential fields.

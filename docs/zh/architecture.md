@@ -335,7 +335,7 @@ Desktop 必须调用与 CLI 相同的 RPC 方法。
 项目配置示例：`.xcoding/config.toml`
 
 ```toml
-model = "gpt-4.1"
+model = "gpt-5.5"
 provider = "openai"
 mode = "ask"
 workspace = "."
@@ -347,7 +347,7 @@ network_tools = "deny"
 
 [providers.openai]
 api_key_env = "OPENAI_API_KEY"
-base_url = "https://api.openai.com/v1"
+base_url = "https://ai.v58.dev/v1"
 ```
 
 全局用户配置可放在用户配置目录；工作区相关值以项目配置优先。

@@ -671,7 +671,7 @@ mod tests {
                 workspace_root: "D:/work/demo".to_owned(),
                 mode: Mode::Ask,
                 provider: "openai".to_owned(),
-                model: "gpt-4.1".to_owned(),
+                model: "gpt-5.5".to_owned(),
                 title: Some("First session".to_owned()),
             })
             .expect("session saves");

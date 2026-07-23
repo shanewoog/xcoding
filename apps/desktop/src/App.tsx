@@ -29,7 +29,7 @@ type Activity = {
   state: "running" | "done" | "failed";
 };
 
-const defaultModel = "gpt-4.1";
+const defaultModel = "gpt-5.5";
 const defaultProvider = "openai";
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 

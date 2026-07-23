@@ -27,7 +27,7 @@ Set credentials in the shell that starts XCoding:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # optional
+$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
 ```
 
 `OPENAI_API_KEY` is required for model requests. `XCODING_OPENAI_BASE_URL` is optional and is useful for an OpenAI-compatible endpoint. XCoding never sends credentials through its RPC protocol and does not save them in the workspace, session database, or Desktop settings.
@@ -37,7 +37,7 @@ $env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # optional
 ```powershell
 pnpm cli -- ping --workspace .
 pnpm cli -- config show --workspace .
-pnpm cli -- config set --workspace . --mode auto-edit --model gpt-4.1
+pnpm cli -- config set --workspace . --mode auto-edit --model gpt-5.5
 pnpm cli -- chat "Explain the structure of this repository" --workspace .
 ```
 

@@ -27,7 +27,7 @@ pnpm build
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # 可选
+$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 ```
 
 模型请求需要 `OPENAI_API_KEY`。`XCODING_OPENAI_BASE_URL` 可用于设置 OpenAI 兼容服务的地址。XCoding 不会经由 RPC 协议传输密钥，也不会将密钥保存到工作区、会话数据库或 Desktop 设置中。
@@ -37,7 +37,7 @@ $env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # 可选
 ```powershell
 pnpm cli -- ping --workspace .
 pnpm cli -- config show --workspace .
-pnpm cli -- config set --workspace . --mode auto-edit --model gpt-4.1
+pnpm cli -- config set --workspace . --mode auto-edit --model gpt-5.5
 pnpm cli -- chat "说明这个仓库的结构" --workspace .
 ```
 

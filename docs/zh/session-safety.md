@@ -14,7 +14,7 @@ XCoding 会把每个会话持久化到本地 SQLite 数据库：CLI 使用 `<wor
 
 ```powershell
 xcoding config show --workspace <path>
-xcoding config set --workspace <path> --mode ask --model gpt-4.1
+xcoding config set --workspace <path> --mode ask --model gpt-5.5
 xcoding config set --workspace <path> --mode auto-edit
 ```
 
@@ -56,7 +56,7 @@ XCoding 不会把云模型凭据保存到仓库或会话数据库中。请通过
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://api.openai.com/v1" # 可选
+$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 ```
 
 `OPENAI_API_KEY` 仅保留在启动 CLI 或 Desktop 的进程环境中，RPC 协议不接受任何凭据字段。

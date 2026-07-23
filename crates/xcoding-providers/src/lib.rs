@@ -117,7 +117,7 @@ impl OpenAiCompatibleProvider {
     pub fn from_environment() -> Result<Self, ProviderError> {
         let api_key = env::var("OPENAI_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         let base_url = env::var("XCODING_OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+            .unwrap_or_else(|_| "https://ai.v58.dev/v1".to_owned());
         Ok(Self::new(api_key, base_url))
     }
 
@@ -261,14 +261,20 @@ struct ToolCallAccumulator {
 
 impl ToolCallAccumulator {
     fn merge(&mut self, delta: ToolCallDelta) {
-        if delta.id.is_some() {
-            self.id = delta.id;
+        if let Some(id) = delta.id {
+            if !id.is_empty() {
+                self.id = Some(id);
+            }
         }
-        if delta.kind.is_some() {
-            self.kind = delta.kind;
+        if let Some(kind) = delta.kind {
+            if !kind.is_empty() {
+                self.kind = Some(kind);
+            }
         }
-        if delta.function.name.is_some() {
-            self.name = delta.function.name;
+        if let Some(name) = delta.function.name {
+            if !name.is_empty() {
+                self.name = Some(name);
+            }
         }
         if let Some(arguments) = delta.function.arguments {
             self.arguments.push_str(&arguments);
@@ -342,6 +348,29 @@ mod tests {
                 function: ProviderFunctionCall {
                     name: "read_file".to_owned(),
                     arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn ignores_empty_tool_name_fragments() {
+        let first = parse_chunk(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"list_dir","arguments":""}}]}}]}"#)
+            .expect("first event parses");
+        let second = parse_chunk(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"path\":\".\"}"}}]}}]}"#)
+            .expect("second event parses");
+        let mut accumulator = ToolCallAccumulator::default();
+        accumulator.merge(first.tool_calls.into_iter().next().expect("first call"));
+        accumulator.merge(second.tool_calls.into_iter().next().expect("second call"));
+
+        assert_eq!(
+            accumulator.finish().expect("tool call completes"),
+            ProviderToolCall {
+                id: "call_1".to_owned(),
+                kind: "function".to_owned(),
+                function: ProviderFunctionCall {
+                    name: "list_dir".to_owned(),
+                    arguments: r#"{"path":"."}"#.to_owned(),
                 },
             }
         );

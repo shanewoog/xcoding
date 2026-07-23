@@ -117,7 +117,7 @@ impl CoreService {
                 workspace_root: workspace_root.to_owned(),
                 mode: xcoding_protocol::Mode::Ask,
                 provider: "openai".to_owned(),
-                model: "gpt-4.1".to_owned(),
+                model: "gpt-5.5".to_owned(),
                 updated_at: Utc::now(),
             }))
     }
@@ -540,7 +540,7 @@ mod tests {
             .expect("defaults load");
         assert_eq!(defaults.mode, Mode::Ask);
         assert_eq!(defaults.provider, "openai");
-        assert_eq!(defaults.model, "gpt-4.1");
+        assert_eq!(defaults.model, "gpt-5.5");
 
         let saved = core
             .set_workspace_config(SetConfigParams {
@@ -631,7 +631,7 @@ mod tests {
                 message: "Explain this project".to_owned(),
                 mode: Some(Mode::Ask),
                 provider: Some("openai".to_owned()),
-                model: Some("gpt-4.1".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
                 title: None,
             })
             .expect("chat starts");
@@ -663,7 +663,7 @@ mod tests {
                 message: "Update the configuration".to_owned(),
                 mode: Some(Mode::Ask),
                 provider: Some("openai".to_owned()),
-                model: Some("gpt-4.1".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
                 title: None,
             })
             .expect("chat starts");
@@ -729,7 +729,7 @@ mod tests {
                 message: "long running task".to_owned(),
                 mode: Some(Mode::Ask),
                 provider: Some("openai".to_owned()),
-                model: Some("gpt-4.1".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
                 title: None,
             })
             .expect("chat starts");

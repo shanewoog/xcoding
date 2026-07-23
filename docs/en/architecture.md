@@ -335,7 +335,7 @@ Desktop must call the same RPC methods as CLI.
 Project config example: `.xcoding/config.toml`
 
 ```toml
-model = "gpt-4.1"
+model = "gpt-5.5"
 provider = "openai"
 mode = "ask"
 workspace = "."
@@ -347,7 +347,7 @@ network_tools = "deny"
 
 [providers.openai]
 api_key_env = "OPENAI_API_KEY"
-base_url = "https://api.openai.com/v1"
+base_url = "https://ai.v58.dev/v1"
 ```
 
 Global user config may live in the user config directory, with project config taking precedence for workspace-scoped values.
