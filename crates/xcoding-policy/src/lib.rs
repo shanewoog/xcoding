@@ -253,6 +253,18 @@ mod tests {
     }
 
     #[test]
+    fn auto_edit_still_asks_for_high_risk_writes() {
+        assert_eq!(
+            evaluate(&Mode::AutoEdit, PermissionKind::Write, true),
+            PermissionDecision::AskUser
+        );
+        assert_eq!(
+            evaluate(&Mode::Ask, PermissionKind::Write, true),
+            PermissionDecision::AskUser
+        );
+    }
+
+    #[test]
     fn denies_destructive_system_commands() {
         let assessment = assess_command("format", &["C:".to_owned()]);
         assert_eq!(assessment.decision, PermissionDecision::Deny);

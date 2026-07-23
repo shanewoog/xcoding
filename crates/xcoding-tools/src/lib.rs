@@ -525,6 +525,7 @@ impl ToolRegistry {
 
     fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
         let parent = path.parent().expect("workspace file has a parent");
+        fs::create_dir_all(parent)?;
         let temporary = parent.join(format!(
             ".xcoding-{}-{}.tmp",
             path.file_name()
@@ -549,11 +550,20 @@ impl ToolRegistry {
     fn resolve_writable(&self, requested_path: &str) -> Result<PathBuf, ToolError> {
         let requested = checked_relative_path(requested_path)?;
         let target = self.workspace_root.join(requested);
-        let parent = target
+        // New files may target parents that do not exist yet. Walk up to the
+        // nearest existing ancestor and confirm it remains inside the workspace.
+        let mut ancestor = target
             .parent()
-            .ok_or_else(|| ToolError::PathOutsideWorkspace(requested_path.to_owned()))?;
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(&self.workspace_root) {
+            .ok_or_else(|| ToolError::PathOutsideWorkspace(requested_path.to_owned()))?
+            .to_path_buf();
+        while !ancestor.exists() {
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| ToolError::PathOutsideWorkspace(requested_path.to_owned()))?
+                .to_path_buf();
+        }
+        let canonical_ancestor = ancestor.canonicalize()?;
+        if !canonical_ancestor.starts_with(&self.workspace_root) {
             return Err(ToolError::PathOutsideWorkspace(requested_path.to_owned()));
         }
         if target.exists() && fs::symlink_metadata(&target)?.file_type().is_symlink() {
@@ -990,6 +1000,45 @@ mod tests {
             .expect("askable");
         assert_eq!(kind, xcoding_policy::PermissionKind::Exec);
         assert!(high_risk);
+    }
+
+    #[test]
+    fn marks_dot_xcoding_paths_high_risk() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let (kind, high_risk) = tools
+            .permission_for(&ToolCall {
+                id: "1".to_owned(),
+                name: ToolName::ApplyPatch,
+                arguments: json!({
+                    "path": ".xcoding/secret.txt",
+                    "old_text": "",
+                    "new_text": "secret\n"
+                }),
+            })
+            .expect("patch");
+        assert_eq!(kind, xcoding_policy::PermissionKind::Write);
+        assert!(high_risk);
+    }
+
+    #[test]
+    fn previews_patch_when_parent_directory_is_missing() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let preview = tools
+            .patch_preview(&ToolCall {
+                id: "1".to_owned(),
+                name: ToolName::ApplyPatch,
+                arguments: json!({
+                    "path": "nested/missing/new.txt",
+                    "old_text": "",
+                    "new_text": "created\n"
+                }),
+            })
+            .expect("preview");
+        assert_eq!(preview.path.replace('\\', "/"), "nested/missing/new.txt");
+        assert!(!preview.file_existed);
+        assert_eq!(preview.new_text, "created\n");
     }
 
 }

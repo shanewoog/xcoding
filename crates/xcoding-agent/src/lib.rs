@@ -8,7 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use xcoding_context::ContextSnapshot;
 use xcoding_core::{CoreError, CoreService};
-use xcoding_policy::{PermissionDecision, evaluate};
+use xcoding_policy::{PermissionDecision, PermissionKind, evaluate};
 use xcoding_protocol::{
     ChatParams, ChatResult, MessageRole, PlanStep, ResolveActionParams, ResolveActionResult,
     RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionEvent, SessionStatus,
@@ -367,24 +367,32 @@ impl<'a> AgentService<'a> {
             for provider_call in tool_calls {
                 self.ensure_not_cancelled(session.id)?;
                 let tool_call = protocol_tool_call(provider_call)?;
-                self.emit(
-                    on_event,
-                    SessionEvent::ToolStart {
-                        session_id: session.id,
-                        summary: format!("Running {}", tool_call.name.as_str()),
-                        tool_call: tool_call.clone(),
-                    },
-                );
-
                 let (kind, high_risk) = match tools.permission_for(&tool_call) {
                     Ok(value) => value,
                     Err(error) => {
+                        self.emit(
+                            on_event,
+                            SessionEvent::ToolStart {
+                                session_id: session.id,
+                                summary: format!("Blocked {}", tool_call.name.as_str()),
+                                tool_call: tool_call.clone(),
+                            },
+                        );
                         let output = self.record_tool_error(session, &tool_call, error, on_event)?;
                         messages.push(ChatMessage::tool_result(&tool_call.id, output));
                         continue;
                     }
                 };
-                match evaluate(&session.mode, kind, high_risk) {
+                let decision = evaluate(&session.mode, kind, high_risk);
+                self.emit(
+                    on_event,
+                    SessionEvent::ToolStart {
+                        session_id: session.id,
+                        summary: tool_start_summary(&session.mode, &tool_call, kind, decision),
+                        tool_call: tool_call.clone(),
+                    },
+                );
+                match decision {
                     PermissionDecision::Allow => {
                         let output = self
                             .execute_and_record(session, &tools, &tool_call, on_event)
@@ -661,6 +669,27 @@ fn truncate_summary_text(value: &str, max_chars: usize) -> String {
     } else {
         let clipped: String = value.chars().take(max_chars).collect();
         format!("{clipped}\n[truncated]")
+    }
+}
+
+
+fn tool_start_summary(
+    mode: &xcoding_protocol::Mode,
+    tool_call: &ToolCall,
+    kind: PermissionKind,
+    decision: PermissionDecision,
+) -> String {
+    let name = tool_call.name.as_str();
+    match decision {
+        PermissionDecision::Allow
+            if matches!(mode, xcoding_protocol::Mode::AutoEdit)
+                && matches!(kind, PermissionKind::Write) =>
+        {
+            format!("Auto-applying {name}")
+        }
+        PermissionDecision::Allow => format!("Running {name}"),
+        PermissionDecision::AskUser => format!("Awaiting approval for {name}"),
+        PermissionDecision::Deny => format!("Blocked {name}"),
     }
 }
 

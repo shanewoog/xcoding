@@ -13,6 +13,7 @@ pnpm test:acceptance -- --deterministic
 Covers:
 - read-only grounded answer
 - guarded write / reject / auto-edit command gate
+- dedicated auto-edit mode policy (`auto-edit-mode.mjs`: ask gate, auto write, command gate, high-risk path gate)
 - running cancel
 - session replay steps
 - feature / bugfix / refactor write loops
@@ -37,8 +38,8 @@ Runs a short monorepo explanation chat against the configured OpenAI-compatible 
 | 2 | Small feature + tests | deterministic | automated |
 | 3 | Bugfix with reproduce-first | deterministic | automated |
 | 4 | Behavior-preserving refactor | deterministic | automated |
-| 5 | ask mode confirms writes/exec | deterministic | automated |
-| 6 | auto-edit writes, still gates commands | deterministic | automated |
+| 5 | ask mode confirms writes/exec | deterministic | automated (`auto-edit-mode.mjs` + guarded-write) |
+| 6 | auto-edit writes, still gates commands | deterministic | automated (`auto-edit-mode.mjs`) |
 | 7 | Rejected patch leaves workspace clean | deterministic | automated |
 | 8 | Cancel running task | deterministic | automated |
 | 9 | Replay session steps | deterministic | automated |

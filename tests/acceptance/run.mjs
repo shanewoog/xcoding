@@ -61,6 +61,7 @@ async function runDeterministic() {
   await run("cargo", ["build", "-p", "xcoding-server"]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/read-only-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/guarded-write-agent.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/auto-edit-mode.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/running-cancel-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/session-replay-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/write-loop-agent.mjs")]);
@@ -68,6 +69,11 @@ async function runDeterministic() {
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-auth-error.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-status.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/doctor.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-review.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-layout.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-config.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/task-summary.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/session-continue.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/surface-parity.mjs")]);
   console.log("Deterministic acceptance passed.");
 }
