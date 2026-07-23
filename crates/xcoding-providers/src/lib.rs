@@ -115,6 +115,8 @@ pub struct OpenAiCompatibleProvider {
 
 impl OpenAiCompatibleProvider {
     pub fn from_environment() -> Result<Self, ProviderError> {
+        // Existing process env wins. Fill missing vars from nearby .env files.
+        load_dotenv_files();
         let api_key = env::var("OPENAI_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         let base_url = env::var("XCODING_OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://ai.v58.dev/v1".to_owned());
@@ -297,6 +299,23 @@ impl ToolCallAccumulator {
     }
 }
 
+fn load_dotenv_files() {
+    // dotenvy does not override existing process environment values.
+    let _ = dotenvy::dotenv();
+    if let Ok(cwd) = env::current_dir() {
+        let mut dir = cwd;
+        loop {
+            let candidate = dir.join(".env");
+            if candidate.is_file() {
+                let _ = dotenvy::from_path(&candidate);
+                break;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+}
 fn parse_chunk(data: &str) -> Result<ParsedChunk, ProviderError> {
     let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
     let mut choices = chunk.choices.into_iter();

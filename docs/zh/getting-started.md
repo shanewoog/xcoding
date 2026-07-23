@@ -21,6 +21,25 @@ pnpm build
 
 开发时，`pnpm cli -- ...` 会运行 CLI 构建产物，并启动 `target/debug/xcoding-server` 作为本地 stdio RPC 服务。
 
+
+## 本地 .env 与一键启动
+
+仓库根目录可放置 `.env`（已被 gitignore，勿提交真实密钥）：
+
+```env
+OPENAI_API_KEY=...
+XCODING_OPENAI_BASE_URL=https://ai.v58.dev/v1
+```
+
+CLI、Desktop 与 server provider 会在缺少对应环境变量时自动读取该文件；**已存在的进程环境变量优先**。
+
+Windows 推荐：
+
+```powershell
+.\scripts\xcoding.ps1 chat "说明这个仓库"
+.\scripts\xcoding.ps1 desktop
+.\scripts\xcoding.ps1 acceptance
+```
 ## 配置云端访问
 
 在启动 XCoding 的终端中设置凭据：

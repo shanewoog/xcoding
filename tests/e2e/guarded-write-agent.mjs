@@ -25,7 +25,7 @@ async function main() {
     const initialConfig = await rpc.request("config.get", { workspace_root: workspace });
     assert.equal(initialConfig.config.mode, "ask");
     assert.equal(initialConfig.config.provider, "openai");
-    assert.equal(initialConfig.config.model, "gpt-4.1");
+    assert.equal(initialConfig.config.model, "gpt-5.5");
     const configured = await rpc.request("config.set", {
       workspace_root: workspace,
       mode: "auto-edit",

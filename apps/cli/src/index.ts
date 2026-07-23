@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioRpcClient } from "@xcoding/client";
@@ -30,6 +31,7 @@ const defaultServerPath = resolve(
 const optionNames = new Set(["--workspace", "--server", "--provider", "--model", "--title", "--mode"]);
 
 async function main(): Promise<void> {
+  await loadDotEnvFiles();
   const commandArguments = process.argv.slice(2);
   const [command, ...args] = commandArguments[0] === "--" ? commandArguments.slice(1) : commandArguments;
 
@@ -297,6 +299,45 @@ function withoutUndefined(value: object): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
+
+async function loadDotEnvFiles(): Promise<void> {
+  const candidates: string[] = [];
+  if (process.env.INIT_CWD) {
+    candidates.push(resolve(process.env.INIT_CWD, ".env"));
+  }
+  candidates.push(resolve(process.cwd(), ".env"));
+  candidates.push(resolve(currentDirectory, "../../../.env"));
+
+  const seen = new Set<string>();
+  for (const path of candidates) {
+    if (seen.has(path) || !existsSync(path)) {
+      continue;
+    }
+    seen.add(path);
+    const text = await readFile(path, "utf8");
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) {
+        continue;
+      }
+      const separator = line.indexOf("=");
+      if (separator <= 0) {
+        continue;
+      }
+      const key = line.slice(0, separator).trim();
+      let value = line.slice(separator + 1).trim();
+      if (
+        (value.startsWith("\"") && value.endsWith("\"")) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (!process.env[key]) {
+        process.env[key] = value;
+      }
+    }
+  }
+}
 function printUsage(): void {
   console.log(`XCoding CLI
 
@@ -317,6 +358,9 @@ Environment:
   OPENAI_API_KEY           API key for the OpenAI-compatible cloud provider
   XCODING_OPENAI_BASE_URL  Optional OpenAI-compatible API base URL
   XCODING_SERVER_PATH      Absolute path to the xcoding-server binary
+
+Dotenv:
+  Loads repository-root .env if present. Existing process env wins.
 `);
 }
 

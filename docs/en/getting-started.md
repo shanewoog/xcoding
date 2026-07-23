@@ -21,6 +21,25 @@ pnpm build
 
 For development, `pnpm cli -- ...` runs the CLI source build and starts `target/debug/xcoding-server` as its local stdio RPC server.
 
+
+## Local .env And Launcher
+
+You may place a repository-root `.env` file (gitignored; never commit real keys):
+
+```env
+OPENAI_API_KEY=...
+XCODING_OPENAI_BASE_URL=https://ai.v58.dev/v1
+```
+
+The CLI, Desktop shell, and provider load this file when the corresponding variables are missing. **Existing process environment values always win.**
+
+On Windows:
+
+```powershell
+.\scripts\xcoding.ps1 chat "Explain this repository"
+.\scripts\xcoding.ps1 desktop
+.\scripts\xcoding.ps1 acceptance
+```
 ## Configure Cloud Access
 
 Set credentials in the shell that starts XCoding:

@@ -9,7 +9,8 @@
     "check": "pnpm --filter @xcoding/protocol build && pnpm --filter @xcoding/client build && pnpm --filter @xcoding/cli check && pnpm --filter @xcoding/desktop check",
     "cli": "node apps/cli/dist/index.js",
     "desktop": "pnpm --dir apps/desktop dev",
-    "test:e2e": "cargo build -p xcoding-server && node tests/e2e/read-only-agent.mjs && node tests/e2e/guarded-write-agent.mjs && node tests/e2e/running-cancel-agent.mjs"
+    "test:e2e": "cargo build -p xcoding-server && node tests/e2e/read-only-agent.mjs && node tests/e2e/guarded-write-agent.mjs && node tests/e2e/running-cancel-agent.mjs",
+    "test:acceptance": "node tests/acceptance/run.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

@@ -9,6 +9,7 @@ edition = "2024"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+dotenvy = "0.15"
 tauri = { version = "2", features = [] }
 uuid = { version = "1", features = ["serde", "v4"] }
 xcoding-agent = { path = "../../../crates/xcoding-agent" }

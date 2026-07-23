@@ -91,7 +91,25 @@ fn chat(app: AppHandle, params: ChatParams) -> Result<ChatResult, String> {
     .map_err(|error| error.to_string())
 }
 
+fn load_dotenv_files() {
+    let _ = dotenvy::dotenv();
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd;
+        loop {
+            let candidate = dir.join(".env");
+            if candidate.is_file() {
+                let _ = dotenvy::from_path(&candidate);
+                break;
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+}
+
 fn main() {
+    load_dotenv_files();
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![ping, list_sessions, workspace_config, set_workspace_config, session_detail, chat, resolve_action, rollback_restore_point, cancel_session])
         .run(tauri::generate_context!())

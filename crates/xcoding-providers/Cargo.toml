@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-stream.workspace = true
+dotenvy.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
