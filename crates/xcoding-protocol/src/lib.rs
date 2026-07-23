@@ -324,6 +324,16 @@ pub struct Message {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ProviderAuthStatus {
+    pub ready: bool,
+    pub has_api_key: bool,
+    pub base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_hint: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PingResult {
     pub ok: bool,
     pub version: String,

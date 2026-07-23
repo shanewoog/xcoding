@@ -12,8 +12,10 @@ use xcoding_agent::{AgentError, AgentService};
 use xcoding_core::{CoreError, CoreService};
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, ResolveActionParams, RollbackRestorePointParams, RpcError, SessionEvent,
+    JsonRpcResponse, ProviderAuthStatus, ResolveActionParams, RollbackRestorePointParams, RpcError,
+    SessionEvent,
 };
+use xcoding_providers::inspect_auth;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -74,6 +76,7 @@ async fn main() {
                     Err(_) => break,
                 }
             }
+            Ok(request) if request.method == "provider.status" => handle_provider_status(request),
             Ok(request) => core.dispatch(request),
             Err(error) => JsonRpcResponse::failure(
                 Value::Null,
@@ -229,6 +232,7 @@ async fn handle_concurrent_request(
         Ok(request) if request.method == "session.cancel" => {
             handle_cancel(core, stdout, request).await?
         }
+        Ok(request) if request.method == "provider.status" => handle_provider_status(request),
         Ok(request) => core.dispatch(request),
         Err(error) => JsonRpcResponse::failure(
             Value::Null,
@@ -305,6 +309,22 @@ async fn handle_cancel(
             ))
         }
         Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_core(error))),
+    }
+}
+
+
+fn handle_provider_status(request: JsonRpcRequest) -> JsonRpcResponse {
+    let id = request.id.clone();
+    if !request.is_valid_version() {
+        return JsonRpcResponse::failure(
+            id,
+            RpcError::invalid_request("jsonrpc must be exactly \"2.0\""),
+        );
+    }
+    let status: ProviderAuthStatus = inspect_auth();
+    match serde_json::to_value(status) {
+        Ok(value) => JsonRpcResponse::success(id, value),
+        Err(error) => JsonRpcResponse::failure(id, RpcError::internal(error.to_string())),
     }
 }
 

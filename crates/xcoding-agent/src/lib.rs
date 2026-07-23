@@ -239,7 +239,11 @@ impl<'a> AgentService<'a> {
         let tools = ToolRegistry::new(&session.workspace_root)?;
         let provider = OpenAiCompatibleProvider::from_environment()?;
         let context = ContextSnapshot::load(tools.workspace_root());
-        let mut messages = vec![ChatMessage::system(context.system_prompt())];
+        let mode_label = match session.mode {
+            xcoding_protocol::Mode::Ask => "ask",
+            xcoding_protocol::Mode::AutoEdit => "auto-edit",
+        };
+        let mut messages = vec![ChatMessage::system(context.system_prompt(mode_label))];
         messages.extend(self.core.messages(session.id)?.into_iter().map(
             |message| match message.role {
                 MessageRole::System => ChatMessage::system(message.content),

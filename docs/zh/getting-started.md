@@ -78,6 +78,27 @@ pnpm --filter @xcoding/desktop exec tauri dev
 
 Desktop 将数据库保存在操作系统的应用数据目录中，并按工作区路径保存配置。因此，Desktop 的本地历史和设置与 CLI 数据库相互独立。
 
+
+## 项目规则
+
+若工作区存在规则文件，XCoding 会按以下顺序加载到系统提示中：
+
+1. `AGENTS.md`
+2. `XCoding.md`
+3. `.xcoding/rules.md`
+
+规则请保持简短可执行；过长内容会被截断。
+
+## 云模型鉴权状态
+
+不发起模型请求，仅检查服务端是否看到云端凭据：
+
+```powershell
+pnpm cli -- auth --workspace .
+```
+
+Desktop 左侧设置区会显示同样的就绪状态（就绪 / 缺少 API key、Base URL、掩码后的 key 提示）。
+
 ## 延伸阅读
 
 - [会话恢复与安全](./session-safety.md)

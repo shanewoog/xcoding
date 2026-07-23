@@ -78,6 +78,27 @@ pnpm --filter @xcoding/desktop exec tauri dev
 
 Desktop stores its database in the operating system application-data directory and keys configuration by workspace path. Its local history and settings are therefore separate from the CLI database.
 
+
+## Project Rules
+
+XCoding loads workspace rules into the system prompt (when present), in this order:
+
+1. `AGENTS.md`
+2. `XCoding.md`
+3. `.xcoding/rules.md`
+
+Keep these files short and actionable. Oversized rule files are truncated.
+
+## Provider Auth Status
+
+Check whether cloud credentials are visible to the server without making a model call:
+
+```powershell
+pnpm cli -- auth --workspace .
+```
+
+Desktop shows the same readiness state (ready / API key missing, base URL, masked key hint) in the left settings panel.
+
 ## Next Reading
 
 - [Session Recovery And Safety](./session-safety.md)

@@ -21,6 +21,7 @@ import type {
   SessionDetail,
   SessionEvent,
   TaskSummary,
+  ProviderAuthStatus,
   WorkspaceConfig,
 } from "@xcoding/protocol";
 
@@ -148,11 +149,27 @@ export function App() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [providerStatus, setProviderStatus] = useState<ProviderAuthStatus | null>(null);
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
   );
+
+  const refreshProviderStatus = useCallback(async () => {
+    if (!isTauriRuntime) return;
+    try {
+      const status = await invoke<ProviderAuthStatus>("provider_status");
+      setProviderStatus(status);
+    } catch (cause) {
+      setProviderStatus({
+        ready: false,
+        has_api_key: false,
+        base_url: "https://ai.v58.dev/v1",
+        message: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }, []);
 
   const loadWorkspaceConfig = useCallback(async () => {
     const root = workspaceRoot.trim();
@@ -177,8 +194,8 @@ export function App() {
   }, [workspaceRoot]);
 
   const refreshWorkspace = useCallback(async () => {
-    await Promise.all([refreshSessions(), loadWorkspaceConfig()]);
-  }, [loadWorkspaceConfig, refreshSessions]);
+    await Promise.all([refreshSessions(), loadWorkspaceConfig(), refreshProviderStatus()]);
+  }, [loadWorkspaceConfig, refreshProviderStatus, refreshSessions]);
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
@@ -376,6 +393,12 @@ export function App() {
         <input id="workspace-root" value={workspaceRoot} onChange={(event) => setWorkspaceRoot(event.target.value)} placeholder="D:\\work\\project" spellCheck={false} />
         <section className="workspace-settings" aria-label="Workspace defaults">
           <p className="panel-title">Defaults</p>
+          <div className={`auth-status ${providerStatus?.ready ? "ready" : "missing"}`} role="status">
+            <strong>{providerStatus?.ready ? "Cloud ready" : "API key missing"}</strong>
+            <small>{providerStatus?.message || "Checking provider credentials..."}</small>
+            <small>Base {providerStatus?.base_url || "https://ai.v58.dev/v1"}{providerStatus?.key_hint ? ` · key ${providerStatus.key_hint}` : ""}</small>
+            <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>Refresh auth</button>
+          </div>
           <label className="field-label" htmlFor="default-model">Model</label>
           <input id="default-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={isRunning || isSavingConfig} spellCheck={false} />
           <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>

@@ -36,6 +36,14 @@ export interface PingResult {
   version: string;
 }
 
+export interface ProviderAuthStatus {
+  ready: boolean;
+  has_api_key: boolean;
+  base_url: string;
+  key_hint?: string;
+  message: string;
+}
+
 export interface CreateSessionParams {
   workspace_root: string;
   mode?: Mode;

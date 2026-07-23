@@ -16,6 +16,7 @@ import type {
   ReplaySessionResult,
   ListSessionsResult,
   PingResult,
+  ProviderAuthStatus,
   ResolveActionParams,
   ResolveActionResult,
   RollbackRestorePointResult,
@@ -56,6 +57,15 @@ async function main(): Promise<void> {
       case "ping": {
         const result = await client.request<PingResult>("system.ping", {});
         console.log(`XCoding core ${result.version}: ${result.ok ? "ready" : "unavailable"}`);
+        return;
+      }
+      case "auth":
+      case "provider": {
+        const status = await client.request<ProviderAuthStatus>("provider.status", {});
+        console.log(JSON.stringify(status, null, 2));
+        if (!status.ready) {
+          process.exitCode = 2;
+        }
         return;
       }
       case "session":
@@ -367,6 +377,7 @@ function printUsage(): void {
 
 Usage:
   xcoding ping [--workspace <path>] [--server <path>]
+  xcoding auth [--workspace <path>] [--server <path>]
   xcoding config show [--workspace <path>]
   xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]

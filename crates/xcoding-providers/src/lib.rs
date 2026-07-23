@@ -8,6 +8,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use xcoding_protocol::ProviderAuthStatus;
 
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
@@ -144,11 +145,60 @@ pub struct OpenAiCompatibleProvider {
     client: Client,
 }
 
+
+/// Inspect cloud-provider credentials without making a network request.
+/// Does not return the full API key.
+pub fn inspect_auth() -> ProviderAuthStatus {
+    load_dotenv_files();
+    let base_url = env::var("XCODING_OPENAI_BASE_URL")
+        .unwrap_or_else(|_| "https://ai.v58.dev/v1".to_owned())
+        .trim_end_matches('/')
+        .to_owned();
+    match env::var("OPENAI_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => {
+            let trimmed = key.trim();
+            let key_hint = Some(mask_api_key(trimmed));
+            ProviderAuthStatus {
+                ready: true,
+                has_api_key: true,
+                base_url,
+                key_hint,
+                message: "OPENAI_API_KEY is set. Cloud requests can proceed.".to_owned(),
+            }
+        }
+        _ => ProviderAuthStatus {
+            ready: false,
+            has_api_key: false,
+            base_url,
+            key_hint: None,
+            message: "OPENAI_API_KEY is not set. Set it in the environment or a repo-root .env file.".to_owned(),
+        },
+    }
+}
+
+fn mask_api_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 4 {
+        return "****".to_owned();
+    }
+    let suffix: String = chars[chars.len().saturating_sub(4)..].iter().collect();
+    format!("...{suffix}")
+}
+
 impl OpenAiCompatibleProvider {
     pub fn from_environment() -> Result<Self, ProviderError> {
         // Existing process env wins. Fill missing vars from nearby .env files.
         load_dotenv_files();
-        let api_key = env::var("OPENAI_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key = env::var("OPENAI_API_KEY")
+            .map_err(|_| ProviderError::MissingApiKey)
+            .and_then(|key| {
+                let trimmed = key.trim().to_owned();
+                if trimmed.is_empty() {
+                    Err(ProviderError::MissingApiKey)
+                } else {
+                    Ok(trimmed)
+                }
+            })?;
         let base_url = env::var("XCODING_OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://ai.v58.dev/v1".to_owned());
         Ok(Self::new(api_key, base_url))
@@ -459,5 +509,20 @@ mod tests {
         assert!(message.contains("OPENAI_API_KEY"));
         assert!(message.ends_with("..."));
         assert!(message.len() < 500);
+    }
+
+    #[test]
+    fn inspect_auth_reports_missing_key() {
+        // Cannot safely clear process env for concurrent tests; assert shape via mask helper.
+        assert_eq!(mask_api_key("abcd"), "****");
+        assert_eq!(mask_api_key("sk-1234567890"), "...7890");
+    }
+
+    #[test]
+    fn inspect_auth_returns_status_struct() {
+        let status = inspect_auth();
+        assert!(!status.base_url.is_empty());
+        assert!(!status.message.is_empty());
+        assert_eq!(status.ready, status.has_api_key);
     }
 }

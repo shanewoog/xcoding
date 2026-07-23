@@ -167,3 +167,33 @@ button:hover:not(:disabled) { background: #105851; }
   .chat-header { align-items: flex-start; }
   .header-controls { align-items: flex-end; flex-direction: column-reverse; }
 }
+
+.auth-status {
+  border: 1px solid #c8cdd3;
+  border-radius: 4px;
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.85rem 0 0.35rem;
+  padding: 0.65rem 0.7rem;
+}
+.auth-status.ready {
+  background: #edf7f4;
+  border-color: #b8e1d8;
+}
+.auth-status.missing {
+  background: #fff5f2;
+  border-color: #efc4b8;
+}
+.auth-status strong {
+  font-size: 0.82rem;
+}
+.auth-status small {
+  color: #4f5a66;
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-transform: none;
+}
+.auth-status .quiet-button {
+  justify-self: start;
+  margin-top: 0.25rem;
+}

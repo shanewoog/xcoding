@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
-use xcoding_protocol::{CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, PingResult, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, ReplaySessionResult, Session, SessionDetail, SetConfigParams, WorkspaceConfig};
+use xcoding_protocol::{CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, PingResult, ProviderAuthStatus, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, ReplaySessionResult, Session, SessionDetail, SetConfigParams, WorkspaceConfig};
+use xcoding_providers::inspect_auth;
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
@@ -15,6 +16,12 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn open_core(app: &AppHandle) -> Result<CoreService, String> {
     CoreService::open(database_path(app)?).map_err(|error| error.to_string())
+}
+
+
+#[tauri::command]
+fn provider_status() -> Result<ProviderAuthStatus, String> {
+    Ok(inspect_auth())
 }
 
 #[tauri::command]
@@ -117,7 +124,7 @@ fn load_dotenv_files() {
 fn main() {
     load_dotenv_files();
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping, list_sessions, workspace_config, set_workspace_config, session_detail, session_replay, chat, resolve_action, rollback_restore_point, cancel_session])
+        .invoke_handler(tauri::generate_handler![ping, provider_status, list_sessions, workspace_config, set_workspace_config, session_detail, session_replay, chat, resolve_action, rollback_restore_point, cancel_session])
         .run(tauri::generate_context!())
         .expect("failed to run XCoding Desktop");
 }

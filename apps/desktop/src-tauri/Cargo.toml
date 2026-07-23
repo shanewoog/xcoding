@@ -15,3 +15,4 @@ uuid = { version = "1", features = ["serde", "v4"] }
 xcoding-agent = { path = "../../../crates/xcoding-agent" }
 xcoding-core = { path = "../../../crates/xcoding-core" }
 xcoding-protocol = { path = "../../../crates/xcoding-protocol" }
+xcoding-providers = { path = "../../../crates/xcoding-providers" }
