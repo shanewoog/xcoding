@@ -537,12 +537,13 @@ impl<'a> AgentService<'a> {
                 let output = serde_json::to_string(&execution.output)
                     .map_err(|error| AgentError::InvalidProviderToolCall(error.to_string()))?;
                 self.core.record_tool_message(session.id, &output)?;
+                let success = tool_execution_success(tool_call, &execution.output);
                 self.emit(
                     on_event,
                     SessionEvent::ToolEnd {
                         session_id: session.id,
                         tool_call: tool_call.clone(),
-                        success: true,
+                        success,
                         summary: execution.summary,
                     },
                 );
@@ -578,6 +579,17 @@ impl<'a> AgentService<'a> {
     }
 }
 
+
+fn tool_execution_success(tool_call: &ToolCall, output: &Value) -> bool {
+    if tool_call.name == ToolName::RunCommand {
+        output
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    } else {
+        true
+    }
+}
 fn approval_summary(tool_call: &ToolCall) -> String {
     match tool_call.name {
         ToolName::ApplyPatch => "Review and approve the proposed patch".to_owned(),
@@ -668,3 +680,4 @@ mod tests {
         );
     }
 }
+

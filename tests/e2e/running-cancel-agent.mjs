@@ -107,7 +107,7 @@ async function testFailedCommandRefeed(rpc, mock, workspace) {
   const toolEnd = rpc.events.find(
     (event) => event.type === "tool_end" && event.session_id === started.session.id,
   );
-  assert.equal(toolEnd?.success, true);
+  assert.equal(toolEnd?.success, false);
   const { detail } = await rpc.request("session.detail", { session_id: started.session.id });
   const toolMessage = detail.messages.find((message) => message.role === "tool");
   assert.match(toolMessage?.content ?? "", /"success":false/);
@@ -435,3 +435,4 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.stack : String(error));
   process.exitCode = 1;
 });
+
