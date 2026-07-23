@@ -8,6 +8,7 @@ export type ActivityPolicy =
   | "awaiting"
   | "blocked"
   | "high-risk"
+  | "conflict"
   | "running"
   | "done"
   | "failed"
@@ -27,7 +28,12 @@ const DISTINCTIVE_POLICIES: ReadonlySet<ActivityPolicy> = new Set([
   "awaiting",
   "blocked",
   "high-risk",
+  "conflict",
 ]);
+
+export function isPatchConflictSummary(summary: string | null | undefined): boolean {
+  return typeof summary === "string" && /patch conflict/i.test(summary);
+}
 
 export function classifyActivitySummary(
   summary: string,
@@ -39,6 +45,7 @@ export function classifyActivitySummary(
   if (/^Awaiting approval\b/i.test(text)) return "awaiting";
   if (/^Blocked\b/i.test(text)) return "blocked";
   if (/HIGH-RISK/i.test(text)) return "high-risk";
+  if (state === "failed" && isPatchConflictSummary(text)) return "conflict";
   if (state === "failed") return "failed";
   if (state === "done") return "done";
   if (/^Running\b/i.test(text)) return "running";
@@ -57,6 +64,8 @@ export function activityPolicyBadge(policy: ActivityPolicy): string | null {
       return "BLOCKED";
     case "high-risk":
       return "HIGH-RISK";
+    case "conflict":
+      return "CONFLICT";
     default:
       return null;
   }
@@ -96,12 +105,18 @@ export function eventActivity(event: SessionEvent, sequence: string): ActivityIt
   if (event.type === "tool_end") {
     const label = event.summary;
     const state: ActivityState = event.success ? "done" : "failed";
+    const isConflict =
+      !event.success &&
+      (event.tool_call.name === "apply_patch" || isPatchConflictSummary(label)) &&
+      isPatchConflictSummary(label);
     return {
       id: event.tool_call.id,
       label,
-      detail: toolDetail(event.tool_call.arguments),
+      detail: isConflict
+        ? "Re-read the file and retry apply_patch with updated old_text."
+        : toolDetail(event.tool_call.arguments),
       state,
-      policy: classifyActivitySummary(label, state),
+      policy: isConflict ? "conflict" : classifyActivitySummary(label, state),
     };
   }
   if (event.type === "approval_requested") {

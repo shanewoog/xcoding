@@ -49,7 +49,9 @@ pub enum ToolError {
     InvalidArguments(String),
     #[error("permission was not granted")]
     PermissionDenied,
-    #[error("patch did not match the current file contents: {0}")]
+    #[error(
+        "patch conflict on {0}: file contents changed; re-read the file and retry with updated old_text"
+    )]
     PatchConflict(String),
     #[error("command arguments are invalid: {0}")]
     InvalidCommand(String),
@@ -59,6 +61,47 @@ pub enum ToolError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+impl ToolError {
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::PatchConflict(_) => Some("patch_conflict"),
+            Self::PermissionDenied => Some("permission_denied"),
+            Self::Cancelled => Some("cancelled"),
+            Self::InvalidArguments(_) => Some("invalid_arguments"),
+            Self::InvalidCommand(_) => Some("invalid_command"),
+            _ => None,
+        }
+    }
+
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            Self::PatchConflict(path)
+            | Self::NotDirectory(path)
+            | Self::NotFile(path)
+            | Self::FileTooLarge(path)
+            | Self::PathOutsideWorkspace(path)
+            | Self::WorkspaceNotFound(path) => Some(path.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn tool_result_value(&self) -> Value {
+        let mut value = json!({ "error": self.to_string() });
+        if let Some(code) = self.code() {
+            value["code"] = json!(code);
+        }
+        if let Some(path) = self.path() {
+            value["path"] = json!(path);
+        }
+        if matches!(self, Self::PatchConflict(_)) {
+            value["hint"] = json!(
+                "Re-read the file with read_file, then retry apply_patch using the current contents as old_text."
+            );
+        }
+        value
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2510,9 +2553,61 @@ mod tests {
             .rollback_patch("settings.txt", "old\n", Some("before\n"))
             .expect_err("rollback refuses to overwrite an external edit");
         assert!(matches!(error, ToolError::PatchConflict(_)));
+        assert_eq!(error.code(), Some("patch_conflict"));
+        assert!(
+            error.to_string().contains("re-read the file"),
+            "error={}",
+            error
+        );
         assert_eq!(
             fs::read_to_string(&existing).expect("external edit remains"),
             "edited elsewhere\n"
+        );
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn apply_patch_reports_structured_conflict() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let path = root.join("notes.txt");
+        fs::write(&path, "current\n").expect("seed file");
+
+        let error = tools
+            .execute_authorized(&ToolCall {
+                id: "conflict".to_owned(),
+                name: ToolName::ApplyPatch,
+                arguments: json!({
+                    "path": "notes.txt",
+                    "old_text": "stale\n",
+                    "new_text": "next\n"
+                }),
+            })
+            .expect_err("stale old_text conflicts");
+        assert!(matches!(error, ToolError::PatchConflict(_)));
+        assert_eq!(error.code(), Some("patch_conflict"));
+        assert_eq!(error.path(), Some("notes.txt"));
+        assert!(
+            error
+                .to_string()
+                .contains("patch conflict on notes.txt"),
+            "error={}",
+            error
+        );
+        let value = error.tool_result_value();
+        assert_eq!(value["code"], "patch_conflict");
+        assert_eq!(value["path"], "notes.txt");
+        assert!(
+            value["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("read_file"),
+            "hint={value}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("file remains"),
+            "current\n"
         );
 
         fs::remove_dir_all(root).expect("workspace removes");

@@ -346,6 +346,15 @@ function printEvent(event: SessionEvent): void {
       return;
     case "tool_end":
       process.stderr.write(`${event.success ? "done" : "failed"}: ${event.summary}\n`);
+      if (
+        !event.success &&
+        typeof event.summary === "string" &&
+        event.summary.toLowerCase().includes("patch conflict")
+      ) {
+        process.stderr.write(
+          "HINT: re-read the file and retry apply_patch with updated old_text.\n",
+        );
+      }
       return;
     case "patch_preview":
       process.stderr.write(`Patch: ${event.preview.path}\n`);

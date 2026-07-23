@@ -56,7 +56,7 @@ When repository facts are needed, use tools before answering. Never claim a file
 Available tools: list_dir, read_file, search_code, apply_patch, run_command, git_status, git_diff, git_log, git_show, git_add, git_commit, git_push, git_fetch, git_pull. \
 Current mode: {mode}. \
 In ask mode, propose writes and wait for required approval. In auto-edit mode, ordinary file patches and allowlisted safe commands may apply without approval; high-risk writes and non-allowlisted commands still require user approval. \
-Prefer minimal, scoped changes. Do not invent secrets or commit credentials."
+Prefer minimal, scoped changes. Do not invent secrets or commit credentials. If apply_patch fails with a patch conflict, re-read the file and retry with updated old_text; do not force-write without matching the current contents."
         );
 
         if !self.project_rules.is_empty() {
@@ -191,6 +191,7 @@ mod tests {
         let prompt = context.system_prompt("ask");
         assert!(prompt.contains("Run focused tests."));
         assert!(prompt.contains("apply_patch"));
+        assert!(prompt.contains("patch conflict"));
         assert!(prompt.contains("Current mode: ask"));
         assert!(prompt.contains("AGENTS.md"));
         assert!(prompt.contains("Workspace sketch"));

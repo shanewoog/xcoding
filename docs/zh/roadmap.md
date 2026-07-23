@@ -156,7 +156,7 @@
 - 更多云供应商
 - skills 系统
 - MCP 支持
-- 更好的补丁置信度与冲突体验
+- 更好的补丁置信度与冲突体验（Wave X：结构化 `patch_conflict` 工具错误、Agent 重读指引、Desktop CONFLICT 标记、CLI 重试提示）
 - 更丰富 git 工作流（Wave S：结构化 `git_log` + `git_show`；Wave T：需审批的 `git_add` + `git_commit`；Wave U：需审批且不 force 的 `git_push`；Wave V：需审批的 `git_fetch` + `git_pull`（默认 ff-only）；Wave W：Desktop/CLI 对 git 工具的专用审批展示；reset/force/rebase 稍后）
 - 大仓库性能优化
 
@@ -245,3 +245,4 @@ Desktop 应略落后于核心能力，而不是反过来带着核心走。
 ## 其他语言
 
 - English: [../en/roadmap.md](../en/roadmap.md)
+

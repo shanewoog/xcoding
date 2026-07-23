@@ -637,7 +637,8 @@ impl<'a> AgentService<'a> {
     where
         F: FnMut(SessionEvent),
     {
-        let output = json!({ "error": error.to_string() }).to_string();
+        let value = error.tool_result_value();
+        let output = value.to_string();
         self.core.record_tool_message(session.id, &output)?;
         self.emit(
             on_event,

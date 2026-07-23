@@ -12,6 +12,7 @@ function classifyActivitySummary(summary, state = "running") {
   if (/^Awaiting approval\b/i.test(text)) return "awaiting";
   if (/^Blocked\b/i.test(text)) return "blocked";
   if (/HIGH-RISK/i.test(text)) return "high-risk";
+  if (state === "failed" && /patch conflict/i.test(text)) return "conflict";
   if (state === "failed") return "failed";
   if (state === "done") return "done";
   if (/^Running\b/i.test(text)) return "running";
@@ -30,13 +31,42 @@ function activityPolicyBadge(policy) {
       return "BLOCKED";
     case "high-risk":
       return "HIGH-RISK";
+    case "conflict":
+      return "CONFLICT";
     default:
       return null;
   }
 }
 
+
+function eventActivity(event, sequence) {
+  if (event.type === "tool_end") {
+    const label = event.summary;
+    const state = event.success ? "done" : "failed";
+    const isConflict =
+      !event.success &&
+      (event.tool_call?.name === "apply_patch" || /patch conflict/i.test(label)) &&
+      /patch conflict/i.test(label);
+    return {
+      id: event.tool_call?.id ?? sequence,
+      label,
+      detail: isConflict
+        ? "Re-read the file and retry apply_patch with updated old_text."
+        : "",
+      state,
+      policy: isConflict ? "conflict" : classifyActivitySummary(label, state),
+    };
+  }
+  return {
+    id: sequence,
+    label: String(event.summary ?? event.type ?? "activity"),
+    detail: "",
+    state: "running",
+    policy: "generic",
+  };
+}
 function mergeActivity(previous, next) {
-  const distinctive = new Set(["auto-apply", "auto-run", "awaiting", "blocked", "high-risk"]);
+  const distinctive = new Set(["auto-apply", "auto-run", "awaiting", "blocked", "high-risk", "conflict"]);
   if (!previous) return next;
   if (distinctive.has(previous.policy) && !distinctive.has(next.policy)) {
     return { ...next, policy: previous.policy };
@@ -59,7 +89,9 @@ async function main() {
     "export function mergeActivity",
     "export function eventActivity",
     "export function buildActivity",
+    "export function isPatchConflictSummary",
     "approval_requested",
+    '"conflict"',
   ]) {
     assert.ok(activitySource.includes(needle), "activity.ts missing " + needle);
   }
@@ -82,6 +114,7 @@ async function main() {
     ".activity-badge.policy-auto-run",
     ".activity-badge.policy-awaiting",
     ".activity-badge.policy-high-risk",
+    ".activity-badge.policy-conflict",
   ]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }
@@ -110,7 +143,45 @@ async function main() {
   assert.equal(activityPolicyBadge("auto-run"), "AUTO-RUN");
   assert.equal(activityPolicyBadge("awaiting"), "AWAITING");
   assert.equal(activityPolicyBadge("high-risk"), "HIGH-RISK");
+  assert.equal(activityPolicyBadge("conflict"), "CONFLICT");
+  assert.equal(
+    classifyActivitySummary(
+      "patch conflict on notes.txt: file contents changed; re-read the file and retry with updated old_text",
+      "failed",
+    ),
+    "conflict",
+  );
+  const conflictItem = eventActivity(
+    {
+      type: "tool_end",
+      tool_call: { id: "call_conflict", name: "apply_patch", arguments: { path: "notes.txt" } },
+      success: false,
+      summary:
+        "patch conflict on notes.txt: file contents changed; re-read the file and retry with updated old_text",
+    },
+    "seq-conflict",
+  );
+  assert.equal(conflictItem.policy, "conflict");
+  assert.match(conflictItem.detail, /re-read the file/i);
   assert.equal(activityPolicyBadge("running"), null);
+  const conflictMerged = mergeActivity(
+    {
+      id: "conflict-1",
+      label: "patch conflict on notes.txt: file contents changed; re-read the file and retry with updated old_text",
+      detail: "Re-read the file and retry apply_patch with updated old_text.",
+      state: "failed",
+      policy: "conflict",
+    },
+    {
+      id: "conflict-1",
+      label: "done",
+      detail: "",
+      state: "done",
+      policy: "done",
+    },
+  );
+  assert.equal(conflictMerged.policy, "conflict");
+
 
   const merged = mergeActivity(
     {
@@ -139,3 +210,4 @@ main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
+

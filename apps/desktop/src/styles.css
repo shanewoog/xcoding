@@ -147,11 +147,13 @@ button:hover:not(:disabled) { background: #105851; }
 .activity-badge.policy-awaiting { background: #fff1d6; color: #8a5a00; }
 .activity-badge.policy-blocked { background: #f0e4e4; color: #7a2f2f; }
 .activity-badge.policy-high-risk { background: #a84747; color: #fff; }
+.activity-badge.policy-conflict { background: #f3e0c8; color: #8a4b00; }
 .activity.policy-auto-apply,
 .activity.policy-auto-run { border-color: #2f9d78; }
 .activity.policy-awaiting { border-color: #d99929; }
 .activity.policy-blocked,
 .activity.policy-high-risk { border-color: #b13d3d; }
+.activity.policy-conflict { border-color: #c47d2a; }
 
 @media (max-width: 920px) {
   .workbench { grid-template-columns: 220px minmax(0, 1fr); }
