@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, KeyboardEvent } from "react";
 import type {
   CancelSessionResult,
   ChatParams,
@@ -25,6 +25,12 @@ import type {
   WorkspaceConfig,
 } from "@xcoding/protocol";
 import { buildReviewPresentation, latestApprovalSummary } from "./review";
+import {
+  formatMessageRole,
+  formatSessionStatus,
+  hasTraceContent,
+  sessionMetaLine,
+} from "./layout";
 
 type Activity = {
   id: string;
@@ -182,6 +188,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderAuthStatus | null>(null);
 
+  const conversationRef = useRef<HTMLDivElement | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
@@ -265,6 +272,12 @@ export function App() {
   useEffect(() => {
     if (activeSessionId) void hydrateSession(activeSessionId);
   }, [activeSessionId, hydrateSession]);
+
+  useEffect(() => {
+    const node = conversationRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [messages, streamedText, error, isRunning]);
 
   useEffect(() => {
     if (!isTauriRuntime) return;
@@ -467,32 +480,54 @@ export function App() {
     }
   }
 
+  const showTraceContent = hasTraceContent({
+    pendingAction,
+    planCount: plan.length,
+    activityCount: activity.length,
+    restoreCount: restorePoints.length,
+    replayCount: replaySteps.length,
+    taskSummary,
+  });
+
+  function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      const form = event.currentTarget.form;
+      if (form) form.requestSubmit();
+    }
+  }
+
   return (
     <main className="workbench">
       <aside className="sessions-panel" aria-label="Sessions">
-        <div className="brand-row">
-          <div><p className="eyebrow">XCoding</p><h1>Sessions</h1></div>
-          <button type="button" className="quiet-button" onClick={() => void refreshWorkspace()} aria-label="Refresh workspace">Refresh</button>
-        </div>
-        <label className="field-label" htmlFor="workspace-root">Workspace</label>
-        <input id="workspace-root" value={workspaceRoot} onChange={(event) => setWorkspaceRoot(event.target.value)} placeholder="D:\\work\\project" spellCheck={false} />
-        <section className="workspace-settings" aria-label="Workspace defaults">
-          <p className="panel-title">Defaults</p>
-          <div className={`auth-status ${providerStatus?.ready ? "ready" : "missing"}`} role="status">
-            <strong>{providerStatus?.ready ? "Cloud ready" : "API key missing"}</strong>
-            <small>{providerStatus?.message || "Checking provider credentials..."}</small>
-            <small>Base {providerStatus?.base_url || "https://ai.v58.dev/v1"}{providerStatus?.key_hint ? ` · key ${providerStatus.key_hint}` : ""}</small>
-            <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>Refresh auth</button>
+        <div className="sessions-top">
+          <div className="brand-row">
+            <div><p className="eyebrow">XCoding</p><h1>Sessions</h1></div>
+            <button type="button" className="quiet-button" onClick={() => void refreshWorkspace()} aria-label="Refresh workspace">Refresh</button>
           </div>
-          <label className="field-label" htmlFor="default-model">Model</label>
-          <input id="default-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={isRunning || isSavingConfig} spellCheck={false} />
-          <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>
-        </section>
+          <label className="field-label" htmlFor="workspace-root">Workspace</label>
+          <input id="workspace-root" value={workspaceRoot} onChange={(event) => setWorkspaceRoot(event.target.value)} placeholder="D:\\work\\project" spellCheck={false} />
+          <section className="workspace-settings" aria-label="Workspace defaults">
+            <p className="panel-title">Defaults</p>
+            <div className={`auth-status ${providerStatus?.ready ? "ready" : "missing"}`} role="status">
+              <strong>{providerStatus?.ready ? "Cloud ready" : "API key missing"}</strong>
+              <small>{providerStatus?.message || "Checking provider credentials..."}</small>
+              <small>Base {providerStatus?.base_url || "https://ai.v58.dev/v1"}{providerStatus?.key_hint ? ` · key ${providerStatus.key_hint}` : ""}</small>
+              <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>Refresh auth</button>
+            </div>
+            <label className="field-label" htmlFor="default-model">Model</label>
+            <input id="default-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={isRunning || isSavingConfig} spellCheck={false} />
+            <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>
+          </section>
+        </div>
         <nav className="session-list" aria-label="Saved sessions">
+          <p className="panel-title session-list-title">History</p>
           {sessions.length === 0 ? <p className="empty-state">No saved sessions in this workspace.</p> : null}
           {sessions.map((session) => (
-            <button type="button" className={`session-item ${session.id === activeSessionId ? "is-active" : ""}`} key={session.id} onClick={() => setActiveSessionId(session.id)}>
-              <span>{sessionTitle(session)}</span><small>{session.status.replace("_", " ")}</small>
+            <button type="button" className={`session-item ${session.id === activeSessionId ? "is-active" : ""} status-${session.status}`} key={session.id} onClick={() => setActiveSessionId(session.id)}>
+              <span className="session-item-title">{sessionTitle(session)}</span>
+              <span className={`status-badge status-${session.status}`}>{formatSessionStatus(session.status)}</span>
+              <small>{sessionMetaLine(session)}</small>
             </button>
           ))}
         </nav>
@@ -500,21 +535,42 @@ export function App() {
 
       <section className="chat-panel" aria-label="Coding conversation">
         <header className="chat-header">
-          <div><p className="eyebrow">Cloud model · {activeSession?.model || model}</p><h2>{activeSession ? sessionTitle(activeSession) : "New coding task"}{canContinueSession(activeSession) ? " · follow-up" : ""}</h2></div>
+          <div><p className="eyebrow">Cloud model · {activeSession?.model || model}{activeSession ? ` · ${formatSessionStatus(activeSession.status)}` : ""}</p><h2>{activeSession ? sessionTitle(activeSession) : "New coding task"}{canContinueSession(activeSession) ? " · follow-up" : ""}</h2></div>
           <div className="header-controls">
+            {activeSession ? <span className={`status-badge status-${activeSession.status}`}>{formatSessionStatus(activeSession.status)}</span> : null}
             {activeSession ? <button type="button" className="quiet-button" onClick={() => startNewChat()} disabled={isRunning}>New chat</button> : null}
             {activeSession?.status === "need_user" ? <button type="button" className="quiet-button" onClick={() => void cancelSession()} disabled={isRunning}>Cancel</button> : null}
             <label className="mode-control">Mode<select value={mode} onChange={(event) => setMode(event.target.value as Mode)} disabled={isRunning}><option value="ask">Ask</option><option value="auto-edit">Auto edit</option></select></label>
           </div>
         </header>
-        <div className="conversation" aria-live="polite">
-          {messages.map((message) => <article className={`message message-${message.role}`} key={message.id}><p>{message.role}</p><div>{message.content}</div></article>)}
-          {streamedText ? <article className="message message-assistant streaming"><p>assistant</p><div>{streamedText}</div></article> : null}
-          {messages.length === 0 && !streamedText && !isRunning ? <p className="empty-state">Describe the repository task you want XCoding to inspect.</p> : null}
+        <div className="conversation" aria-live="polite" ref={conversationRef}>
+          {messages.map((message) => (
+            <article className={`message message-${message.role}`} key={message.id}>
+              <p>{formatMessageRole(message.role)}</p>
+              <div>{message.content}</div>
+            </article>
+          ))}
+          {streamedText ? (
+            <article className="message message-assistant streaming">
+              <p>Assistant</p>
+              <div>{streamedText}</div>
+            </article>
+          ) : null}
+          {messages.length === 0 && !streamedText && !isRunning ? (
+            <div className="empty-chat">
+              <p className="empty-state">Describe the repository task you want XCoding to inspect.</p>
+              <ul className="empty-hints">
+                <li>Left: workspace, model defaults, session history</li>
+                <li>Center: conversation and composer</li>
+                <li>Right: review, plan, activity, restore, replay</li>
+              </ul>
+              <p className="empty-state composer-hint">Tip: Ctrl+Enter sends the message.</p>
+            </div>
+          ) : null}
           {error ? <p className="error-message">{error}</p> : null}
         </div>
         <form className="composer" onSubmit={submit}>
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={canContinueSession(activeSession) ? "Continue this session..." : "Ask about this codebase..."} rows={4} disabled={isRunning} />
+          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={onComposerKeyDown} placeholder={canContinueSession(activeSession) ? "Continue this session..." : "Ask about this codebase..."} rows={4} disabled={isRunning} />
           <div className="composer-footer"><span>{canContinueSession(activeSession) ? `Continue · ${activeSession!.id.slice(0, 8)}` : workspaceRoot.trim() ? workspaceRoot : "Choose a workspace path"}</span><button type="submit" disabled={isRunning || !workspaceRoot.trim() || !prompt.trim()}>{isRunning ? "Working..." : canContinueSession(activeSession) ? "Continue" : "Send"}</button></div>
         </form>
       </section>
@@ -558,11 +614,115 @@ export function App() {
             </section>
           );
         })() : null}
-        <section><p className="panel-title">Plan</p><ol className="plan-list">{plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}{plan.map((step) => <li key={step.id}>{step.description}</li>)}</ol></section>
-        <section><p className="panel-title">Restore points</p><div className="restore-list">{restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}{restorePoints.map((restorePoint) => <div className="restore-point" key={restorePoint.id}><div><strong>{restorePoint.path}</strong><small>{new Date(restorePoint.created_at).toLocaleString()}</small></div><button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button></div>)}</div></section>
-        <section><p className="panel-title">Replay</p><div className="restore-list">{replaySteps.length === 0 ? <p className="empty-state">Load a finished session to reconstruct major steps.</p> : null}{replaySteps.map((step, index) => <div className="restore-point" key={`${step.kind}-${index}`}><div><strong>{step.kind}{step.tool_name ? ` · ${step.tool_name}` : ""}</strong><small>{step.summary}</small></div>{typeof step.success === "boolean" ? <code>{step.success ? "ok" : "fail"}</code> : null}</div>)}</div><button type="button" className="quiet-button" onClick={() => void loadReplay()} disabled={!activeSessionId || isRunning}>Replay steps</button></section>
-        {taskSummary ? <section className="task-summary"><div className="summary-header"><p className="panel-title">Task summary</p><div className="summary-actions"><button type="button" className="quiet-button" onClick={() => void copyText(formatTaskSummaryText(taskSummary))}>Copy summary</button>{taskSummary.git_status || taskSummary.git_diff ? <button type="button" className="quiet-button" onClick={() => void copyText(gitSnapshotText(taskSummary))}>Copy git</button> : null}</div></div><strong>{taskSummary.changed_files.length} changed file(s){typeof taskSummary.lines_added === "number" || typeof taskSummary.lines_removed === "number" ? <> · +{taskSummary.lines_added ?? 0}/−{taskSummary.lines_removed ?? 0}</> : null}</strong><small>{taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded{taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}</small>{(taskSummary.file_changes?.length ?? 0) > 0 ? <ul className="file-change-list">{taskSummary.file_changes!.map((change) => <li key={change.path}><span className={`change-kind ${change.kind}`}>{fileChangeLabel(change.kind)}</span><code>{change.path}</code><small className="line-delta">+{change.lines_added}/−{change.lines_removed}</small></li>)}</ul> : taskSummary.changed_files.length > 0 ? <ul>{taskSummary.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}{taskSummary.git_branch ? <small>Branch {taskSummary.git_branch}</small> : null}{taskSummary.git_status ? <details className="summary-details"><summary>Git status</summary><pre className="summary-pre">{taskSummary.git_status}</pre></details> : null}{taskSummary.git_diff ? <details className="summary-details"><summary>Git diff</summary><pre className="summary-pre">{taskSummary.git_diff}</pre></details> : null}</section> : null}
-        <section><p className="panel-title">Activity</p><div className="activity-list">{activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}{activity.map((item) => <article className={`activity ${item.state}`} key={item.id}><strong>{item.label}</strong><code>{item.detail}</code></article>)}</div></section>
+
+        {!showTraceContent && !pendingAction ? (
+          <section className="trace-empty">
+            <p className="panel-title">Trace</p>
+            <p className="empty-state">Plan, activity, and review panels fill in while the agent works.</p>
+          </section>
+        ) : null}
+
+        {taskSummary ? (
+          <section className="task-summary">
+            <div className="summary-header">
+              <p className="panel-title">Task summary</p>
+              <div className="summary-actions">
+                <button type="button" className="quiet-button" onClick={() => void copyText(formatTaskSummaryText(taskSummary))}>Copy summary</button>
+                {taskSummary.git_status || taskSummary.git_diff ? (
+                  <button type="button" className="quiet-button" onClick={() => void copyText(gitSnapshotText(taskSummary))}>Copy git</button>
+                ) : null}
+              </div>
+            </div>
+            <strong>
+              {taskSummary.changed_files.length} changed file(s)
+              {typeof taskSummary.lines_added === "number" || typeof taskSummary.lines_removed === "number" ? (
+                <> · +{taskSummary.lines_added ?? 0}/−{taskSummary.lines_removed ?? 0}</>
+              ) : null}
+            </strong>
+            <small>
+              {taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded
+              {taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}
+            </small>
+            {(taskSummary.file_changes?.length ?? 0) > 0 ? (
+              <ul className="file-change-list">
+                {taskSummary.file_changes!.map((change) => (
+                  <li key={change.path}>
+                    <span className={`change-kind ${change.kind}`}>{fileChangeLabel(change.kind)}</span>
+                    <code>{change.path}</code>
+                    <small className="line-delta">+{change.lines_added}/−{change.lines_removed}</small>
+                  </li>
+                ))}
+              </ul>
+            ) : taskSummary.changed_files.length > 0 ? (
+              <ul>
+                {taskSummary.changed_files.map((path) => (
+                  <li key={path}><code>{path}</code></li>
+                ))}
+              </ul>
+            ) : null}
+            {taskSummary.git_branch ? <small>Branch {taskSummary.git_branch}</small> : null}
+            {taskSummary.git_status ? (
+              <details className="summary-details"><summary>Git status</summary><pre className="summary-pre">{taskSummary.git_status}</pre></details>
+            ) : null}
+            {taskSummary.git_diff ? (
+              <details className="summary-details"><summary>Git diff</summary><pre className="summary-pre">{taskSummary.git_diff}</pre></details>
+            ) : null}
+          </section>
+        ) : null}
+
+        <section className="trace-section">
+          <p className="panel-title">Activity{activity.length ? ` · ${activity.length}` : ""}</p>
+          <div className="activity-list">
+            {activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}
+            {activity.map((item) => (
+              <article className={`activity ${item.state}`} key={item.id}>
+                <strong>{item.label}</strong>
+                <code>{item.detail}</code>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <details className="trace-section" open={plan.length > 0}>
+          <summary className="panel-title">Plan{plan.length ? ` · ${plan.length}` : ""}</summary>
+          <ol className="plan-list">
+            {plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}
+            {plan.map((step) => <li key={step.id}>{step.description}</li>)}
+          </ol>
+        </details>
+
+        <details className="trace-section" open={restorePoints.length > 0}>
+          <summary className="panel-title">Restore points{restorePoints.length ? ` · ${restorePoints.length}` : ""}</summary>
+          <div className="restore-list">
+            {restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}
+            {restorePoints.map((restorePoint) => (
+              <div className="restore-point" key={restorePoint.id}>
+                <div>
+                  <strong>{restorePoint.path}</strong>
+                  <small>{new Date(restorePoint.created_at).toLocaleString()}</small>
+                </div>
+                <button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button>
+              </div>
+            ))}
+          </div>
+        </details>
+
+        <details className="trace-section" open={replaySteps.length > 0}>
+          <summary className="panel-title">Replay{replaySteps.length ? ` · ${replaySteps.length}` : ""}</summary>
+          <div className="restore-list">
+            {replaySteps.length === 0 ? <p className="empty-state">Load a finished session to reconstruct major steps.</p> : null}
+            {replaySteps.map((step, index) => (
+              <div className="restore-point" key={`${step.kind}-${index}`}>
+                <div>
+                  <strong>{step.kind}{step.tool_name ? ` · ${step.tool_name}` : ""}</strong>
+                  <small>{step.summary}</small>
+                </div>
+                {typeof step.success === "boolean" ? <code>{step.success ? "ok" : "fail"}</code> : null}
+              </div>
+            ))}
+          </div>
+          <button type="button" className="quiet-button" onClick={() => void loadReplay()} disabled={!activeSessionId || isRunning}>Replay steps</button>
+        </details>
       </aside>
     </main>
   );

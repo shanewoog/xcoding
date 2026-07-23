@@ -35,3 +35,20 @@ When a task finishes, Desktop shows a completion panel with changed files (creat
 
 Select a finished session in the left list to review history. Sending another message continues that session (shared transcript and restore points). **New chat** clears the selection and starts a new task.
 
+## Three-pane layout
+
+| Pane | Content |
+|------|---------|
+| Left | Workspace path, auth status, model defaults, and scrollable session history with status badges |
+| Center | Conversation transcript (auto-scrolls), empty-state pane map, and composer |
+| Right | Sticky approval review when needed, task summary, activity, then collapsible plan / restore / replay |
+
+Session history items show status, mode, model, and a relative updated time. Message roles render as You / Assistant / Tool / System.
+
+### Keyboard
+
+- **Ctrl+Enter** (Windows/Linux) or **Cmd+Enter** (macOS) sends the composer message.
+
+### Trace panel
+
+When a session has no plan, activity, restore points, replay, or summary yet, the right pane shows a short empty Trace hint. Plan, Restore points, and Replay sections collapse when empty and expand when they have content. Pending approvals stay sticky at the top of the trace pane.
