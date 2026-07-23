@@ -348,11 +348,12 @@ impl<'a> AgentService<'a> {
                             .expect("completed chat has a message"),
                     },
                 );
+                let summary = self.enrich_task_summary(&session)?;
                 self.emit(
                     on_event,
                     SessionEvent::TaskCompleted {
                         session_id: session.id,
-                        summary: self.core.task_summary(session.id)?,
+                        summary,
                     },
                 );
                 return Ok(result);
@@ -483,6 +484,59 @@ impl<'a> AgentService<'a> {
         })
     }
 
+    fn enrich_task_summary(&self, session: &Session) -> Result<xcoding_protocol::TaskSummary, AgentError> {
+        let mut summary = self.core.task_summary(session.id)?;
+        let tools = match ToolRegistry::new(&session.workspace_root) {
+            Ok(tools) => tools,
+            Err(_) => return Ok(summary),
+        };
+
+        if let Ok(status) = tools.execute_authorized(&ToolCall {
+            id: "task_summary_git_status".to_owned(),
+            name: ToolName::GitStatus,
+            arguments: json!({}),
+        }) {
+            summary.git_branch = status
+                .output
+                .get("branch")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            summary.git_status = status
+                .output
+                .get("raw")
+                .and_then(Value::as_str)
+                .map(|raw| truncate_summary_text(raw, 4_000));
+        }
+
+        if let Ok(diff) = tools.execute_authorized(&ToolCall {
+            id: "task_summary_git_diff".to_owned(),
+            name: ToolName::GitDiff,
+            arguments: json!({}),
+        }) {
+            let staged = diff
+                .output
+                .get("staged")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let unstaged = diff
+                .output
+                .get("unstaged")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let combined = match (staged.is_empty(), unstaged.is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => format!("# staged\n{staged}"),
+                (true, false) => format!("# unstaged\n{unstaged}"),
+                (false, false) => format!("# staged\n{staged}\n\n# unstaged\n{unstaged}"),
+            };
+            if !combined.is_empty() {
+                summary.git_diff = Some(truncate_summary_text(&combined, 8_000));
+            }
+        }
+
+        Ok(summary)
+    }
+
     async fn execute_and_record<F>(
         &self,
         session: &Session,
@@ -590,6 +644,15 @@ fn tool_execution_success(tool_call: &ToolCall, output: &Value) -> bool {
         true
     }
 }
+fn truncate_summary_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_owned()
+    } else {
+        let clipped: String = value.chars().take(max_chars).collect();
+        format!("{clipped}\n[truncated]")
+    }
+}
+
 fn approval_summary(tool_call: &ToolCall) -> String {
     match tool_call.name {
         ToolName::ApplyPatch => "Review and approve the proposed patch".to_owned(),

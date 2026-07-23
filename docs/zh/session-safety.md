@@ -31,7 +31,7 @@ xcoding session rollback <session-id> <restore-point-id> --workspace <path>
 xcoding session cancel <session-id> --workspace <path>
 ```
 
-`session show` 会以 JSON 输出已保存的会话详情，其中包含审批/拒绝需要的 action ID、回滚需要的 restore point ID，以及持久化的 `task_completed` 事件。任务完成摘要会列出唯一的已修改文件，并统计成功和失败的命令数量。
+`session show` 会以 JSON 输出已保存的会话详情，其中包含审批/拒绝需要的 action ID、回滚需要的 restore point ID，以及持久化的 `task_completed` 事件。任务完成摘要会列出唯一的已修改文件、成功和失败的命令数量；当工作区是 git 仓库时，还会附带完成时的 git_branch、git_status 与 git_diff 快照。
 
 ## 回滚
 

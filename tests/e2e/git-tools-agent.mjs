@@ -70,6 +70,14 @@ async function main() {
     assert.ok(diffTool, "diff tool result refeeded");
     assert.match(diffTool.content ?? "", /hello world/);
 
+
+    const taskCompleted = rpc.events.find((event) => event.type === "task_completed");
+    assert.ok(taskCompleted, "expected task_completed event");
+    assert.ok(taskCompleted.summary?.git_branch, "expected git_branch in task summary");
+    assert.ok(taskCompleted.summary?.git_status, "expected git_status in task summary");
+    assert.match(taskCompleted.summary.git_status, /hello\.txt/);
+    assert.ok(taskCompleted.summary?.git_diff, "expected git_diff in task summary");
+    assert.match(taskCompleted.summary.git_diff, /hello world/);
     console.log("Git tools agent E2E passed.");
   } finally {
     await rpc.close();

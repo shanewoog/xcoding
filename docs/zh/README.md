@@ -17,9 +17,9 @@
 - 默认模式：`ask`
 - 可选模式：`auto-edit`
 
-## 下一步
+## 当前状态
 
-初始化 monorepo，并实现协议与 server 骨架。
+协议、server、CLI、Desktop、写闭环与 git 工具已可用。任务完成摘要会附带 git 状态/diff 快照。请从 [getting-started.md](./getting-started.md) 与 [session-safety.md](./session-safety.md) 开始使用。
 
 ## 其他语言
 

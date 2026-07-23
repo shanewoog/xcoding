@@ -95,6 +95,9 @@ export interface TaskSummary {
   commands_run: number;
   commands_succeeded: number;
   commands_failed: number;
+  git_branch?: string;
+  git_status?: string;
+  git_diff?: string;
 }
 
 export interface GetConfigParams {

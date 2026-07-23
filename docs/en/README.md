@@ -23,6 +23,10 @@ This directory contains the V1 design and operating documentation for XCoding.
 - default mode: `ask`
 - optional mode: `auto-edit`
 
+## Current Status
+
+Protocol, server, CLI, Desktop, write loop, and git tools are available. Task completion summaries include git status and diff snapshots when the workspace is a repository.
+
 ## Other Language
 
 - Chinese docs: [../zh/README.md](../zh/README.md)

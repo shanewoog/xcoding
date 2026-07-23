@@ -31,7 +31,7 @@ xcoding session rollback <session-id> <restore-point-id> --workspace <path>
 xcoding session cancel <session-id> --workspace <path>
 ```
 
-`session show` prints stored session detail as JSON. It includes action IDs needed for approval or rejection, restore point IDs needed for rollback, and the persisted `task_completed` event. The completion summary reports unique changed files and successful or failed command counts.
+`session show` prints stored session detail as JSON. It includes action IDs needed for approval or rejection, restore point IDs needed for rollback, and the persisted `task_completed` event. The completion summary reports unique changed files, successful or failed command counts, and when the workspace is a git repository, optional git_branch, git_status, and git_diff snapshots captured at completion.
 
 ## Rollback
 

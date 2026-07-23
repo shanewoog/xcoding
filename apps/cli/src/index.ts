@@ -262,12 +262,25 @@ function printEvent(event: SessionEvent): void {
     case "session_cancelled":
       process.stderr.write(`${event.message}\n`);
       return;
-    case "task_completed":
+    case "task_completed": {
       process.stderr.write(
         `Task complete: ${event.summary.changed_files.length} changed file(s); ` +
         `${event.summary.commands_succeeded}/${event.summary.commands_run} command(s) succeeded.\n`,
       );
+      if (event.summary.changed_files.length > 0) {
+        process.stderr.write(`Changed: ${event.summary.changed_files.join(", ")}\n`);
+      }
+      if (event.summary.git_branch) {
+        process.stderr.write(`Git branch: ${event.summary.git_branch}\n`);
+      }
+      if (event.summary.git_status) {
+        process.stderr.write(`Git status:\n${event.summary.git_status}\n`);
+      }
+      if (event.summary.git_diff) {
+        process.stderr.write(`Git diff:\n${event.summary.git_diff}\n`);
+      }
       return;
+    }
     case "error":
       process.stderr.write(`Error: ${event.message}\n`);
       return;

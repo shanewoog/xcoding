@@ -178,6 +178,9 @@ impl CoreService {
             commands_run,
             commands_succeeded,
             commands_failed,
+            git_branch: None,
+            git_status: None,
+            git_diff: None,
         })
     }
 
@@ -738,6 +741,9 @@ mod tests {
                 commands_run: 2,
                 commands_succeeded: 1,
                 commands_failed: 1,
+                git_branch: None,
+                git_status: None,
+                git_diff: None,
             }
         );
     }

@@ -269,6 +269,12 @@ pub struct TaskSummary {
     pub commands_run: u32,
     pub commands_succeeded: u32,
     pub commands_failed: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_diff: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
