@@ -67,6 +67,7 @@ async function runDeterministic() {
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-tools-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-auth-error.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-status.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/doctor.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/surface-parity.mjs")]);
   console.log("Deterministic acceptance passed.");
 }

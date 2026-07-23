@@ -60,3 +60,7 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 ```
 
 `OPENAI_API_KEY` 仅保留在启动 CLI 或 Desktop 的进程环境中，RPC 协议不接受任何凭据字段。
+
+## 命令策略
+
+所有 `run_command` 在执行前都需要审批。策略引擎会硬拒绝明显危险的系统命令（例如 `format`、`shutdown`、`git clean -fdx`），并对 shell / force-push 等高风险调用在审批摘要中标注 **HIGH-RISK**。

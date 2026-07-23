@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
-use xcoding_policy::{PermissionDecision, PermissionKind, evaluate};
+use xcoding_policy::{PermissionDecision, PermissionKind, assess_command, evaluate};
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
@@ -104,7 +104,14 @@ impl ToolRegistry {
                 let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
                 Ok((PermissionKind::Write, is_high_risk_path(&args.path)))
             }
-            ToolName::RunCommand => Ok((PermissionKind::Exec, false)),
+            ToolName::RunCommand => {
+                let args: RunCommandArgs = parse_arguments(&tool_call.arguments)?;
+                let assessment = assess_command(&args.executable, &args.args);
+                if assessment.decision == PermissionDecision::Deny {
+                    return Err(ToolError::InvalidCommand(assessment.reason));
+                }
+                Ok((PermissionKind::Exec, assessment.high_risk))
+            }
         }
     }
 
@@ -346,15 +353,9 @@ impl ToolRegistry {
         args: RunCommandArgs,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<ToolExecution, ToolError> {
-        if args.executable.trim().is_empty() {
-            return Err(ToolError::InvalidCommand(
-                "executable must not be empty".to_owned(),
-            ));
-        }
-        if Path::new(&args.executable).is_absolute() {
-            return Err(ToolError::InvalidCommand(
-                "absolute executable paths are not allowed".to_owned(),
-            ));
+        let assessment = assess_command(&args.executable, &args.args);
+        if assessment.decision == PermissionDecision::Deny {
+            return Err(ToolError::InvalidCommand(assessment.reason));
         }
 
         let mut child = Command::new(&args.executable)
@@ -818,7 +819,7 @@ mod tests {
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
-    #[test]
+
     #[test]
     fn reports_git_status_and_diff_for_workspace_changes() {
         let root = workspace();
@@ -887,6 +888,7 @@ mod tests {
         fs::remove_dir_all(root).expect("workspace removes");
     }
 
+    #[test]
     fn rolls_back_patches_only_when_the_applied_text_is_unchanged() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("registry starts");
@@ -954,4 +956,40 @@ mod tests {
         assert!(matches!(result, Err(ToolError::Cancelled)));
         fs::remove_dir_all(root).expect("workspace removes");
     }
+
+    #[test]
+    fn rejects_blocked_commands_before_spawn() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let error = tools
+            .permission_for(&ToolCall {
+                id: "1".to_owned(),
+                name: ToolName::RunCommand,
+                arguments: json!({ "executable": "format", "args": ["C:"] }),
+            })
+            .expect_err("blocked");
+        match error {
+            ToolError::InvalidCommand(message) => assert!(message.contains("blocked")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn marks_high_risk_shell_commands() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let (kind, high_risk) = tools
+            .permission_for(&ToolCall {
+                id: "1".to_owned(),
+                name: ToolName::RunCommand,
+                arguments: json!({
+                    "executable": "powershell",
+                    "args": ["-Command", "Get-ChildItem"]
+                }),
+            })
+            .expect("askable");
+        assert_eq!(kind, xcoding_policy::PermissionKind::Exec);
+        assert!(high_risk);
+    }
+
 }

@@ -68,6 +68,10 @@ async function main(): Promise<void> {
         }
         return;
       }
+      case "doctor": {
+        await runDoctorCommand(client, workspace, option(args, "--server") ?? defaultServerPath);
+        return;
+      }
       case "session":
         await runSessionCommand(client, workspace, args);
         return;
@@ -366,18 +370,117 @@ async function loadDotEnvFiles(): Promise<void> {
       ) {
         value = value.slice(1, -1);
       }
-      if (!process.env[key]) {
+      if (process.env[key] === undefined) {
         process.env[key] = value;
       }
     }
   }
 }
+
+async function runDoctorCommand(
+  client: StdioRpcClient,
+  workspace: string,
+  serverPath: string,
+): Promise<void> {
+  const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+
+  checks.push({
+    name: "workspace",
+    ok: existsSync(workspace),
+    detail: workspace,
+  });
+
+  checks.push({
+    name: "server_binary",
+    ok: existsSync(serverPath),
+    detail: serverPath,
+  });
+
+  try {
+    const ping = await client.request<PingResult>("system.ping", {});
+    checks.push({
+      name: "core_rpc",
+      ok: Boolean(ping.ok),
+      detail: "version " + ping.version,
+    });
+  } catch (error) {
+    checks.push({
+      name: "core_rpc",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    const status = await client.request<ProviderAuthStatus>("provider.status", {});
+    checks.push({
+      name: "provider_auth",
+      ok: Boolean(status.ready),
+      detail: status.ready
+        ? status.base_url + " key=" + (status.key_hint ?? "set")
+        : status.message,
+    });
+  } catch (error) {
+    checks.push({
+      name: "provider_auth",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    const config = await client.request<GetConfigResult>("config.get", {
+      workspace_root: workspace,
+    });
+    checks.push({
+      name: "workspace_config",
+      ok: true,
+      detail:
+        "mode=" +
+        config.config.mode +
+        " provider=" +
+        config.config.provider +
+        " model=" +
+        config.config.model,
+    });
+  } catch (error) {
+    checks.push({
+      name: "workspace_config",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  let gitOk = false;
+  let gitDetail = "git not found on PATH";
+  try {
+    const { spawnSync } = await import("node:child_process");
+    const result = spawnSync("git", ["--version"], { encoding: "utf8" });
+    gitOk = result.status === 0;
+    gitDetail = (result.stdout || result.stderr || "").trim() || gitDetail;
+  } catch (error) {
+    gitDetail = error instanceof Error ? error.message : String(error);
+  }
+  checks.push({ name: "git", ok: gitOk, detail: gitDetail });
+
+  const report = {
+    ready: checks.every((check) => check.ok),
+    workspace,
+    checks,
+  };
+  console.log(JSON.stringify(report, null, 2));
+  if (!report.ready) {
+    process.exitCode = 2;
+  }
+}
+
 function printUsage(): void {
   console.log(`XCoding CLI
 
 Usage:
   xcoding ping [--workspace <path>] [--server <path>]
   xcoding auth [--workspace <path>] [--server <path>]
+  xcoding doctor [--workspace <path>] [--server <path>]
   xcoding config show [--workspace <path>]
   xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>]
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]

@@ -376,7 +376,14 @@ impl<'a> AgentService<'a> {
                     },
                 );
 
-                let (kind, high_risk) = tools.permission_for(&tool_call)?;
+                let (kind, high_risk) = match tools.permission_for(&tool_call) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let output = self.record_tool_error(session, &tool_call, error, on_event)?;
+                        messages.push(ChatMessage::tool_result(&tool_call.id, output));
+                        continue;
+                    }
+                };
                 match evaluate(&session.mode, kind, high_risk) {
                     PermissionDecision::Allow => {
                         let output = self
@@ -659,8 +666,57 @@ fn truncate_summary_text(value: &str, max_chars: usize) -> String {
 
 fn approval_summary(tool_call: &ToolCall) -> String {
     match tool_call.name {
-        ToolName::ApplyPatch => "Review and approve the proposed patch".to_owned(),
-        ToolName::RunCommand => "Review and approve the requested command".to_owned(),
+        ToolName::ApplyPatch => {
+            let path = tool_call
+                .arguments
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<file>");
+            format!("Review and approve the proposed patch for {path}")
+        }
+        ToolName::RunCommand => {
+            let executable = tool_call
+                .arguments
+                .get("executable")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<command>");
+            let args = tool_call
+                .arguments
+                .get("args")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            let rendered = if args.is_empty() {
+                executable.to_owned()
+            } else {
+                format!("{executable} {args}")
+            };
+            let assessment = xcoding_policy::assess_command(
+                executable,
+                &tool_call
+                    .arguments
+                    .get("args")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            );
+            if assessment.high_risk {
+                format!("Review HIGH-RISK command: {rendered}")
+            } else {
+                format!("Review and approve command: {rendered}")
+            }
+        }
         _ => format!("Review {}", tool_call.name.as_str()),
     }
 }

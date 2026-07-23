@@ -99,6 +99,29 @@ pnpm cli -- auth --workspace .
 
 Desktop shows the same readiness state (ready / API key missing, base URL, masked key hint) in the left settings panel.
 
+## Environment Doctor
+
+Check workspace, server binary, core RPC, cloud credentials, workspace config, and git in one shot:
+
+`powershell
+pnpm cli -- doctor --workspace .
+`
+
+Prints JSON. Exit code is 2 when 
+eady is false.
+
+## Command Safety Policy
+
+
+un_command always requires human approval (including uto-edit).
+The policy engine also:
+
+- **Hard-denies** commands such as ormat, shutdown, git clean -fdx, and absolute executables
+- **Flags high-risk** shells/network-style helpers such as powershell -Command, cmd /c, git push --force, and 
+pm publish
+
+Hard-denied commands never enter the approval queue; they return a tool error to the model.
+
 ## Next Reading
 
 - [Session Recovery And Safety](./session-safety.md)

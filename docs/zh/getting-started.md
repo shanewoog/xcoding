@@ -99,6 +99,29 @@ pnpm cli -- auth --workspace .
 
 Desktop 左侧设置区会显示同样的就绪状态（就绪 / 缺少 API key、Base URL、掩码后的 key 提示）。
 
+## 环境诊断
+
+一键检查工作区、server 二进制、核心 RPC、云模型凭据、工作区配置和 git：
+
+`powershell
+pnpm cli -- doctor --workspace .
+`
+
+返回 JSON。
+eady=false 时退出码为 2。
+
+## 命令安全策略
+
+
+un_command 始终需要人工批准（含 uto-edit）。
+策略引擎会额外：
+
+- **硬拒绝**：ormat / shutdown / git clean -fdx / 绝对路径可执行文件等
+- **高风险标注**：powershell -Command、cmd /c、git push --force、
+pm publish 等
+
+硬拒绝不会进入审批队列，会作为工具错误回传给模型。
+
 ## 延伸阅读
 
 - [会话恢复与安全](./session-safety.md)
