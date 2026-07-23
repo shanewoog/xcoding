@@ -7,8 +7,8 @@
   "scripts": {
     "build": "pnpm --filter @xcoding/protocol build && pnpm --filter @xcoding/client build && pnpm --filter @xcoding/cli build && pnpm --filter @xcoding/desktop build",
     "check": "pnpm --filter @xcoding/protocol build && pnpm --filter @xcoding/client build && pnpm --filter @xcoding/cli check && pnpm --filter @xcoding/desktop check",
-    "cli": "pnpm --filter @xcoding/cli exec node dist/index.js",
-    "desktop": "pnpm --filter @xcoding/desktop dev",
+    "cli": "node apps/cli/dist/index.js",
+    "desktop": "pnpm --dir apps/desktop dev",
     "test:e2e": "cargo build -p xcoding-server && node tests/e2e/read-only-agent.mjs && node tests/e2e/guarded-write-agent.mjs && node tests/e2e/running-cancel-agent.mjs"
   },
   "devDependencies": {

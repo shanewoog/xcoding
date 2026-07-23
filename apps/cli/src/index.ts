@@ -38,7 +38,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const workspace = option(args, "--workspace") ?? process.cwd();
+  const invocationCwd = process.env.INIT_CWD ?? process.cwd();
+  const workspace = resolve(invocationCwd, option(args, "--workspace") ?? ".");
   const databasePath = resolve(workspace, ".xcoding", "xcoding.db");
   await mkdir(dirname(databasePath), { recursive: true });
 
