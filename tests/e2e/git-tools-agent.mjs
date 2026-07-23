@@ -81,7 +81,7 @@ async function main() {
     assert.equal(mock.requests.length, 5);
     assert.deepEqual(
       mock.requests[0].tools.map((tool) => tool.function.name),
-      ["list_dir", "read_file", "search_code", "apply_patch", "run_command", "git_status", "git_diff", "git_log", "git_show", "git_add", "git_commit", "git_push"],
+      ["list_dir", "read_file", "search_code", "apply_patch", "run_command", "git_status", "git_diff", "git_log", "git_show", "git_add", "git_commit", "git_push", "git_fetch", "git_pull"],
     );
 
     const statusTool = mock.requests[1].messages.find(

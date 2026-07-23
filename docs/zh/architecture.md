@@ -192,6 +192,8 @@ V1 工具：
 | `git_add` | write (high-risk) | 暂存工作区路径（始终需要审批） |
 | `git_commit` | write (high-risk) | 创建提交（始终需要审批） |
 | `git_push` | write (high-risk) | 推送分支到远端（始终需要审批；不 force） |
+| `git_fetch` | write (high-risk) | 从远端 fetch（始终需要审批；不 force） |
+| `git_pull` | write (high-risk) | 从远端 pull（始终需要审批；默认 ff-only，不 force/rebase） |
 
 工具要求：
 

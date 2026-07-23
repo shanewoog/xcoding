@@ -118,8 +118,12 @@ impl ToolRegistry {
             | ToolName::GitDiff
             | ToolName::GitLog
             | ToolName::GitShow => Ok((PermissionKind::Read, false, false)),
-            ToolName::GitAdd | ToolName::GitCommit | ToolName::GitPush => {
-                // Mutates .git index/refs or pushes to a remote; always high-risk write.
+            ToolName::GitAdd
+            | ToolName::GitCommit
+            | ToolName::GitPush
+            | ToolName::GitFetch
+            | ToolName::GitPull => {
+                // Mutates .git index/refs or talks to a remote; always high-risk write.
                 Ok((PermissionKind::Write, true, false))
             }
             ToolName::ApplyPatch => {
@@ -194,6 +198,8 @@ impl ToolRegistry {
             ToolName::GitAdd => self.git_add(parse_arguments(&tool_call.arguments)?),
             ToolName::GitCommit => self.git_commit(parse_arguments(&tool_call.arguments)?),
             ToolName::GitPush => self.git_push(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitFetch => self.git_fetch(parse_arguments(&tool_call.arguments)?),
+            ToolName::GitPull => self.git_pull(parse_arguments(&tool_call.arguments)?),
         }
     }
 
@@ -952,6 +958,141 @@ impl ToolRegistry {
         })
     }
 
+
+    fn git_fetch(&self, args: GitFetchArgs) -> Result<ToolExecution, ToolError> {
+        let remote = args
+            .remote
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("origin");
+        validate_git_name("remote", remote)?;
+
+        let branch = args
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                validate_git_name("branch", value)?;
+                Ok::<_, ToolError>(value.to_owned())
+            })
+            .transpose()?;
+
+        let mut command = Command::new("git");
+        command.arg("fetch");
+        command.arg(remote);
+        if let Some(branch) = branch.as_deref() {
+            command.arg(branch);
+        }
+        command
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat");
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            let detail = if !stderr.trim().is_empty() {
+                truncate_output(stderr.trim())
+            } else if !stdout.trim().is_empty() {
+                truncate_output(stdout.trim())
+            } else {
+                format!("git fetch failed with exit code {:?}", output.status.code())
+            };
+            return Err(ToolError::InvalidCommand(detail));
+        }
+
+        Ok(ToolExecution {
+            output: json!({
+                "remote": remote,
+                "branch": branch,
+                "success": true,
+                "stdout": truncate_output(&stdout),
+                "stderr": truncate_output(&stderr),
+            }),
+            summary: match branch.as_deref() {
+                Some(branch) => format!("Fetched {branch} from {remote}"),
+                None => format!("Fetched from {remote}"),
+            },
+        })
+    }
+
+    fn git_pull(&self, args: GitPullArgs) -> Result<ToolExecution, ToolError> {
+        let remote = args
+            .remote
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("origin");
+        validate_git_name("remote", remote)?;
+
+        let ff_only = args.ff_only.unwrap_or(true);
+        let branch = if let Some(branch) = args.branch.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            validate_git_name("branch", branch)?;
+            branch.to_owned()
+        } else {
+            current_branch_name(&self.workspace_root)?
+        };
+
+        let mut command = Command::new("git");
+        command.arg("pull");
+        if ff_only {
+            command.arg("--ff-only");
+        } else {
+            // Explicit non-rebase merge pull only; never --rebase / --force.
+            command.arg("--no-rebase");
+        }
+        command
+            .arg(remote)
+            .arg(&branch)
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat");
+
+        let output = command.output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !output.status.success() {
+            let detail = if !stderr.trim().is_empty() {
+                truncate_output(stderr.trim())
+            } else if !stdout.trim().is_empty() {
+                truncate_output(stdout.trim())
+            } else {
+                format!("git pull failed with exit code {:?}", output.status.code())
+            };
+            return Err(ToolError::InvalidCommand(detail));
+        }
+
+        let head = git_rev_parse_head(&self.workspace_root).ok();
+        Ok(ToolExecution {
+            output: json!({
+                "remote": remote,
+                "branch": branch,
+                "ff_only": ff_only,
+                "head": head,
+                "success": true,
+                "stdout": truncate_output(&stdout),
+                "stderr": truncate_output(&stderr),
+            }),
+            summary: format!(
+                "Pulled {} from {}{}",
+                branch,
+                remote,
+                if ff_only { " (ff-only)" } else { " (no-rebase)" }
+            ),
+        })
+    }
+
     fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
         let parent = path.parent().expect("workspace file has a parent");
         fs::create_dir_all(parent)?;
@@ -1116,6 +1257,24 @@ struct GitPushArgs {
     branch: Option<String>,
     #[serde(default)]
     set_upstream: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitFetchArgs {
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitPullArgs {
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    ff_only: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -1329,7 +1488,7 @@ fn current_branch_name(workspace_root: &Path) -> Result<String, ToolError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
-            "failed to resolve current branch for git push".to_owned()
+            "failed to resolve current branch".to_owned()
         } else {
             truncate_output(stderr.trim())
         }));
@@ -1337,7 +1496,7 @@ fn current_branch_name(workspace_root: &Path) -> Result<String, ToolError> {
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if branch.is_empty() || branch == "HEAD" {
         return Err(ToolError::InvalidArguments(
-            "detached HEAD: pass branch explicitly for git_push".to_owned(),
+            "detached HEAD: pass branch explicitly".to_owned(),
         ));
     }
     validate_git_name("branch", &branch)?;
@@ -1853,6 +2012,30 @@ mod tests {
         assert!(high_risk);
         assert!(!allowlisted);
 
+        for (id, name, args) in [
+            (
+                "fetch_perm",
+                ToolName::GitFetch,
+                json!({ "remote": "origin" }),
+            ),
+            (
+                "pull_perm",
+                ToolName::GitPull,
+                json!({ "remote": "origin", "branch": "main" }),
+            ),
+        ] {
+            let (kind, high_risk, allowlisted) = tools
+                .permission_for(&ToolCall {
+                    id: id.to_owned(),
+                    name,
+                    arguments: args,
+                })
+                .expect("git fetch/pull permission");
+            assert_eq!(kind, PermissionKind::Write);
+            assert!(high_risk);
+            assert!(!allowlisted);
+        }
+
         // Even auto-edit must not auto-run high-risk git writes through execute().
         let denied = tools
             .execute(
@@ -1877,6 +2060,30 @@ mod tests {
             )
             .expect_err("auto-edit still denies unauthorized git push");
         assert!(matches!(denied_push, ToolError::PermissionDenied));
+
+        let denied_fetch = tools
+            .execute(
+                &Mode::AutoEdit,
+                &ToolCall {
+                    id: "fetch_denied".to_owned(),
+                    name: ToolName::GitFetch,
+                    arguments: json!({ "remote": "origin" }),
+                },
+            )
+            .expect_err("auto-edit still denies unauthorized git fetch");
+        assert!(matches!(denied_fetch, ToolError::PermissionDenied));
+
+        let denied_pull = tools
+            .execute(
+                &Mode::AutoEdit,
+                &ToolCall {
+                    id: "pull_denied".to_owned(),
+                    name: ToolName::GitPull,
+                    arguments: json!({ "remote": "origin", "branch": "main" }),
+                },
+            )
+            .expect_err("auto-edit still denies unauthorized git pull");
+        assert!(matches!(denied_pull, ToolError::PermissionDenied));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -2098,6 +2305,183 @@ mod tests {
         let _ = fs::remove_dir_all(&bare);
         fs::remove_dir_all(root).expect("workspace removes");
     }
+
+    #[test]
+    fn fetches_and_pulls_with_authorized_git_tools() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let bare = root.parent().unwrap().join(format!(
+            "{}_remote.git",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let peer = root.parent().unwrap().join(format!(
+            "{}_peer",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let init = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git init runs");
+        assert!(init.success());
+        let bare_init = Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&bare)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("bare init runs");
+        assert!(bare_init.success());
+        for (key, value) in [
+            ("user.email", "xcoding@example.com"),
+            ("user.name", "XCoding"),
+        ] {
+            let _ = Command::new("git")
+                .args(["config", key, value])
+                .current_dir(&root)
+                .status();
+        }
+        fs::write(root.join("hello.txt"), "hello\n").expect("file writes");
+        assert!(Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("commit")
+            .success());
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&bare)
+            .current_dir(&root)
+            .status()
+            .expect("remote add")
+            .success());
+        assert!(Command::new("git")
+            .args(["push", "--set-upstream", "origin", "main"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("initial push")
+            .success());
+
+        // Peer clone advances remote.
+        assert!(Command::new("git")
+            .args(["clone"])
+            .arg(&bare)
+            .arg(&peer)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("clone peer")
+            .success());
+        for (key, value) in [
+            ("user.email", "xcoding@example.com"),
+            ("user.name", "XCoding"),
+        ] {
+            let _ = Command::new("git")
+                .args(["config", key, value])
+                .current_dir(&peer)
+                .status();
+        }
+        fs::write(peer.join("hello.txt"), "hello from peer\n").expect("peer writes");
+        assert!(Command::new("git")
+            .args(["add", "hello.txt"])
+            .current_dir(&peer)
+            .status()
+            .expect("peer add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "peer advance"])
+            .current_dir(&peer)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("peer commit")
+            .success());
+        assert!(Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&peer)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("peer push")
+            .success());
+        let peer_head = git_rev_parse_head(&peer).expect("peer head");
+
+        let bad_remote = tools
+            .execute_authorized(&ToolCall {
+                id: "fetch_bad".to_owned(),
+                name: ToolName::GitFetch,
+                arguments: json!({ "remote": "--force" }),
+            })
+            .expect_err("flag remote rejected");
+        assert!(matches!(bad_remote, ToolError::InvalidArguments(_)));
+
+        let bad_branch = tools
+            .execute_authorized(&ToolCall {
+                id: "pull_branch".to_owned(),
+                name: ToolName::GitPull,
+                arguments: json!({ "branch": "main:refs/heads/evil" }),
+            })
+            .expect_err("refspec smuggling rejected");
+        assert!(matches!(bad_branch, ToolError::InvalidArguments(_)));
+
+        let fetched = tools
+            .execute_authorized(&ToolCall {
+                id: "fetch_ok".to_owned(),
+                name: ToolName::GitFetch,
+                arguments: json!({ "remote": "origin", "branch": "main" }),
+            })
+            .expect("git fetch authorized");
+        assert_eq!(fetched.output["success"], true);
+        assert_eq!(fetched.output["remote"], "origin");
+        assert_eq!(fetched.output["branch"], "main");
+        assert!(
+            fetched.summary.contains("Fetched"),
+            "summary={}",
+            fetched.summary
+        );
+
+        let pulled = tools
+            .execute_authorized(&ToolCall {
+                id: "pull_ok".to_owned(),
+                name: ToolName::GitPull,
+                arguments: json!({
+                    "remote": "origin",
+                    "branch": "main",
+                    "ff_only": true
+                }),
+            })
+            .expect("git pull authorized");
+        assert_eq!(pulled.output["success"], true);
+        assert_eq!(pulled.output["ff_only"], true);
+        assert_eq!(pulled.output["head"].as_str().unwrap(), peer_head);
+        assert!(
+            pulled.summary.contains("Pulled"),
+            "summary={}",
+            pulled.summary
+        );
+        let local_content = fs::read_to_string(root.join("hello.txt")).expect("read local");
+        assert_eq!(
+            local_content.replace("\r\n", "\n"),
+            "hello from peer\n"
+        );
+
+        let _ = fs::remove_dir_all(&peer);
+        let _ = fs::remove_dir_all(&bare);
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
 
     #[test]
     fn rolls_back_patches_only_when_the_applied_text_is_unchanged() {

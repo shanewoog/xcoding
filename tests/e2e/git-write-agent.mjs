@@ -143,6 +143,8 @@ async function main() {
         "git_add",
         "git_commit",
         "git_push",
+        "git_fetch",
+        "git_pull",
       ],
     );
 

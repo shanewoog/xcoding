@@ -709,7 +709,7 @@ Output:
 }
 ```
 
-## 6.6 `git_status` / `git_diff` / `git_log` / `git_show` / `git_add` / `git_commit` / `git_push`
+## 6.6 `git_status` / `git_diff` / `git_log` / `git_show` / `git_add` / `git_commit` / `git_push` / `git_fetch` / `git_pull`
 
 Read-only helpers for context, history, and final summaries.
 
@@ -912,6 +912,68 @@ Output:
 ```
 
 Auth / network failures surface as tool errors via git stderr (for example missing credentials or rejected non-fast-forward).
+
+
+### `git_fetch`
+
+Fetch updates from a remote. Always classified as **high-risk write** (updates local remote-tracking refs). Both `ask` and `auto-edit` require approval. No force or dangerous prune flags.
+
+Input:
+
+```json
+{
+  "remote": "origin",
+  "branch": "main"
+}
+```
+
+- `remote` optional; defaults to `origin`. Must be a single remote name (no leading `-`, no whitespace, no `:` / `..`).
+- `branch` optional; when omitted, fetch the remote's configured defaults (usually all tracked branches).
+
+Output:
+
+```json
+{
+  "remote": "origin",
+  "branch": "main",
+  "success": true,
+  "stdout": "…",
+  "stderr": "…"
+}
+```
+
+### `git_pull`
+
+Pull and update the working branch from a remote. Always classified as **high-risk write**. Both `ask` and `auto-edit` require approval. Defaults to `--ff-only`; when `ff_only` is false, only a `--no-rebase` merge pull is allowed. Never force or rebase.
+
+Input:
+
+```json
+{
+  "remote": "origin",
+  "branch": "main",
+  "ff_only": true
+}
+```
+
+- `remote` optional; defaults to `origin`.
+- `branch` optional; defaults to the current branch. Detached HEAD requires an explicit branch.
+- `ff_only` optional; defaults to true.
+
+Output:
+
+```json
+{
+  "remote": "origin",
+  "branch": "main",
+  "ff_only": true,
+  "head": "abc123…",
+  "success": true,
+  "stdout": "…",
+  "stderr": "…"
+}
+```
+
 
 ## 7. Permission Evaluation Rules
 

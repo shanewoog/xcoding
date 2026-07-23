@@ -192,6 +192,8 @@ V1 tools:
 | `git_add` | write (high-risk) | stage workspace paths (always requires approval) |
 | `git_commit` | write (high-risk) | create a commit (always requires approval) |
 | `git_push` | write (high-risk) | push branch to remote (always requires approval; no force) |
+| `git_fetch` | write (high-risk) | fetch from remote (always requires approval; no force) |
+| `git_pull` | write (high-risk) | pull from remote (always requires approval; default ff-only; no force/rebase) |
 
 Tool requirements:
 

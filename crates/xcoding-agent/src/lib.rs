@@ -796,6 +796,48 @@ fn approval_summary(tool_call: &ToolCall) -> String {
                 .unwrap_or("<current-branch>");
             format!("Review HIGH-RISK git push: {remote} {branch}")
         }
+        ToolName::GitFetch => {
+            let remote = tool_call
+                .arguments
+                .get("remote")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("origin");
+            let branch = tool_call
+                .arguments
+                .get("branch")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("<all>");
+            format!("Review HIGH-RISK git fetch: {remote} {branch}")
+        }
+        ToolName::GitPull => {
+            let remote = tool_call
+                .arguments
+                .get("remote")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("origin");
+            let branch = tool_call
+                .arguments
+                .get("branch")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("<current-branch>");
+            let ff_only = tool_call
+                .arguments
+                .get("ff_only")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true);
+            format!(
+                "Review HIGH-RISK git pull: {remote} {branch}{}",
+                if ff_only { " (ff-only)" } else { " (no-rebase)" }
+            )
+        }
         _ => format!("Review {}", tool_call.name.as_str()),
     }
 }
@@ -862,6 +904,16 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             description: "Push the current or specified branch to a remote. Always requires approval. Does not force-push; rejects force-like remotes/branches.".to_owned(),
             parameters: json!({ "type": "object", "properties": { "remote": { "type": "string", "description": "Remote name; defaults to origin" }, "branch": { "type": "string", "description": "Branch to push; defaults to the current branch" }, "set_upstream": { "type": "boolean", "description": "Pass --set-upstream; defaults to false" } } }),
         },
+        ToolDefinition {
+            name: "git_fetch".to_owned(),
+            description: "Fetch from a remote (optionally one branch). Always requires approval. Does not force, prune, or rewrite history.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "remote": { "type": "string", "description": "Remote name; defaults to origin" }, "branch": { "type": "string", "description": "Optional single branch to fetch" } } }),
+        },
+        ToolDefinition {
+            name: "git_pull".to_owned(),
+            description: "Pull a branch from a remote. Always requires approval. Defaults to --ff-only; when ff_only is false uses --no-rebase only. Never force or rebase.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "remote": { "type": "string", "description": "Remote name; defaults to origin" }, "branch": { "type": "string", "description": "Branch to pull; defaults to the current branch" }, "ff_only": { "type": "boolean", "description": "Use --ff-only (default true). When false, use --no-rebase merge pull." } } }),
+        },
     ]
 }
 
@@ -919,7 +971,9 @@ mod tests {
                 "git_show",
                 "git_add",
                 "git_commit",
-                "git_push"
+                "git_push",
+                "git_fetch",
+                "git_pull"
             ]
         );
     }

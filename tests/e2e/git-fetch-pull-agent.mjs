@@ -11,10 +11,11 @@ const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcodin
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
 async function main() {
-  const fixtureRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-push-fixture-"));
-  const bareRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-push-remote-"));
-  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-git-push-"));
-  await prepareGitFixture(fixtureRoot, bareRoot);
+  const fixtureRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-fetch-pull-fixture-"));
+  const bareRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-fetch-pull-remote-"));
+  const peerRoot = await mkdtemp(resolve(tmpdir(), "xcoding-git-fetch-pull-peer-"));
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-git-fetch-pull-"));
+  await prepareGitFixture(fixtureRoot, bareRoot, peerRoot);
   const mock = await startMockProvider();
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
@@ -26,52 +27,84 @@ async function main() {
   });
 
   try {
-    // ask mode: git_push always requires approval
+    // ask mode: git_fetch always requires approval, then git_pull
     const started = await rpc.request("session.chat", {
       workspace_root: fixtureRoot,
-      message: "Push main to origin",
+      message: "Fetch and pull main from origin",
       model: "fixture-model",
       mode: "ask",
     });
     assert.equal(started.session.status, "need_user");
-    const pushApproval = latestApproval(rpc, started.session.id);
-    assert.equal(pushApproval.action.tool_call.name, "git_push");
-    assert.match(pushApproval.summary ?? "", /git push|HIGH-RISK/i);
+    const fetchApproval = latestApproval(rpc, started.session.id);
+    assert.equal(fetchApproval.action.tool_call.name, "git_fetch");
+    assert.match(fetchApproval.summary ?? "", /git fetch|HIGH-RISK/i);
+
+    const afterFetch = await rpc.request("session.resolve", {
+      session_id: started.session.id,
+      action_id: fetchApproval.action.id,
+      approved: true,
+    });
+    assert.equal(afterFetch.session.status, "need_user");
+    const pullApproval = latestApproval(rpc, started.session.id);
+    assert.equal(pullApproval.action.tool_call.name, "git_pull");
+    assert.match(pullApproval.summary ?? "", /git pull|HIGH-RISK/i);
 
     const completed = await rpc.request("session.resolve", {
       session_id: started.session.id,
-      action_id: pushApproval.action.id,
+      action_id: pullApproval.action.id,
       approved: true,
     });
     assert.equal(completed.session.status, "done");
-    assert.match(completed.message?.content ?? "", /push/i);
+    assert.match(completed.message?.content ?? "", /pull|fetch/i);
 
     assert.ok(
       rpc.events.some(
         (event) =>
           event.type === "tool_end" &&
-          event.tool_call?.name === "git_push" &&
+          event.tool_call?.name === "git_fetch" &&
           event.success === true,
       ),
-      "expected successful git_push tool_end",
+      "expected successful git_fetch tool_end",
+    );
+    assert.ok(
+      rpc.events.some(
+        (event) =>
+          event.type === "tool_end" &&
+          event.tool_call?.name === "git_pull" &&
+          event.success === true,
+      ),
+      "expected successful git_pull tool_end",
     );
 
     const localHead = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: fixtureRoot,
       encoding: "utf8",
     }).trim();
-    const remoteHead = execFileSync("git", ["--git-dir", bareRoot, "rev-parse", "main"], {
+    const peerHead = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: peerRoot,
       encoding: "utf8",
     }).trim();
-    assert.equal(remoteHead, localHead);
+    assert.equal(localHead, peerHead);
+    assert.equal(
+      execFileSync("git", ["show", "HEAD:hello.txt"], {
+        cwd: fixtureRoot,
+        encoding: "utf8",
+      }),
+      "hello from peer\n",
+    );
 
-    // auto-edit mode: still requires approval
-    await writeFile(resolve(fixtureRoot, "hello.txt"), "hello auto push\n", "utf8");
-    execFileSync("git", ["add", "hello.txt"], { cwd: fixtureRoot, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "auto push prep"], {
-      cwd: fixtureRoot,
+    // Advance remote again for auto-edit mode
+    await writeFile(resolve(peerRoot, "hello.txt"), "hello auto pull\n", "utf8");
+    execFileSync("git", ["add", "hello.txt"], { cwd: peerRoot, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "auto peer advance"], {
+      cwd: peerRoot,
       stdio: "ignore",
     });
+    execFileSync("git", ["push", "origin", "main"], { cwd: peerRoot, stdio: "ignore" });
+    const peerHead2 = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: peerRoot,
+      encoding: "utf8",
+    }).trim();
 
     await rpc.request("config.set", {
       workspace_root: fixtureRoot,
@@ -82,17 +115,26 @@ async function main() {
 
     const autoStarted = await rpc.request("session.chat", {
       workspace_root: fixtureRoot,
-      message: "Push the new commit",
+      message: "Fetch and pull again",
       model: "fixture-model",
     });
     assert.equal(autoStarted.session.mode, "auto-edit");
     assert.equal(autoStarted.session.status, "need_user");
-    const autoPush = latestApproval(rpc, autoStarted.session.id);
-    assert.equal(autoPush.action.tool_call.name, "git_push");
+    const autoFetch = latestApproval(rpc, autoStarted.session.id);
+    assert.equal(autoFetch.action.tool_call.name, "git_fetch");
+
+    const autoAfterFetch = await rpc.request("session.resolve", {
+      session_id: autoStarted.session.id,
+      action_id: autoFetch.action.id,
+      approved: true,
+    });
+    assert.equal(autoAfterFetch.session.status, "need_user");
+    const autoPull = latestApproval(rpc, autoStarted.session.id);
+    assert.equal(autoPull.action.tool_call.name, "git_pull");
 
     const autoDone = await rpc.request("session.resolve", {
       session_id: autoStarted.session.id,
-      action_id: autoPush.action.id,
+      action_id: autoPull.action.id,
       approved: true,
     });
     assert.equal(autoDone.session.status, "done");
@@ -101,10 +143,7 @@ async function main() {
       cwd: fixtureRoot,
       encoding: "utf8",
     }).trim();
-    const remoteHead2 = execFileSync("git", ["--git-dir", bareRoot, "rev-parse", "main"], {
-      encoding: "utf8",
-    }).trim();
-    assert.equal(remoteHead2, localHead2);
+    assert.equal(localHead2, peerHead2);
 
     const tools = mock.requests.flatMap((payload) =>
       (payload.tools ?? []).map((tool) => tool.function?.name ?? tool.name),
@@ -128,12 +167,13 @@ async function main() {
       assert.ok(tools.includes(name), `expected tool definition ${name}`);
     }
 
-    console.log("Git push agent E2E passed.");
+    console.log("Git fetch/pull agent E2E passed.");
   } finally {
     await rpc.close();
     await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(peerRoot, { recursive: true, force: true });
     await rm(bareRoot, { recursive: true, force: true });
   }
 }
@@ -146,7 +186,7 @@ function latestApproval(rpc, sessionId) {
   return approvals[approvals.length - 1];
 }
 
-async function prepareGitFixture(root, bareRoot) {
+async function prepareGitFixture(root, bareRoot, peerRoot) {
   execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["init", "--bare", "-b", "main", bareRoot], { stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "xcoding@example.com"], {
@@ -158,21 +198,36 @@ async function prepareGitFixture(root, bareRoot) {
   execFileSync("git", ["add", "hello.txt"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
   execFileSync("git", ["remote", "add", "origin", bareRoot], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["push", "--set-upstream", "origin", "main"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+
+  execFileSync("git", ["clone", bareRoot, peerRoot], { stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "xcoding@example.com"], {
+    cwd: peerRoot,
+    stdio: "ignore",
+  });
+  execFileSync("git", ["config", "user.name", "XCoding"], { cwd: peerRoot, stdio: "ignore" });
+  await writeFile(resolve(peerRoot, "hello.txt"), "hello from peer\n", "utf8");
+  execFileSync("git", ["add", "hello.txt"], { cwd: peerRoot, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "peer advance"], { cwd: peerRoot, stdio: "ignore" });
+  execFileSync("git", ["push", "origin", "main"], { cwd: peerRoot, stdio: "ignore" });
 }
 
 function startRpcClient({ databasePath, environment }) {
   const child = spawn(serverPath, ["--db", databasePath], {
     cwd: repositoryRoot,
-    env: environment,
+    env: {
+      ...environment,
+    },
     stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
   });
+  let requestId = 0;
+  const pending = new Map();
   const events = [];
   let outputBuffer = "";
   let diagnostics = "";
-  let requestId = 0;
-  const pending = new Map();
-
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
     outputBuffer += chunk;
@@ -256,14 +311,39 @@ async function startMockProvider() {
                 tool_calls: [
                   {
                     index: 0,
-                    id: "call_git_push",
+                    id: "call_git_fetch",
                     type: "function",
                     function: {
-                      name: "git_push",
+                      name: "git_fetch",
                       arguments: JSON.stringify({
                         remote: "origin",
                         branch: "main",
-                        set_upstream: true,
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\n`,
+      );
+    } else if (lastTool.tool_call_id === "call_git_fetch") {
+      response.write(
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_git_pull",
+                    type: "function",
+                    function: {
+                      name: "git_pull",
+                      arguments: JSON.stringify({
+                        remote: "origin",
+                        branch: "main",
+                        ff_only: true,
                       }),
                     },
                   },
@@ -279,7 +359,7 @@ async function startMockProvider() {
           choices: [
             {
               delta: {
-                content: "Pushed main to origin with the approved git_push tool.",
+                content: "Fetched and pulled main from origin with approved git tools.",
               },
             },
           ],

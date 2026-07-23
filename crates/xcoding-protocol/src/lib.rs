@@ -197,6 +197,8 @@ pub enum ToolName {
     GitAdd,
     GitCommit,
     GitPush,
+    GitFetch,
+    GitPull,
 }
 
 impl ToolName {
@@ -214,6 +216,8 @@ impl ToolName {
             Self::GitAdd => "git_add",
             Self::GitCommit => "git_commit",
             Self::GitPush => "git_push",
+            Self::GitFetch => "git_fetch",
+            Self::GitPull => "git_pull",
         }
     }
 }
