@@ -71,6 +71,7 @@ async function runDeterministic() {
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-status.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/doctor.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-review.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-activity.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-layout.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-config.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/task-summary.mjs")]);

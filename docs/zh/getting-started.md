@@ -112,15 +112,15 @@ eady=false 时退出码为 2。
 
 ## 命令安全策略
 
+`run_command` 由模式、白名单与风险标注共同约束：
 
-un_command 始终需要人工批准（含 uto-edit）。
-策略引擎会额外：
-
-- **硬拒绝**：ormat / shutdown / git clean -fdx / 绝对路径可执行文件等
-- **高风险标注**：powershell -Command、cmd /c、git push --force、
-pm publish 等
+- **ask** — 每条命令都需要审批
+- **auto-edit** — 白名单内安全开发命令可自动执行；高风险与非白名单命令仍需审批
+- **硬拒绝**：format / shutdown / git clean -fdx / 绝对路径可执行文件等
+- **高风险标注**：powershell -Command、cmd /c、git push --force、pnpm publish 等
 
 硬拒绝不会进入审批队列，会作为工具错误回传给模型。
+即使在 auto-edit 下，`.git` / `.xcoding` 等高风险工作区写入也始终需要审批。
 
 ## 延伸阅读
 

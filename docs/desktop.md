@@ -37,7 +37,7 @@ The left **Defaults** panel stores workspace-scoped mode and model settings (pro
 Mode help text updates when you switch modes:
 
 - **ask** — propose patches and commands; both need approval
-- **auto-edit** — apply ordinary file patches automatically; **commands still need approval**
+- **auto-edit** — apply ordinary file patches and allowlisted safe commands automatically; **high-risk writes and other commands still need approval**
 
 **Diagnostics** is a client-side checklist (workspace path, provider auth, base URL, defaults). Green means ready enough to start a task; it does not replace `pnpm cli -- doctor` for deeper server checks.
 

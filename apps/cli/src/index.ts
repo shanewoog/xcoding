@@ -558,7 +558,7 @@ Dotenv:
 
 Mode policy:
   ask         Propose patches and commands; both need approval
-  auto-edit   Apply ordinary file patches automatically; commands still need approval
+  auto-edit   Apply ordinary patches and allowlisted safe commands automatically; high-risk and other commands need approval
 `);
 }
 

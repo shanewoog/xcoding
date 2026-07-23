@@ -7,7 +7,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 
 function modeHelpText(mode) {
   return mode === "auto-edit"
-    ? "Auto edit applies ordinary file patches automatically. Commands still need approval."
+    ? "Auto edit applies ordinary file patches and allowlisted safe commands automatically. High-risk writes and other commands still need approval."
     : "Ask proposes patches and commands for approval before applying.";
 }
 
@@ -98,9 +98,9 @@ async function main() {
   assert.ok(cliSource.includes("invalid mode:"), "CLI missing invalid mode error");
   assert.ok(cliSource.includes("Mode policy:"), "CLI help missing Mode policy");
   assert.ok(
-    cliSource.includes("Apply ordinary file patches automatically") ||
-      cliSource.includes("commands still need approval"),
-    "CLI Mode policy should describe auto-edit command approval",
+    cliSource.includes("allowlisted safe commands") ||
+      cliSource.includes("allowlisted safe command"),
+    "CLI Mode policy should describe auto-edit allowlist behavior",
   );
 
   assert.equal(isValidMode("ask"), true);
@@ -109,7 +109,8 @@ async function main() {
   assert.equal(formatModeOption("ask"), "Ask");
   assert.equal(formatModeOption("auto-edit"), "Auto edit");
   assert.match(modeHelpText("ask"), /approval/i);
-  assert.match(modeHelpText("auto-edit"), /Commands still need approval/i);
+  assert.match(modeHelpText("auto-edit"), /allowlisted safe commands/i);
+  assert.match(modeHelpText("auto-edit"), /High-risk writes and other commands still need approval/i);
 
   const blocked = buildDesktopDoctorChecks({
     workspaceRoot: "",

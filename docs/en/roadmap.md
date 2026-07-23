@@ -176,7 +176,7 @@ These tasks define "done" better than feature checklists.
 3. Fix a bug with reproduce-then-repair behavior
 4. Refactor a function without changing behavior
 5. In `ask` mode, require confirmation before write and exec
-6. In `auto-edit` mode, auto-write code but still confirm exec
+6. In `auto-edit` mode, auto-apply ordinary writes and allowlisted commands; still confirm high-risk / non-allowlisted exec
 7. Reject a proposed patch and ensure workspace stays correct
 8. Cancel a running task and persist cancelled state
 9. Replay a session and reconstruct major steps

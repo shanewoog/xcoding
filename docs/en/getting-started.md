@@ -112,15 +112,15 @@ eady is false.
 
 ## Command Safety Policy
 
+`run_command` is gated by mode, allowlist, and risk labels:
 
-un_command always requires human approval (including uto-edit).
-The policy engine also:
-
-- **Hard-denies** commands such as ormat, shutdown, git clean -fdx, and absolute executables
-- **Flags high-risk** shells/network-style helpers such as powershell -Command, cmd /c, git push --force, and 
-pm publish
+- **ask** — every command needs approval
+- **auto-edit** — allowlisted safe developer commands auto-run; high-risk and non-allowlisted commands still need approval
+- **Hard-denies** commands such as format, shutdown, git clean -fdx, and absolute executables
+- **Flags high-risk** shells/network-style helpers such as powershell -Command, cmd /c, git push --force, and pnpm publish
 
 Hard-denied commands never enter the approval queue; they return a tool error to the model.
+Ordinary high-risk workspace writes under `.git` / `.xcoding` always need approval, even in auto-edit.
 
 ## Next Reading
 

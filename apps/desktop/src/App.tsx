@@ -24,6 +24,8 @@ import type {
   ProviderAuthStatus,
   WorkspaceConfig,
 } from "@xcoding/protocol";
+import { activityPolicyBadge, buildActivity, eventActivity, mergeActivity } from "./activity";
+import type { ActivityItem } from "./activity";
 import { buildReviewPresentation, latestApprovalSummary } from "./review";
 import {
   buildDesktopDoctorChecks,
@@ -37,47 +39,12 @@ import {
   sessionMetaLine,
 } from "./layout";
 
-type Activity = {
-  id: string;
-  label: string;
-  detail: string;
-  state: "running" | "done" | "failed";
-};
-
 const defaultModel = "gpt-5.5";
 const defaultProvider = "openai";
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 
 function sessionTitle(session: Session): string {
   return session.title?.trim() || `${session.workspace_root.split(/[\\/]/).pop() || "Workspace"} session`;
-}
-
-function eventActivity(event: SessionEvent, sequence: string): Activity | null {
-  if (event.type === "tool_start") {
-    return { id: event.tool_call.id, label: event.summary, detail: JSON.stringify(event.tool_call.arguments), state: "running" };
-  }
-  if (event.type === "tool_end") {
-    return { id: event.tool_call.id, label: event.summary, detail: JSON.stringify(event.tool_call.arguments), state: event.success ? "done" : "failed" };
-  }
-  if (event.type === "restore_point_rolled_back") {
-    return { id: sequence, label: event.summary, detail: event.restore_point.path, state: "done" };
-  }
-  if (event.type === "session_cancelled") {
-    return { id: sequence, label: "Session cancelled", detail: event.message, state: "failed" };
-  }
-  if (event.type === "error") {
-    return { id: sequence, label: "Agent error", detail: event.message, state: "failed" };
-  }
-  return null;
-}
-
-function buildActivity(events: PersistedSessionEvent[]): Activity[] {
-  const items = new Map<string, Activity>();
-  for (const item of events) {
-    const activity = eventActivity(item.event, item.id);
-    if (activity) items.set(activity.id, activity);
-  }
-  return [...items.values()];
 }
 
 function latestPlan(events: PersistedSessionEvent[]): PlanStep[] {
@@ -181,7 +148,7 @@ export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamedText, setStreamedText] = useState("");
   const [plan, setPlan] = useState<PlanStep[]>([]);
-  const [activity, setActivity] = useState<Activity[]>([]);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [approvalSummary, setApprovalSummary] = useState<string | null>(null);
   const [patchPreview, setPatchPreview] = useState<PatchPreview | null>(null);
@@ -310,7 +277,10 @@ export function App() {
       if (nextActivity) {
         setActivity((current) => {
           const index = current.findIndex((item) => item.id === nextActivity.id);
-          return index < 0 ? [...current, nextActivity] : current.map((item) => item.id === nextActivity.id ? nextActivity : item);
+          if (index < 0) return [...current, nextActivity];
+          return current.map((item) =>
+            item.id === nextActivity.id ? mergeActivity(item, nextActivity) : item,
+          );
         });
       }
     }).then((stop) => { unlisten = stop; });
@@ -707,12 +677,18 @@ export function App() {
           <p className="panel-title">Activity{activity.length ? ` · ${activity.length}` : ""}</p>
           <div className="activity-list">
             {activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}
-            {activity.map((item) => (
-              <article className={`activity ${item.state}`} key={item.id}>
-                <strong>{item.label}</strong>
-                <code>{item.detail}</code>
-              </article>
-            ))}
+            {activity.map((item) => {
+              const badge = activityPolicyBadge(item.policy);
+              return (
+                <article className={`activity ${item.state} policy-${item.policy}`} key={item.id}>
+                  <div className="activity-header">
+                    {badge ? <span className={`activity-badge policy-${item.policy}`}>{badge}</span> : null}
+                    <strong>{item.label}</strong>
+                  </div>
+                  <code>{item.detail}</code>
+                </article>
+              );
+            })}
           </div>
         </section>
 

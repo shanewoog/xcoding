@@ -8,7 +8,7 @@ export type DesktopDoctorCheck = {
 
 export function modeHelpText(mode: Mode): string {
   return mode === "auto-edit"
-    ? "Auto edit applies ordinary file patches automatically. Commands still need approval."
+    ? "Auto edit applies ordinary file patches and allowlisted safe commands automatically. High-risk writes and other commands still need approval."
     : "Ask proposes patches and commands for approval before applying.";
 }
 

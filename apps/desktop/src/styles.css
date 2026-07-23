@@ -134,6 +134,24 @@ button:hover:not(:disabled) { background: #105851; }
 .activity.failed { border-color: #b13d3d; }
 .activity strong { color: #33404b; font-size: 0.83rem; }
 .activity code { color: #64717c; font-size: 0.72rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+.activity-header { align-items: center; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.activity-badge {
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 0.12rem 0.4rem;
+}
+.activity-badge.policy-auto-apply,
+.activity-badge.policy-auto-run { background: #dff3ea; color: #0f6b52; }
+.activity-badge.policy-awaiting { background: #fff1d6; color: #8a5a00; }
+.activity-badge.policy-blocked { background: #f0e4e4; color: #7a2f2f; }
+.activity-badge.policy-high-risk { background: #a84747; color: #fff; }
+.activity.policy-auto-apply,
+.activity.policy-auto-run { border-color: #2f9d78; }
+.activity.policy-awaiting { border-color: #d99929; }
+.activity.policy-blocked,
+.activity.policy-high-risk { border-color: #b13d3d; }
 
 @media (max-width: 920px) {
   .workbench { grid-template-columns: 220px minmax(0, 1fr); }
