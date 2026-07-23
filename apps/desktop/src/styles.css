@@ -250,3 +250,19 @@ button:hover:not(:disabled) { background: #105851; }
 .approve-risk-button:hover:not(:disabled) {
   background: #8c3434;
 }
+
+.summary-actions { display: flex; gap: 0.35rem; align-items: center; }
+.file-change-list { display: grid; gap: 0.35rem; margin: 0.15rem 0 0; padding-left: 0; list-style: none; }
+.file-change-list li { align-items: baseline; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.change-kind {
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0.08rem 0.42rem;
+  text-transform: uppercase;
+}
+.change-kind.created { background: #e7f6ec; color: #1f6b3a; }
+.change-kind.modified { background: #eef3ff; color: #2f4f9c; }
+.change-kind.deleted { background: #fdeceb; color: #9b2c2c; }
+.line-delta { color: #6a757f; font-size: 0.72rem; }

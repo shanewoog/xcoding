@@ -98,11 +98,23 @@ export interface WorkspaceConfig {
   updated_at: string;
 }
 
+export type FileChangeKind = "created" | "modified" | "deleted";
+
+export interface FileChangeSummary {
+  path: string;
+  kind: FileChangeKind;
+  lines_added: number;
+  lines_removed: number;
+}
+
 export interface TaskSummary {
   changed_files: string[];
+  file_changes?: FileChangeSummary[];
   commands_run: number;
   commands_succeeded: number;
   commands_failed: number;
+  lines_added?: number;
+  lines_removed?: number;
   git_branch?: string;
   git_status?: string;
   git_diff?: string;

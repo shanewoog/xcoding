@@ -263,12 +263,34 @@ pub struct WorkspaceConfig {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct FileChangeSummary {
+    pub path: String,
+    pub kind: FileChangeKind,
+    pub lines_added: u32,
+    pub lines_removed: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct TaskSummary {
     pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_changes: Vec<FileChangeSummary>,
     pub commands_run: u32,
     pub commands_succeeded: u32,
     pub commands_failed: u32,
+    #[serde(default)]
+    pub lines_added: u32,
+    #[serde(default)]
+    pub lines_removed: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

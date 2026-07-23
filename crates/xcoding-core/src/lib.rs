@@ -1,6 +1,6 @@
 //! XCoding's core request dispatcher and chat session lifecycle.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +13,7 @@ use xcoding_protocol::{
     CreateSessionResult, GetConfigParams, GetConfigResult, GetSessionDetailParams, GetSessionDetailResult, ReplaySessionParams, ReplaySessionResult, ReplayStep, JsonRpcRequest, JsonRpcResponse, ListSessionsParams,
     ListSessionsResult, Message, MessageRole, PendingAction, PendingActionStatus,
     PersistedSessionEvent, PingResult, RestorePoint, RpcError, Session, SessionDetail,
-    SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName,
+    SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, FileChangeKind, FileChangeSummary, TaskSummary, ToolCall, ToolName,
     WorkspaceConfig,
 };
 use xcoding_store::{SessionStore, StoreError};
@@ -147,14 +147,33 @@ impl CoreService {
 
     pub fn task_summary(&self, session_id: uuid::Uuid) -> Result<TaskSummary, CoreError> {
         self.session(session_id)?;
-        let changed_files = self
-            .store
-            .list_restore_points(session_id)?
-            .into_iter()
-            .map(|restore_point| restore_point.path)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
+        let mut latest_by_path = BTreeMap::<String, RestorePoint>::new();
+        for restore_point in self.store.list_restore_points(session_id)? {
+            latest_by_path.insert(restore_point.path.clone(), restore_point);
+        }
+
+        let mut file_changes = Vec::new();
+        let mut lines_added = 0;
+        let mut lines_removed = 0;
+        for (path, restore_point) in latest_by_path {
+            let original = restore_point.original_text.as_deref().unwrap_or("");
+            let applied = restore_point.applied_text.as_deref().unwrap_or("");
+            let kind = classify_file_change(restore_point.original_text.as_deref(), applied);
+            let (added, removed) = line_change_counts(original, applied);
+            lines_added += added;
+            lines_removed += removed;
+            file_changes.push(FileChangeSummary {
+                path,
+                kind,
+                lines_added: added,
+                lines_removed: removed,
+            });
+        }
+        let changed_files = file_changes
+            .iter()
+            .map(|change| change.path.clone())
             .collect();
+
         let mut commands_run = 0;
         let mut commands_succeeded = 0;
         let mut commands_failed = 0;
@@ -175,9 +194,12 @@ impl CoreService {
         }
         Ok(TaskSummary {
             changed_files,
+            file_changes,
             commands_run,
             commands_succeeded,
             commands_failed,
+            lines_added,
+            lines_removed,
             git_branch: None,
             git_status: None,
             git_diff: None,
@@ -610,6 +632,46 @@ fn validate_workspace_root(workspace_root: &str) -> Result<(), CoreError> {
     }
     Ok(())
 }
+
+fn classify_file_change(original: Option<&str>, applied: &str) -> FileChangeKind {
+    match original {
+        None => {
+            if applied.is_empty() {
+                FileChangeKind::Modified
+            } else {
+                FileChangeKind::Created
+            }
+        }
+        Some(original) if original.is_empty() && !applied.is_empty() => FileChangeKind::Created,
+        Some(original) if !original.is_empty() && applied.is_empty() => FileChangeKind::Deleted,
+        Some(_) => FileChangeKind::Modified,
+    }
+}
+
+fn line_change_counts(original: &str, applied: &str) -> (u32, u32) {
+    let mut counts = HashMap::<&str, i32>::new();
+    if !original.is_empty() {
+        for line in original.lines() {
+            *counts.entry(line).or_default() -= 1;
+        }
+    }
+    if !applied.is_empty() {
+        for line in applied.lines() {
+            *counts.entry(line).or_default() += 1;
+        }
+    }
+
+    let mut added = 0u32;
+    let mut removed = 0u32;
+    for delta in counts.values() {
+        if *delta > 0 {
+            added += *delta as u32;
+        } else if *delta < 0 {
+            removed += (-*delta) as u32;
+        }
+    }
+    (added, removed)
+}
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -738,14 +800,40 @@ mod tests {
             core.task_summary(session.id).expect("summary loads"),
             TaskSummary {
                 changed_files: vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()],
+                file_changes: vec![
+                    FileChangeSummary {
+                        path: "src/a.rs".to_owned(),
+                        kind: FileChangeKind::Modified,
+                        lines_added: 1,
+                        lines_removed: 1,
+                    },
+                    FileChangeSummary {
+                        path: "src/b.rs".to_owned(),
+                        kind: FileChangeKind::Created,
+                        lines_added: 1,
+                        lines_removed: 0,
+                    },
+                ],
                 commands_run: 2,
                 commands_succeeded: 1,
                 commands_failed: 1,
+                lines_added: 2,
+                lines_removed: 1,
                 git_branch: None,
                 git_status: None,
                 git_diff: None,
             }
         );
+
+        assert_eq!(
+            classify_file_change(None, "hello\n"),
+            FileChangeKind::Created
+        );
+        assert_eq!(
+            classify_file_change(Some("old\n"), ""),
+            FileChangeKind::Deleted
+        );
+        assert_eq!(line_change_counts("a\nb\n", "a\nc\n"), (1, 1));
     }
     #[test]
     fn persists_chat_lifecycle() {

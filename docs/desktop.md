@@ -26,3 +26,7 @@ Desktop uses the same guarded agent service as the CLI. The default mode is `ask
 ## High-risk command review
 
 When the agent proposes a shell-style or force-push command, Desktop shows a **HIGH-RISK** badge, the full command text, and a stronger approve button label. Hard-denied commands never reach this panel; they fail as tool errors instead.
+
+## Task completion summary
+
+When a task finishes, Desktop shows a completion panel with changed files (created/modified/deleted), approximate `+/-` line counts, command success/failure counts, and optional git status/diff snapshots. Use **Copy summary** for the full text report, or **Copy git** for only the git snapshot.

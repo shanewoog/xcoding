@@ -21,6 +21,7 @@ import type {
   ResolveActionResult,
   RollbackRestorePointResult,
   SessionEvent,
+  TaskSummary,
   SetConfigParams,
   SetConfigResult,
 } from "@xcoding/protocol";
@@ -197,8 +198,20 @@ async function runSessionCommand(
       console.log(`Session ${result.session.id}: ${result.session.status}`);
       return;
     }
+    case "summary": {
+      const sessionId = requiredArgument(args[1], "expected `session summary <session-id>`");
+      const result = await client.request<GetSessionDetailResult>("session.detail", { session_id: sessionId });
+      const summary = latestTaskSummary(result.detail.events);
+      if (!summary) {
+        console.log(`Session ${result.detail.session.id}: no task summary yet (status ${result.detail.session.status}).`);
+        return;
+      }
+      console.log(formatTaskSummary(summary, result.detail.session.id));
+      return;
+    }
     default:
-      throw new Error("expected `session create`, `session list`, `session show`, `session replay`, `session approve`, `session reject`, `session rollback`, or `session cancel`");
+      throw new Error("expected `session create`, `session list`, `session show`, `session summary`, `session replay`, `session approve`, `session reject`, `session rollback`, or `session cancel`");
+
   }
 }
 
@@ -289,22 +302,7 @@ function printEvent(event: SessionEvent): void {
       process.stderr.write(`${event.message}\n`);
       return;
     case "task_completed": {
-      process.stderr.write(
-        `Task complete: ${event.summary.changed_files.length} changed file(s); ` +
-        `${event.summary.commands_succeeded}/${event.summary.commands_run} command(s) succeeded.\n`,
-      );
-      if (event.summary.changed_files.length > 0) {
-        process.stderr.write(`Changed: ${event.summary.changed_files.join(", ")}\n`);
-      }
-      if (event.summary.git_branch) {
-        process.stderr.write(`Git branch: ${event.summary.git_branch}\n`);
-      }
-      if (event.summary.git_status) {
-        process.stderr.write(`Git status:\n${event.summary.git_status}\n`);
-      }
-      if (event.summary.git_diff) {
-        process.stderr.write(`Git diff:\n${event.summary.git_diff}\n`);
-      }
+      process.stderr.write(`${formatTaskSummary(event.summary)}\n`);
       return;
     }
     case "error":
@@ -484,6 +482,42 @@ async function runDoctorCommand(
   if (!report.ready) {
     process.exitCode = 2;
   }
+}
+
+function latestTaskSummary(events: GetSessionDetailResult["detail"]["events"]): TaskSummary | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index].event;
+    if (event.type === "task_completed") return event.summary;
+  }
+  return null;
+}
+
+function formatTaskSummary(summary: TaskSummary, sessionId?: string): string {
+  const lines: string[] = [];
+  if (sessionId) lines.push(`Session ${sessionId}`);
+  const added = summary.lines_added ?? 0;
+  const removed = summary.lines_removed ?? 0;
+  lines.push(
+    `Task complete: ${summary.changed_files.length} changed file(s), +${added}/-${removed} line(s); ` +
+      `${summary.commands_succeeded}/${summary.commands_run} command(s) succeeded` +
+      (summary.commands_failed ? `, ${summary.commands_failed} failed` : "") +
+      ".",
+  );
+  const fileChanges = summary.file_changes ?? [];
+  if (fileChanges.length > 0) {
+    lines.push("Files:");
+    for (const change of fileChanges) {
+      lines.push(
+        `  [${change.kind}] ${change.path} (+${change.lines_added}/-${change.lines_removed})`,
+      );
+    }
+  } else if (summary.changed_files.length > 0) {
+    lines.push(`Changed: ${summary.changed_files.join(", ")}`);
+  }
+  if (summary.git_branch) lines.push(`Git branch: ${summary.git_branch}`);
+  if (summary.git_status) lines.push(`Git status:\n${summary.git_status}`);
+  if (summary.git_diff) lines.push(`Git diff:\n${summary.git_diff}`);
+  return lines.join("\n");
 }
 
 function printUsage(): void {

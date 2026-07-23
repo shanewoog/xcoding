@@ -26,3 +26,7 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
 ## 高风险命令审批
 
 当 Agent 提出 shell 类或 force-push 命令时，Desktop 会显示 **HIGH-RISK** 标记、完整命令文本，以及更醒目的批准按钮文案。硬拒绝命令不会进入审批面板，而是作为工具错误返回给模型。
+
+## 任务完成摘要
+
+任务结束后，Desktop 会显示完成摘要面板：变更文件（created/modified/deleted）、近似 `+/-` 行数、命令成功/失败计数，以及可选的 git status/diff 快照。可用 **Copy summary** 复制完整文本，或 **Copy git** 仅复制 git 快照。

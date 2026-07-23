@@ -127,6 +127,35 @@ function gitSnapshotText(summary: TaskSummary): string {
     .join("\n\n");
 }
 
+function formatTaskSummaryText(summary: TaskSummary): string {
+  const added = summary.lines_added ?? 0;
+  const removed = summary.lines_removed ?? 0;
+  const lines: string[] = [
+    `Task complete: ${summary.changed_files.length} changed file(s), +${added}/-${removed} line(s)`,
+    `Commands: ${summary.commands_succeeded}/${summary.commands_run} succeeded` +
+      (summary.commands_failed ? `, ${summary.commands_failed} failed` : ""),
+  ];
+  const fileChanges = summary.file_changes ?? [];
+  if (fileChanges.length > 0) {
+    lines.push("Files:");
+    for (const change of fileChanges) {
+      lines.push(`  [${change.kind}] ${change.path} (+${change.lines_added}/-${change.lines_removed})`);
+    }
+  } else if (summary.changed_files.length > 0) {
+    lines.push(`Changed: ${summary.changed_files.join(", ")}`);
+  }
+  const git = gitSnapshotText(summary);
+  if (git) lines.push(git);
+  return lines.join("\n");
+}
+
+function fileChangeLabel(kind: string): string {
+  if (kind === "created") return "created";
+  if (kind === "deleted") return "deleted";
+  return "modified";
+}
+
+
 function mergeMessage(messages: Message[], message: Message): Message[] {
   return messages.some((current) => current.id === message.id) ? messages : [...messages, message];
 }
@@ -485,7 +514,7 @@ export function App() {
         <section><p className="panel-title">Plan</p><ol className="plan-list">{plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}{plan.map((step) => <li key={step.id}>{step.description}</li>)}</ol></section>
         <section><p className="panel-title">Restore points</p><div className="restore-list">{restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}{restorePoints.map((restorePoint) => <div className="restore-point" key={restorePoint.id}><div><strong>{restorePoint.path}</strong><small>{new Date(restorePoint.created_at).toLocaleString()}</small></div><button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button></div>)}</div></section>
         <section><p className="panel-title">Replay</p><div className="restore-list">{replaySteps.length === 0 ? <p className="empty-state">Load a finished session to reconstruct major steps.</p> : null}{replaySteps.map((step, index) => <div className="restore-point" key={`${step.kind}-${index}`}><div><strong>{step.kind}{step.tool_name ? ` · ${step.tool_name}` : ""}</strong><small>{step.summary}</small></div>{typeof step.success === "boolean" ? <code>{step.success ? "ok" : "fail"}</code> : null}</div>)}</div><button type="button" className="quiet-button" onClick={() => void loadReplay()} disabled={!activeSessionId || isRunning}>Replay steps</button></section>
-        {taskSummary ? <section className="task-summary"><div className="summary-header"><p className="panel-title">Task summary</p>{taskSummary.git_status || taskSummary.git_diff ? <button type="button" className="quiet-button" onClick={() => void copyText(gitSnapshotText(taskSummary))}>Copy git</button> : null}</div><strong>{taskSummary.changed_files.length} changed file(s)</strong><small>{taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded{taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}</small>{taskSummary.changed_files.length > 0 ? <ul>{taskSummary.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}{taskSummary.git_branch ? <small>Branch {taskSummary.git_branch}</small> : null}{taskSummary.git_status ? <details className="summary-details"><summary>Git status</summary><pre className="summary-pre">{taskSummary.git_status}</pre></details> : null}{taskSummary.git_diff ? <details className="summary-details"><summary>Git diff</summary><pre className="summary-pre">{taskSummary.git_diff}</pre></details> : null}</section> : null}
+        {taskSummary ? <section className="task-summary"><div className="summary-header"><p className="panel-title">Task summary</p><div className="summary-actions"><button type="button" className="quiet-button" onClick={() => void copyText(formatTaskSummaryText(taskSummary))}>Copy summary</button>{taskSummary.git_status || taskSummary.git_diff ? <button type="button" className="quiet-button" onClick={() => void copyText(gitSnapshotText(taskSummary))}>Copy git</button> : null}</div></div><strong>{taskSummary.changed_files.length} changed file(s){typeof taskSummary.lines_added === "number" || typeof taskSummary.lines_removed === "number" ? <> · +{taskSummary.lines_added ?? 0}/−{taskSummary.lines_removed ?? 0}</> : null}</strong><small>{taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded{taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}</small>{(taskSummary.file_changes?.length ?? 0) > 0 ? <ul className="file-change-list">{taskSummary.file_changes!.map((change) => <li key={change.path}><span className={`change-kind ${change.kind}`}>{fileChangeLabel(change.kind)}</span><code>{change.path}</code><small className="line-delta">+{change.lines_added}/−{change.lines_removed}</small></li>)}</ul> : taskSummary.changed_files.length > 0 ? <ul>{taskSummary.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}{taskSummary.git_branch ? <small>Branch {taskSummary.git_branch}</small> : null}{taskSummary.git_status ? <details className="summary-details"><summary>Git status</summary><pre className="summary-pre">{taskSummary.git_status}</pre></details> : null}{taskSummary.git_diff ? <details className="summary-details"><summary>Git diff</summary><pre className="summary-pre">{taskSummary.git_diff}</pre></details> : null}</section> : null}
         <section><p className="panel-title">Activity</p><div className="activity-list">{activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}{activity.map((item) => <article className={`activity ${item.state}`} key={item.id}><strong>{item.label}</strong><code>{item.detail}</code></article>)}</div></section>
       </aside>
     </main>
