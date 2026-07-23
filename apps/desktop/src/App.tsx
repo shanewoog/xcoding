@@ -92,6 +92,39 @@ function latestPatchPreview(events: PersistedSessionEvent[], action: PendingActi
   return null;
 }
 
+function buildPatchDiffLines(preview: PatchPreview): Array<{ kind: "add" | "remove" | "meta"; text: string }> {
+  const lines: Array<{ kind: "add" | "remove" | "meta"; text: string }> = [];
+  if (!preview.old_text) {
+    lines.push({ kind: "meta", text: "(new file)" });
+  } else {
+    for (const line of preview.old_text.split("\n")) {
+      lines.push({ kind: "remove", text: line });
+    }
+  }
+  for (const line of preview.new_text.split("\n")) {
+    lines.push({ kind: "add", text: line });
+  }
+  return lines;
+}
+
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Clipboard can fail outside secure contexts; ignore.
+  }
+}
+
+function gitSnapshotText(summary: TaskSummary): string {
+  return [
+    summary.git_branch ? `Branch: ${summary.git_branch}` : "",
+    summary.git_status ? `Status:\n${summary.git_status}` : "",
+    summary.git_diff ? `Diff:\n${summary.git_diff}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function mergeMessage(messages: Message[], message: Message): Message[] {
   return messages.some((current) => current.id === message.id) ? messages : [...messages, message];
 }
@@ -378,11 +411,11 @@ export function App() {
       </section>
 
       <aside className="trace-panel" aria-label="Agent trace">
-        {pendingAction ? <section className="review-panel"><p className="panel-title">Review</p><strong>{pendingAction.tool_call.name === "apply_patch" ? "Patch approval" : "Command approval"}</strong>{patchPreview ? <><code>{patchPreview.path}</code><pre className="diff-preview"><span>- {patchPreview.old_text || "(new file)"}</span><span>+ {patchPreview.new_text}</span></pre></> : <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code>}<div className="review-actions"><button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button><button type="button" onClick={() => void resolveAction(true)} disabled={isRunning}>Approve</button></div></section> : null}
+        {pendingAction ? <section className="review-panel"><p className="panel-title">Review</p><strong>{pendingAction.tool_call.name === "apply_patch" ? "Patch approval" : "Command approval"}</strong>{patchPreview ? <><code>{patchPreview.path}</code><pre className="diff-preview">{buildPatchDiffLines(patchPreview).map((line, index) => <span key={index} className={`diff-line ${line.kind}`}>{line.kind === "remove" ? `- ${line.text}` : line.kind === "add" ? `+ ${line.text}` : line.text}</span>)}</pre></> : <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code>}<div className="review-actions"><button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button><button type="button" onClick={() => void resolveAction(true)} disabled={isRunning}>Approve</button></div></section> : null}
         <section><p className="panel-title">Plan</p><ol className="plan-list">{plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}{plan.map((step) => <li key={step.id}>{step.description}</li>)}</ol></section>
         <section><p className="panel-title">Restore points</p><div className="restore-list">{restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}{restorePoints.map((restorePoint) => <div className="restore-point" key={restorePoint.id}><div><strong>{restorePoint.path}</strong><small>{new Date(restorePoint.created_at).toLocaleString()}</small></div><button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button></div>)}</div></section>
         <section><p className="panel-title">Replay</p><div className="restore-list">{replaySteps.length === 0 ? <p className="empty-state">Load a finished session to reconstruct major steps.</p> : null}{replaySteps.map((step, index) => <div className="restore-point" key={`${step.kind}-${index}`}><div><strong>{step.kind}{step.tool_name ? ` · ${step.tool_name}` : ""}</strong><small>{step.summary}</small></div>{typeof step.success === "boolean" ? <code>{step.success ? "ok" : "fail"}</code> : null}</div>)}</div><button type="button" className="quiet-button" onClick={() => void loadReplay()} disabled={!activeSessionId || isRunning}>Replay steps</button></section>
-        {taskSummary ? <section className="task-summary"><p className="panel-title">Task summary</p><strong>{taskSummary.changed_files.length} changed file(s)</strong><small>{taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded{taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}</small>{taskSummary.changed_files.length > 0 ? <ul>{taskSummary.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}{taskSummary.git_branch ? <small>Branch {taskSummary.git_branch}</small> : null}{taskSummary.git_status ? <pre className="summary-pre">{taskSummary.git_status}</pre> : null}{taskSummary.git_diff ? <pre className="summary-pre">{taskSummary.git_diff}</pre> : null}</section> : null}
+        {taskSummary ? <section className="task-summary"><div className="summary-header"><p className="panel-title">Task summary</p>{taskSummary.git_status || taskSummary.git_diff ? <button type="button" className="quiet-button" onClick={() => void copyText(gitSnapshotText(taskSummary))}>Copy git</button> : null}</div><strong>{taskSummary.changed_files.length} changed file(s)</strong><small>{taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded{taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}</small>{taskSummary.changed_files.length > 0 ? <ul>{taskSummary.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}{taskSummary.git_branch ? <small>Branch {taskSummary.git_branch}</small> : null}{taskSummary.git_status ? <details className="summary-details"><summary>Git status</summary><pre className="summary-pre">{taskSummary.git_status}</pre></details> : null}{taskSummary.git_diff ? <details className="summary-details"><summary>Git diff</summary><pre className="summary-pre">{taskSummary.git_diff}</pre></details> : null}</section> : null}
         <section><p className="panel-title">Activity</p><div className="activity-list">{activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}{activity.map((item) => <article className={`activity ${item.state}`} key={item.id}><strong>{item.label}</strong><code>{item.detail}</code></article>)}</div></section>
       </aside>
     </main>

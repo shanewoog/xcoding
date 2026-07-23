@@ -51,6 +51,12 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 
 模型请求需要 `OPENAI_API_KEY`。`XCODING_OPENAI_BASE_URL` 可用于设置 OpenAI 兼容服务的地址。XCoding 不会经由 RPC 协议传输密钥，也不会将密钥保存到工作区、会话数据库或 Desktop 设置中。
 
+若聊天返回 HTTP 401/403，或提示 `OPENAI_API_KEY is not set`，请检查：
+
+1. 启动 CLI/Desktop 的终端是否已导出有效的 `OPENAI_API_KEY`（或仓库根目录存在 `.env`）。
+2. 未使用默认网关时，`XCODING_OPENAI_BASE_URL` 是否指向正确的 OpenAI 兼容 `/v1` 地址。
+3. 该密钥是否被目标服务接受（错误信息会截断展示 provider 返回体，便于排查）。
+
 ## 使用 CLI
 
 ```powershell

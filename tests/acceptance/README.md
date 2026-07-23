@@ -17,6 +17,7 @@ Covers:
 - session replay steps
 - feature / bugfix / refactor write loops
 - CLI vs Desktop surface parity (static)
+- provider auth failure guidance (mock 401)
 
 ## Live cloud smoke (optional)
 

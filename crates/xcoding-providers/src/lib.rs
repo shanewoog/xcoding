@@ -93,11 +93,13 @@ pub struct ProviderFunctionCall {
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error("OPENAI_API_KEY is not set")]
+    #[error(
+        "OPENAI_API_KEY is not set. Set it in the environment or a repo-root .env file, and optionally set XCODING_OPENAI_BASE_URL for an OpenAI-compatible endpoint."
+    )]
     MissingApiKey,
     #[error("provider request failed: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("provider returned HTTP {status}: {body}")]
+    #[error("{}", format_http_status_message(status, body))]
     HttpStatus { status: StatusCode, body: String },
     #[error("invalid UTF-8 in provider stream: {0}")]
     Utf8(#[from] std::str::Utf8Error),
@@ -105,6 +107,35 @@ pub enum ProviderError {
     StreamJson(#[from] serde_json::Error),
     #[error("invalid tool call from provider: {0}")]
     InvalidToolCall(String),
+}
+
+fn format_http_status_message(status: &StatusCode, body: &str) -> String {
+    let truncated = truncate_provider_body(body, 280);
+    if *status == StatusCode::UNAUTHORIZED || *status == StatusCode::FORBIDDEN {
+        format!(
+            "Cloud provider authentication failed (HTTP {}). Check OPENAI_API_KEY and XCODING_OPENAI_BASE_URL. Provider response: {}",
+            status.as_u16(),
+            truncated
+        )
+    } else {
+        format!(
+            "Cloud provider request failed (HTTP {}). Check OPENAI_API_KEY and XCODING_OPENAI_BASE_URL if this looks like an auth or endpoint issue. Provider response: {}",
+            status.as_u16(),
+            truncated
+        )
+    }
+}
+
+fn truncate_provider_body(body: &str, max_chars: usize) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(empty body)".to_owned();
+    }
+    let mut truncated = trimmed.chars().take(max_chars).collect::<String>();
+    if trimmed.chars().count() > max_chars {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 pub struct OpenAiCompatibleProvider {
@@ -393,5 +424,40 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn missing_api_key_message_is_actionable() {
+        let message = ProviderError::MissingApiKey.to_string();
+        assert!(message.contains("OPENAI_API_KEY is not set"));
+        assert!(message.contains(".env"));
+        assert!(message.contains("XCODING_OPENAI_BASE_URL"));
+    }
+
+    #[test]
+    fn unauthorized_status_message_is_actionable() {
+        let message = ProviderError::HttpStatus {
+            status: StatusCode::UNAUTHORIZED,
+            body: r#"{"code":"INVALID_API_KEY","message":"Invalid API key"}"#.to_owned(),
+        }
+        .to_string();
+        assert!(message.contains("Cloud provider authentication failed (HTTP 401)"));
+        assert!(message.contains("OPENAI_API_KEY"));
+        assert!(message.contains("XCODING_OPENAI_BASE_URL"));
+        assert!(message.contains("INVALID_API_KEY"));
+    }
+
+    #[test]
+    fn non_auth_status_message_includes_truncated_body() {
+        let long_body = "x".repeat(400);
+        let message = ProviderError::HttpStatus {
+            status: StatusCode::BAD_GATEWAY,
+            body: long_body,
+        }
+        .to_string();
+        assert!(message.contains("Cloud provider request failed (HTTP 502)"));
+        assert!(message.contains("OPENAI_API_KEY"));
+        assert!(message.ends_with("..."));
+        assert!(message.len() < 500);
     }
 }
