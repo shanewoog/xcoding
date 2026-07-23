@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
-use xcoding_protocol::{CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, PingResult, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionDetail, SetConfigParams, WorkspaceConfig};
+use xcoding_protocol::{CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, PingResult, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, ReplaySessionResult, Session, SessionDetail, SetConfigParams, WorkspaceConfig};
 
 fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
@@ -50,6 +50,12 @@ fn set_workspace_config(
 fn session_detail(app: AppHandle, session_id: String) -> Result<SessionDetail, String> {
     let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
     open_core(&app)?.session_detail(session_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn session_replay(app: AppHandle, session_id: String) -> Result<ReplaySessionResult, String> {
+    let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
+    open_core(&app)?.session_replay(session_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -111,7 +117,7 @@ fn load_dotenv_files() {
 fn main() {
     load_dotenv_files();
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping, list_sessions, workspace_config, set_workspace_config, session_detail, chat, resolve_action, rollback_restore_point, cancel_session])
+        .invoke_handler(tauri::generate_handler![ping, list_sessions, workspace_config, set_workspace_config, session_detail, session_replay, chat, resolve_action, rollback_restore_point, cancel_session])
         .run(tauri::generate_context!())
         .expect("failed to run XCoding Desktop");
 }

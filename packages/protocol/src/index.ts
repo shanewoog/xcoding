@@ -64,6 +64,24 @@ export interface GetSessionDetailResult {
   detail: SessionDetail;
 }
 
+export interface ReplaySessionParams {
+  session_id: string;
+}
+
+export interface ReplayStep {
+  kind: string;
+  summary: string;
+  tool_name?: ToolName;
+  success?: boolean;
+}
+
+export interface ReplaySessionResult {
+  session: Session;
+  events: PersistedSessionEvent[];
+  steps: ReplayStep[];
+}
+
+
 export interface WorkspaceConfig {
   workspace_root: string;
   mode: Mode;

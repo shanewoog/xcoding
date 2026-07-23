@@ -36,8 +36,7 @@ function loadDotEnv() {
 
 function run(command, commandArgs, options = {}) {
   return new Promise((resolvePromise, reject) => {
-    // Do not use shell:true with absolute paths that contain spaces
-    // (Windows: C:\Program Files\nodejs\node.exe).
+    // Avoid shell:true with paths containing spaces on Windows.
     const child = spawn(command, commandArgs, {
       cwd: repositoryRoot,
       env: process.env,
@@ -63,6 +62,7 @@ async function runDeterministic() {
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/read-only-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/guarded-write-agent.mjs")]);
   await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/running-cancel-agent.mjs")]);
+  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/session-replay-agent.mjs")]);
   console.log("Deterministic acceptance passed.");
 }
 
@@ -93,9 +93,9 @@ async function main() {
   loadDotEnv();
   const summary = [
     "V1 acceptance matrix",
-    "- automated deterministic: tasks 1/5/6/7/8",
+    "- automated deterministic: tasks 1/5/6/7/8/9",
     "- live optional: task 1 smoke",
-    "- pending manual/live: tasks 2/3/4/9/10",
+    "- pending manual/live: tasks 2/3/4/10",
   ];
   console.log(summary.join("\n"));
 

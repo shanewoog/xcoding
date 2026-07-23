@@ -14,6 +14,8 @@ import type {
   PlanStep,
   ResolveActionResult,
   RestorePoint,
+  ReplaySessionResult,
+  ReplayStep,
   RollbackRestorePointResult,
   Session,
   SessionDetail,
@@ -109,6 +111,7 @@ export function App() {
   const [patchPreview, setPatchPreview] = useState<PatchPreview | null>(null);
   const [restorePoints, setRestorePoints] = useState<RestorePoint[]>([]);
   const [taskSummary, setTaskSummary] = useState<TaskSummary | null>(null);
+  const [replaySteps, setReplaySteps] = useState<ReplayStep[]>([]);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +162,7 @@ export function App() {
       setPatchPreview(latestPatchPreview(detail.events, pending));
       setRestorePoints(detail.restore_points);
       setTaskSummary(latestTaskSummary(detail.events));
+      setReplaySteps([]);
       setSessions((current) => current.some((session) => session.id === detail.session.id)
         ? current.map((session) => session.id === detail.session.id ? detail.session : session)
         : [detail.session, ...current]);
@@ -255,6 +259,17 @@ export function App() {
     }
   }
 
+  
+  async function loadReplay(): Promise<void> {
+    if (!activeSessionId || !isTauriRuntime) return;
+    setError(null);
+    try {
+      const replay = await invoke<ReplaySessionResult>("session_replay", { sessionId: activeSessionId });
+      setReplaySteps(replay.steps);
+    } catch (errorValue) {
+      setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
+    }
+  }
   async function rollbackRestorePoint(restorePoint: RestorePoint): Promise<void> {
     if (!activeSessionId || isRunning) return;
     setError(null);
@@ -358,6 +373,7 @@ export function App() {
         {pendingAction ? <section className="review-panel"><p className="panel-title">Review</p><strong>{pendingAction.tool_call.name === "apply_patch" ? "Patch approval" : "Command approval"}</strong>{patchPreview ? <><code>{patchPreview.path}</code><pre className="diff-preview"><span>- {patchPreview.old_text || "(new file)"}</span><span>+ {patchPreview.new_text}</span></pre></> : <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code>}<div className="review-actions"><button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button><button type="button" onClick={() => void resolveAction(true)} disabled={isRunning}>Approve</button></div></section> : null}
         <section><p className="panel-title">Plan</p><ol className="plan-list">{plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}{plan.map((step) => <li key={step.id}>{step.description}</li>)}</ol></section>
         <section><p className="panel-title">Restore points</p><div className="restore-list">{restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}{restorePoints.map((restorePoint) => <div className="restore-point" key={restorePoint.id}><div><strong>{restorePoint.path}</strong><small>{new Date(restorePoint.created_at).toLocaleString()}</small></div><button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button></div>)}</div></section>
+        <section><p className="panel-title">Replay</p><div className="restore-list">{replaySteps.length === 0 ? <p className="empty-state">Load a finished session to reconstruct major steps.</p> : null}{replaySteps.map((step, index) => <div className="restore-point" key={`${step.kind}-${index}`}><div><strong>{step.kind}{step.tool_name ? ` · ${step.tool_name}` : ""}</strong><small>{step.summary}</small></div>{typeof step.success === "boolean" ? <code>{step.success ? "ok" : "fail"}</code> : null}</div>)}</div><button type="button" className="quiet-button" onClick={() => void loadReplay()} disabled={!activeSessionId || isRunning}>Replay steps</button></section>
         {taskSummary ? <section className="task-summary"><p className="panel-title">Task summary</p><strong>{taskSummary.changed_files.length} changed file(s)</strong><small>{taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded{taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}</small>{taskSummary.changed_files.length > 0 ? <ul>{taskSummary.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}</section> : null}
         <section><p className="panel-title">Activity</p><div className="activity-list">{activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}{activity.map((item) => <article className={`activity ${item.state}`} key={item.id}><strong>{item.label}</strong><code>{item.detail}</code></article>)}</div></section>
       </aside>

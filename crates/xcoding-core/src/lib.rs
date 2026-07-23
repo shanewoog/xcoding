@@ -10,8 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateSessionParams,
-    CreateSessionResult, GetConfigParams, GetConfigResult, GetSessionDetailParams,
-    GetSessionDetailResult, JsonRpcRequest, JsonRpcResponse, ListSessionsParams,
+    CreateSessionResult, GetConfigParams, GetConfigResult, GetSessionDetailParams, GetSessionDetailResult, ReplaySessionParams, ReplaySessionResult, ReplayStep, JsonRpcRequest, JsonRpcResponse, ListSessionsParams,
     ListSessionsResult, Message, MessageRole, PendingAction, PendingActionStatus,
     PersistedSessionEvent, PingResult, RestorePoint, RpcError, Session, SessionDetail,
     SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName,
@@ -210,6 +209,15 @@ impl CoreService {
         })
     }
 
+    pub fn session_replay(&self, session_id: uuid::Uuid) -> Result<ReplaySessionResult, CoreError> {
+        let detail = self.session_detail(session_id)?;
+        Ok(ReplaySessionResult {
+            session: detail.session,
+            events: detail.events.clone(),
+            steps: build_replay_steps(&detail.events),
+        })
+    }
+
     pub fn restore_point(
         &self,
         session_id: uuid::Uuid,
@@ -380,6 +388,7 @@ impl CoreService {
             "session.create" => self.create_session(request.params),
             "session.list" => self.list_sessions_rpc(request.params),
             "session.detail" => self.session_detail_rpc(request.params),
+            "session.replay" => self.session_replay_rpc(request.params),
             "session.cancel" => self.cancel_session_rpc(request.params),
             "config.get" => self.config_get_rpc(request.params),
             "config.set" => self.config_set_rpc(request.params),
@@ -437,6 +446,16 @@ impl CoreService {
             .map_err(|error| RpcError::internal(error.to_string()))
     }
 
+    fn session_replay_rpc(&self, params: Value) -> Result<Value, RpcError> {
+        let params: ReplaySessionParams = serde_json::from_value(params).map_err(|error| {
+            RpcError::invalid_params(format!("invalid session.replay params: {error}"))
+        })?;
+        let replay = self
+            .session_replay(params.session_id)
+            .map_err(|error| RpcError::internal(error.to_string()))?;
+        serde_json::to_value(replay).map_err(|error| RpcError::internal(error.to_string()))
+    }
+
     fn config_get_rpc(&self, params: Value) -> Result<Value, RpcError> {
         let params: GetConfigParams = serde_json::from_value(params).map_err(|error| {
             RpcError::invalid_params(format!("invalid config.get params: {error}"))
@@ -478,6 +497,106 @@ impl CoreService {
         serde_json::to_value(CancelSessionResult { session })
             .map_err(|error| RpcError::internal(error.to_string()))
     }
+}
+
+fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
+    let mut steps = Vec::new();
+    for item in events {
+        match &item.event {
+            SessionEvent::Plan { steps: plan_steps, .. } => {
+                for plan in plan_steps {
+                    steps.push(ReplayStep {
+                        kind: "plan".to_owned(),
+                        summary: plan.description.clone(),
+                        tool_name: None,
+                        success: None,
+                    });
+                }
+            }
+            SessionEvent::ToolStart { tool_call, summary, .. } => {
+                steps.push(ReplayStep {
+                    kind: "tool_start".to_owned(),
+                    summary: summary.clone(),
+                    tool_name: Some(tool_call.name.clone()),
+                    success: None,
+                });
+            }
+            SessionEvent::ToolEnd { tool_call, success, summary, .. } => {
+                steps.push(ReplayStep {
+                    kind: "tool_end".to_owned(),
+                    summary: summary.clone(),
+                    tool_name: Some(tool_call.name.clone()),
+                    success: Some(*success),
+                });
+            }
+            SessionEvent::ApprovalRequested { summary, .. } => {
+                steps.push(ReplayStep {
+                    kind: "approval_requested".to_owned(),
+                    summary: summary.clone(),
+                    tool_name: None,
+                    success: None,
+                });
+            }
+            SessionEvent::PatchPreview { preview, .. } => {
+                steps.push(ReplayStep {
+                    kind: "patch_preview".to_owned(),
+                    summary: format!("Preview {}", preview.path),
+                    tool_name: Some(ToolName::ApplyPatch),
+                    success: None,
+                });
+            }
+            SessionEvent::RestorePointRolledBack { summary, .. } => {
+                steps.push(ReplayStep {
+                    kind: "restore_point_rolled_back".to_owned(),
+                    summary: summary.clone(),
+                    tool_name: None,
+                    success: Some(true),
+                });
+            }
+            SessionEvent::SessionCancelled { message, .. } => {
+                steps.push(ReplayStep {
+                    kind: "session_cancelled".to_owned(),
+                    summary: message.clone(),
+                    tool_name: None,
+                    success: Some(false),
+                });
+            }
+            SessionEvent::TaskCompleted { summary, .. } => {
+                steps.push(ReplayStep {
+                    kind: "task_completed".to_owned(),
+                    summary: format!(
+                        "changed={} commands={}/{}/{}",
+                        summary.changed_files.len(),
+                        summary.commands_run,
+                        summary.commands_succeeded,
+                        summary.commands_failed
+                    ),
+                    tool_name: None,
+                    success: Some(true),
+                });
+            }
+            SessionEvent::MessageCompleted { message, .. } => {
+                if message.role == MessageRole::Assistant {
+                    steps.push(ReplayStep {
+                        kind: "assistant_message".to_owned(),
+                        summary: message.content.clone(),
+                        tool_name: None,
+                        success: Some(true),
+                    });
+                }
+            }
+            SessionEvent::Error { message, .. } => {
+                steps.push(ReplayStep {
+                    kind: "error".to_owned(),
+                    summary: message.clone(),
+                    tool_name: None,
+                    success: Some(false),
+                });
+            }
+            SessionEvent::TextDelta { .. } => {}
+        }
+    }
+    steps
 }
 
 fn validate_workspace_root(workspace_root: &str) -> Result<(), CoreError> {
@@ -718,6 +837,66 @@ mod tests {
             core.cancel_session(session.id),
             Err(CoreError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn replays_major_steps_from_persisted_events() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Inspect settings".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+            })
+            .expect("chat starts");
+        core.record_event(&SessionEvent::Plan {
+            session_id: session.id,
+            steps: vec![PlanStep {
+                id: "inspect".to_owned(),
+                description: "Inspect settings".to_owned(),
+            }],
+        })
+        .expect("plan event");
+        core.record_event(&SessionEvent::ToolStart {
+            session_id: session.id,
+            tool_call: ToolCall {
+                id: "tool_1".to_owned(),
+                name: ToolName::ListDir,
+                arguments: json!({ "path": "." }),
+            },
+            summary: "List root".to_owned(),
+        })
+        .expect("tool start");
+        core.record_event(&SessionEvent::ToolEnd {
+            session_id: session.id,
+            tool_call: ToolCall {
+                id: "tool_1".to_owned(),
+                name: ToolName::ListDir,
+                arguments: json!({ "path": "." }),
+            },
+            success: true,
+            summary: "Listed .".to_owned(),
+        })
+        .expect("tool end");
+        let completed = core
+            .complete_chat(session.id, "Found settings module.")
+            .expect("chat completes");
+        core.record_event(&SessionEvent::MessageCompleted {
+            session_id: session.id,
+            message: completed.message.expect("assistant message"),
+        })
+        .expect("message completed event");
+
+        let replay = core.session_replay(session.id).expect("replay loads");
+        assert_eq!(replay.session.id, session.id);
+        assert!(!replay.events.is_empty());
+        assert!(replay.steps.iter().any(|step| step.kind == "plan"));
+        assert!(replay.steps.iter().any(|step| step.kind == "tool_start"));
+        assert!(replay.steps.iter().any(|step| step.kind == "tool_end"));
+        assert!(replay.steps.iter().any(|step| step.kind == "assistant_message"));
     }
 
     #[test]

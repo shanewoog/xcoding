@@ -14,6 +14,7 @@ Covers:
 - read-only grounded answer
 - guarded write / reject / auto-edit command gate
 - running cancel
+- session replay steps
 
 ## Live cloud smoke (optional)
 
@@ -37,9 +38,9 @@ Runs a short monorepo explanation chat against the configured OpenAI-compatible 
 | 6 | auto-edit writes, still gates commands | deterministic | automated |
 | 7 | Rejected patch leaves workspace clean | deterministic | automated |
 | 8 | Cancel running task | deterministic | automated |
-| 9 | Replay session steps | manual | pending |
+| 9 | Replay session steps | deterministic | automated |
 | 10 | CLI vs Desktop parity | manual | pending |
 
 ## 中文
 
-`pnpm test:acceptance` 会先跑确定性 e2e（无需云密钥）。加 `--live` 时再跑一次真实网关冒烟。完整 10 条验收矩阵中，写功能/修 bug/重构/回放/双端等价仍需后续任务补齐。
+`pnpm test:acceptance` 会先跑确定性 e2e（无需云密钥）。加 `--live` 时再跑一次真实网关冒烟。完整 10 条验收矩阵中，写功能/修 bug/重构/双端等价仍需后续任务补齐；会话回放（task 9）已由 `session.replay` + e2e 覆盖。

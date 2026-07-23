@@ -359,6 +359,29 @@ pub struct GetSessionDetailResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReplaySessionParams {
+    pub session_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReplayStep {
+    pub kind: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<ToolName>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReplaySessionResult {
+    pub session: Session,
+    pub events: Vec<PersistedSessionEvent>,
+    pub steps: Vec<ReplayStep>,
+}
+
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct GetConfigParams {
     pub workspace_root: String,
 }

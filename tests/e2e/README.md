@@ -15,3 +15,6 @@ The test starts the real `xcoding-server` binary, uses a local OpenAI-compatible
 - `running-cancel-agent.mjs`: mid-stream cancel, mid-command cancel, failed command refeed, auto-edit still gates commands.
 
 For the V1 acceptance matrix wrapper, see `tests/acceptance/README.md` and run `pnpm test:acceptance`.
+
+- 	ests/e2e/session-replay-agent.mjs — reconstruct session steps via session.replay.
+

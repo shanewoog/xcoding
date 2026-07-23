@@ -13,6 +13,7 @@ import type {
   CreateSessionResult,
   GetConfigResult,
   GetSessionDetailResult,
+  ReplaySessionResult,
   ListSessionsResult,
   PingResult,
   ResolveActionParams,
@@ -145,6 +146,16 @@ async function runSessionCommand(
       console.log(JSON.stringify(result.detail, null, 2));
       return;
     }
+    case "replay": {
+      const sessionId = requiredArgument(args[1], "expected `session replay <session-id>`");
+      const result = await client.request<ReplaySessionResult>("session.replay", { session_id: sessionId });
+      console.log(JSON.stringify({
+        session: result.session,
+        steps: result.steps,
+        event_count: result.events.length,
+      }, null, 2));
+      return;
+    }
     case "approve":
     case "reject": {
       const sessionId = requiredArgument(args[1], `expected session ${subcommand} <session-id> <action-id>`);
@@ -173,7 +184,7 @@ async function runSessionCommand(
       return;
     }
     default:
-      throw new Error("expected `session create`, `session list`, `session show`, `session approve`, `session reject`, `session rollback`, or `session cancel`");
+      throw new Error("expected `session create`, `session list`, `session show`, `session replay`, `session approve`, `session reject`, `session rollback`, or `session cancel`");
   }
 }
 
@@ -348,6 +359,7 @@ Usage:
   xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
   xcoding session list [--workspace <path>]
   xcoding session show <session-id> [--workspace <path>]
+  xcoding session replay <session-id> [--workspace <path>]
   xcoding session approve <session-id> <action-id> [--workspace <path>]
   xcoding session reject <session-id> <action-id> [--workspace <path>]
   xcoding session rollback <session-id> <restore-point-id> [--workspace <path>]
