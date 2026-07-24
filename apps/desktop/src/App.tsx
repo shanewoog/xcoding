@@ -520,6 +520,7 @@ export function App() {
     const continuing = canContinueSession(activeSession);
     setError(null);
     setIsRunning(true);
+    setPrompt("");
     if (!continuing) {
       setActiveSessionId(null);
       setMessages([]);
@@ -562,7 +563,6 @@ export function App() {
       setActiveSessionId(result.session.id);
       const completedMessage = result.message;
       if (completedMessage) setMessages((current) => mergeMessage(current, completedMessage));
-      setPrompt("");
       await refreshSessions();
       await hydrateSession(result.session.id);
       try {
