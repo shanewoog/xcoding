@@ -250,13 +250,36 @@ export function App() {
     }
   }, []);
 
-  const refreshModels = useCallback(async () => {
+  const maskApiKeyHint = useCallback((key: string): string | undefined => {
+    const trimmed = key.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.length <= 4) return "****";
+    return `...${trimmed.slice(-4)}`;
+  }, []);
+
+  const refreshModels = useCallback(async (): Promise<boolean> => {
+    const resolvedBase = baseUrl.trim() || "https://ai.v58.dev/v1";
     if (!isTauriRuntime) {
-      setModelsError(t(locale, "models.tauriOnly"));
-      return;
+      const message = t(locale, "models.tauriOnly");
+      setModelsError(message);
+      setProviderStatus({
+        ready: false,
+        has_api_key: Boolean(apiKey.trim()),
+        base_url: resolvedBase,
+        key_hint: maskApiKeyHint(apiKey),
+        message,
+      });
+      return false;
     }
     setModelsLoading(true);
     setModelsError(null);
+    setProviderStatus((current) => ({
+      ready: false,
+      has_api_key: Boolean(apiKey.trim() || current?.has_api_key),
+      base_url: resolvedBase,
+      key_hint: maskApiKeyHint(apiKey) || current?.key_hint,
+      message: t(locale, "auth.checking"),
+    }));
     try {
       const result = await invoke<ListModelsResult>("list_provider_models", {
         baseUrl: baseUrl.trim() || null,
@@ -273,13 +296,30 @@ export function App() {
         }
         return "";
       });
+      setProviderStatus({
+        ready: true,
+        has_api_key: true,
+        base_url: result.base_url || resolvedBase,
+        key_hint: maskApiKeyHint(apiKey),
+        message: t(locale, "auth.modelsOk", { count: String(result.models.length) }),
+      });
+      return true;
     } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
       setAvailableModels([]);
-      setModelsError(cause instanceof Error ? cause.message : String(cause));
+      setModelsError(message);
+      setProviderStatus({
+        ready: false,
+        has_api_key: Boolean(apiKey.trim()),
+        base_url: resolvedBase,
+        key_hint: maskApiKeyHint(apiKey),
+        message,
+      });
+      return false;
     } finally {
       setModelsLoading(false);
     }
-  }, [apiKey, baseUrl, locale]);
+  }, [apiKey, baseUrl, locale, maskApiKeyHint]);
 
   const loadWorkspaceConfig = useCallback(async () => {
     const root = workspaceRoot.trim();
@@ -316,11 +356,9 @@ export function App() {
       return;
     }
     if (!userConfigReady) return;
-    // Auto-fetch when credentials exist (form values or already-saved env).
-    if (apiKey.trim() || providerStatus?.has_api_key) {
-      void refreshModels();
-    }
-  }, [view, userConfigReady, apiKey, providerStatus?.has_api_key, refreshModels, locale]);
+    // Real connectivity check: can we list models with current form/env credentials?
+    void refreshModels();
+  }, [view, userConfigReady, refreshModels]);
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
@@ -625,7 +663,7 @@ export function App() {
         setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
         setCommandDenylistText(formatCommandDenylistText(config.command_denylist));
       }
-      await refreshProviderStatus();
+      await refreshModels();
       await refreshSessions();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -778,8 +816,8 @@ export function App() {
                 {t(locale, "auth.base", { url: providerStatus?.base_url || baseUrl || "https://ai.v58.dev/v1" })}
                 {providerStatus?.key_hint ? ` · ${t(locale, "auth.key", { hint: providerStatus.key_hint })}` : ""}
               </small>
-              <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>
-                {t(locale, "action.refreshAuth")}
+              <button type="button" className="quiet-button" onClick={() => void refreshModels()} disabled={isRunning || isSavingConfig || modelsLoading}>
+                {modelsLoading ? t(locale, "auth.checking") : t(locale, "action.refreshAuth")}
               </button>
             </div>
             <p className="mode-help">{t(locale, "settings.providerHelp")}</p>
