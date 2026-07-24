@@ -20,10 +20,31 @@ pub enum ProviderEvent {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum ChatMessageContent {
+    Text(String),
+    Parts(Vec<ChatContentPart>),
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum ChatContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ChatImageUrl },
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatImageUrl {
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<ChatMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ProviderToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,15 +53,47 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self::content("system", content)
+        Self::text("system", content)
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self::content("user", content)
+        Self::text("user", content)
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self::content("assistant", content)
+        Self::text("assistant", content)
+    }
+
+    pub fn user_with_images(
+        text: impl Into<String>,
+        images: &[(String, String)],
+    ) -> Self {
+        let text = text.into();
+        if images.is_empty() {
+            return Self::user(text);
+        }
+        let mut parts = Vec::with_capacity(images.len() + 1);
+        if !text.trim().is_empty() {
+            parts.push(ChatContentPart::Text { text });
+        }
+        for (mime, data_base64) in images {
+            parts.push(ChatContentPart::ImageUrl {
+                image_url: ChatImageUrl {
+                    url: format!("data:{mime};base64,{data_base64}"),
+                },
+            });
+        }
+        if parts.is_empty() {
+            parts.push(ChatContentPart::Text {
+                text: String::new(),
+            });
+        }
+        Self {
+            role: "user".to_owned(),
+            content: Some(ChatMessageContent::Parts(parts)),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
 
     pub fn assistant_tool_calls(tool_calls: Vec<ProviderToolCall>) -> Self {
@@ -55,16 +108,16 @@ impl ChatMessage {
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".to_owned(),
-            content: Some(content.into()),
+            content: Some(ChatMessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
         }
     }
 
-    fn content(role: impl Into<String>, content: impl Into<String>) -> Self {
+    fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: role.into(),
-            content: Some(content.into()),
+            content: Some(ChatMessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
         }

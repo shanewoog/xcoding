@@ -529,6 +529,17 @@ pub struct SetConfigResult {
     pub config: WorkspaceConfig,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ChatImageAttachment {
+    /// MIME type, e.g. `image/png`.
+    pub mime_type: String,
+    /// Raw base64 payload without a `data:` prefix.
+    pub data_base64: String,
+    /// Optional original file name for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ChatParams {
     pub workspace_root: String,
@@ -544,6 +555,9 @@ pub struct ChatParams {
     /// When set, continue an existing finished session instead of creating a new one.
     #[serde(default)]
     pub session_id: Option<Uuid>,
+    /// Optional image attachments for vision-capable models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ChatImageAttachment>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

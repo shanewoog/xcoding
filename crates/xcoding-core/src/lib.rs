@@ -854,7 +854,13 @@ fn line_change_counts(original: &str, applied: &str) -> (u32, u32) {
 }
 
 fn title_from_user_message(message: &str) -> String {
-    let line = message
+    let cleaned = message
+        .lines()
+        .filter(|line| !line.contains("xcoding-images"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = if cleaned.trim().is_empty() { "Image" } else { cleaned.as_str() };
+    let line = source
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -947,6 +953,7 @@ mod tests {
                 title: None,
 
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
         assert_eq!(session.mode, Mode::AutoEdit);
@@ -967,6 +974,7 @@ mod tests {
                 title: None,
 
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
         core.create_restore_point(session.id, "src/a.rs", Some("old"), "new")
@@ -1052,6 +1060,7 @@ mod tests {
                 title: None,
 
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
 
@@ -1086,6 +1095,7 @@ mod tests {
                 title: None,
 
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
         let action = core
@@ -1154,6 +1164,7 @@ mod tests {
                 title: None,
 
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
         core.record_event(&SessionEvent::Plan {
@@ -1216,6 +1227,7 @@ mod tests {
                 title: None,
 
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
         assert!(!core
@@ -1252,6 +1264,7 @@ mod tests {
                 model: Some("gpt-5.5".to_owned()),
                 title: None,
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
         core.complete_chat(session.id, "First answer.")
@@ -1266,6 +1279,7 @@ mod tests {
                 model: None,
                 title: None,
                 session_id: Some(session.id),
+                images: None,
             })
             .expect("follow-up continues");
 
@@ -1284,6 +1298,7 @@ mod tests {
             model: None,
             title: None,
             session_id: Some(session.id),
+                images: None,
         });
         assert!(blocked.is_err(), "running session cannot continue again");
 
@@ -1297,6 +1312,7 @@ mod tests {
             model: None,
             title: None,
             session_id: Some(session.id),
+                images: None,
         });
         assert!(wrong_workspace.is_err(), "workspace mismatch rejected");
     }
@@ -1313,6 +1329,7 @@ mod tests {
                 model: Some("gpt-5.5".to_owned()),
                 title: None,
                 session_id: None,
+                images: None,
             })
             .expect("chat starts");
         core.cancel_session(session.id).expect("interrupt");
@@ -1330,6 +1347,7 @@ mod tests {
                 model: None,
                 title: None,
                 session_id: Some(session.id),
+                images: None,
             })
             .expect("cancelled session can be steered");
         assert_eq!(continued.id, session.id);

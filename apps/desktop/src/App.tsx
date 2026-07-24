@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
+import type { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import type {
   CancelSessionResult,
+  ChatImageAttachment,
   ChatParams,
   ChatResult,
   Message,
@@ -69,6 +70,110 @@ function toolMessagePreview(content: string): string {
   const collapsed = line.replace(/\s+/g, " ");
   if (collapsed.length <= 72) return collapsed;
   return `${collapsed.slice(0, 71)}…`;
+}
+
+type ComposerImage = {
+  id: string;
+  mime_type: string;
+  data_base64: string;
+  name?: string;
+  previewUrl: string;
+};
+
+const IMAGE_BEGIN = "<!-- xcoding-images";
+const IMAGE_END = "xcoding-images -->";
+const MAX_COMPOSER_IMAGES = 4;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+function encodeLocalUserContent(message: string, images: ChatImageAttachment[]): string {
+  const text = message.trim();
+  if (images.length === 0) return text;
+  const payload = images
+    .map((image) => `${image.mime_type}|${image.data_base64}`)
+    .join(";");
+  const marker = `<!-- xcoding-images:${payload} xcoding-images -->`;
+  return text ? `${text}\n\n${marker}` : marker;
+}
+
+function parseStoredUserMessage(content: string): { text: string; images: Array<{ mime_type: string; data_base64: string }> } {
+  const start = content.indexOf(IMAGE_BEGIN);
+  if (start < 0) return { text: content, images: [] };
+  const endRel = content.indexOf(IMAGE_END, start);
+  if (endRel < 0) return { text: content, images: [] };
+  const end = endRel + IMAGE_END.length;
+  const block = content.slice(start, end);
+  const text = `${content.slice(0, start)}${content.slice(end)}`.trim();
+  const payload = block
+    .replace(IMAGE_BEGIN, "")
+    .replace(IMAGE_END, "")
+    .replace(/^:\s*/, "")
+    .trim();
+  const images: Array<{ mime_type: string; data_base64: string }> = [];
+  for (const item of payload.split(";")) {
+    const [mime, data] = item.split("|");
+    if (!mime || !data) continue;
+    const mimeType = mime.trim().toLowerCase();
+    const dataBase64 = data.trim();
+    if (mimeType.startsWith("image/") && dataBase64) {
+      images.push({ mime_type: mimeType === "image/jpg" ? "image/jpeg" : mimeType, data_base64: dataBase64 });
+    }
+  }
+  return { text, images };
+}
+
+function fileToComposerImage(file: File): Promise<ComposerImage> {
+  return new Promise((resolve, reject) => {
+    const mime = (file.type || "").toLowerCase();
+    if (!["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"].includes(mime)) {
+      reject(new Error("type"));
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      reject(new Error("size"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const match = /^data:([^;]+);base64,(.+)$/s.exec(result);
+      if (!match) {
+        reject(new Error("read"));
+        return;
+      }
+      const mimeType = match[1].toLowerCase() === "image/jpg" ? "image/jpeg" : match[1].toLowerCase();
+      const data_base64 = match[2].replace(/\s+/g, "");
+      resolve({
+        id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        mime_type: mimeType,
+        data_base64,
+        name: file.name || undefined,
+        previewUrl: `data:${mimeType};base64,${data_base64}`,
+      });
+    };
+    reader.onerror = () => reject(new Error("read"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function UserMessageBody({ content }: { content: string }) {
+  const parsed = parseStoredUserMessage(content);
+  return (
+    <div className="message-body">
+      {parsed.text ? <div className="message-text">{parsed.text}</div> : null}
+      {parsed.images.length > 0 ? (
+        <div className="message-images">
+          {parsed.images.map((image, index) => (
+            <img
+              key={`${image.mime_type}-${index}`}
+              src={`data:${image.mime_type};base64,${image.data_base64}`}
+              alt={`attachment-${index + 1}`}
+              className="message-image"
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function latestPlan(events: PersistedSessionEvent[]): PlanStep[] {
@@ -174,6 +279,8 @@ export function App() {
   const [locale, setLocale] = useState<Locale>(() => loadLocale());
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [composerImages, setComposerImages] = useState<ComposerImage[]>([]);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState("");
   const [availableModels, setAvailableModels] = useState<ProviderModel[]>([]);
@@ -184,8 +291,8 @@ export function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
-  const [followUpQueue, setFollowUpQueue] = useState<Array<{ id: string; sessionId: string; text: string }>>([]);
-  const followUpQueueRef = useRef<Array<{ id: string; sessionId: string; text: string }>>([]);
+  const [followUpQueue, setFollowUpQueue] = useState<Array<{ id: string; sessionId: string; text: string; images: ChatImageAttachment[] }>>([]);
+  const followUpQueueRef = useRef<Array<{ id: string; sessionId: string; text: string; images: ChatImageAttachment[] }>>([]);
   const drainFollowUpsRef = useRef(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamedText, setStreamedText] = useState("");
@@ -502,6 +609,7 @@ export function App() {
     setActiveSessionId(null);
     setFollowUpQueue([]);
     followUpQueueRef.current = [];
+    setComposerImages([]);
     setMessages([]);
     setStreamedText("");
     setPlan([]);
@@ -515,11 +623,12 @@ export function App() {
     setError(null);
   }
 
-  function enqueueFollowUp(sessionId: string, text: string): void {
+  function enqueueFollowUp(sessionId: string, text: string, images: ChatImageAttachment[] = []): void {
     const item = {
       id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       sessionId,
       text,
+      images,
     };
     setFollowUpQueue((current) => {
       const next = [...current, item];
@@ -536,7 +645,7 @@ export function App() {
     });
   }
 
-  function visibleFollowUps(sessionId: string | null): Array<{ id: string; sessionId: string; text: string }> {
+  function visibleFollowUps(sessionId: string | null): Array<{ id: string; sessionId: string; text: string; images: ChatImageAttachment[] }> {
     if (!sessionId) return [];
     return followUpQueue.filter((item) => item.sessionId === sessionId);
   }
@@ -580,14 +689,20 @@ export function App() {
 
   async function sendChatMessage(
     message: string,
-    options?: { steer?: boolean; sessionId?: string | null; skipDrain?: boolean },
+    options?: {
+      steer?: boolean;
+      sessionId?: string | null;
+      skipDrain?: boolean;
+      images?: ChatImageAttachment[];
+    },
   ): Promise<string | null> {
     const root = workspaceRoot.trim();
     if (!root) {
       setError(t(locale, "error.needWorkspace"));
       return null;
     }
-    if (!message.trim()) {
+    const images = options?.images ?? [];
+    if (!message.trim() && images.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return null;
     }
@@ -653,13 +768,14 @@ export function App() {
       setPatchPreview(null);
       setTaskSummary(null);
       const sid = (sessionForContinue?.id || targetSessionId) as string;
+      const localContent = encodeLocalUserContent(message, images);
       setMessages((current) => [
         ...current,
         {
           id: `local-user-${Date.now()}`,
           session_id: sid,
           role: "user",
-          content: message,
+          content: localContent,
           created_at: new Date().toISOString(),
         },
       ]);
@@ -667,11 +783,12 @@ export function App() {
 
     const params: ChatParams = {
       workspace_root: root,
-      message,
+      message: message.trim() ? message : (images.length > 0 ? " " : message),
       mode,
       provider: defaultProvider,
       model,
       session_id: continuing ? (sessionForContinue?.id || targetSessionId || undefined) : undefined,
+      images: images.length > 0 ? images : undefined,
     };
 
     let finishedSessionId: string | null = continuing ? (sessionForContinue?.id || targetSessionId) : null;
@@ -732,17 +849,71 @@ export function App() {
         return remaining;
       });
       // Keep the guard until this send finishes, then chain the next item explicitly.
-      await sendChatMessage(next.text, { sessionId, skipDrain: true });
+      await sendChatMessage(next.text, { sessionId, skipDrain: true, images: next.images });
     } finally {
       drainFollowUpsRef.current = false;
     }
     await drainFollowUpQueue(sessionId);
   }
 
+  async function addComposerFiles(fileList: FileList | File[] | null | undefined): Promise<void> {
+    if (!fileList) return;
+    const files = Array.from(fileList).filter((file) => file.type.startsWith("image/"));
+    if (files.length === 0) return;
+    const next: ComposerImage[] = [];
+    for (const file of files) {
+      if (composerImages.length + next.length >= MAX_COMPOSER_IMAGES) {
+        setError(t(locale, "composer.imageLimit"));
+        break;
+      }
+      try {
+        next.push(await fileToComposerImage(file));
+      } catch (cause) {
+        const code = cause instanceof Error ? cause.message : "read";
+        if (code === "size") setError(t(locale, "composer.imageTooLarge"));
+        else if (code === "type") setError(t(locale, "composer.imageType"));
+        else setError(t(locale, "composer.imageType"));
+      }
+    }
+    if (next.length > 0) {
+      setComposerImages((current) => [...current, ...next].slice(0, MAX_COMPOSER_IMAGES));
+      setError(null);
+    }
+  }
+
+  function removeComposerImage(id: string): void {
+    setComposerImages((current) => current.filter((image) => image.id !== id));
+  }
+
+  async function onComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length === 0) return;
+    event.preventDefault();
+    await addComposerFiles(files);
+  }
+
+  async function onComposerImagePick(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    await addComposerFiles(event.target.files);
+    event.target.value = "";
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const message = prompt.trim();
-    if (!message) {
+    const images = composerImages.map(({ mime_type, data_base64, name }) => ({
+      mime_type,
+      data_base64,
+      name,
+    }));
+    if (!message && images.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return;
     }
@@ -753,19 +924,26 @@ export function App() {
         setError(t(locale, "composer.needActiveSession"));
         return;
       }
-      enqueueFollowUp(activeSessionId, message);
+      enqueueFollowUp(activeSessionId, message, images);
       setPrompt("");
+      setComposerImages([]);
       setError(null);
       return;
     }
 
     setPrompt("");
-    await sendChatMessage(message);
+    setComposerImages([]);
+    await sendChatMessage(message, { images });
   }
 
   async function steerCurrentRun(): Promise<void> {
     const message = prompt.trim();
-    if (!message) {
+    const images = composerImages.map(({ mime_type, data_base64, name }) => ({
+      mime_type,
+      data_base64,
+      name,
+    }));
+    if (!message && images.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return;
     }
@@ -774,7 +952,8 @@ export function App() {
       return;
     }
     setPrompt("");
-    await sendChatMessage(message, { steer: true, sessionId: activeSessionId });
+    setComposerImages([]);
+    await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images });
   }
 
   async function resolveAction(approved: boolean): Promise<void> {
@@ -925,7 +1104,7 @@ export function App() {
   const queueMode = !!(isRunning || activeSession?.status === "running" || activeSession?.status === "need_user");
   const sendBlockReason = workspaceMissing
       ? "workspace"
-      : !prompt.trim()
+      : (!prompt.trim() && composerImages.length === 0)
         ? "prompt"
         : providerStatus && !providerStatus.ready
           ? "provider"
@@ -1295,6 +1474,10 @@ export function App() {
                 </summary>
                 <div className="message-body">{message.content}</div>
               </details>
+            ) : message.role === "user" ? (
+              <article className={`message message-${message.role}`} key={message.id}>
+                <UserMessageBody content={message.content} />
+              </article>
             ) : (
               <article className={`message message-${message.role}`} key={message.id}>
                 <div className="message-body">{message.content}</div>
@@ -1330,7 +1513,10 @@ export function App() {
                 {activeFollowUps.map((item, index) => (
                   <li key={item.id}>
                     <span className="followup-index">#{index + 1}</span>
-                    <span className="followup-text">{item.text}</span>
+                    <span className="followup-text">
+                      {item.text || (item.images.length > 0 ? t(locale, "message.imageCount", { count: String(item.images.length) }) : "")}
+                      {item.text && item.images.length > 0 ? ` · ${t(locale, "message.imageCount", { count: String(item.images.length) })}` : ""}
+                    </span>
                     <button type="button" className="quiet-button" onClick={() => removeFollowUp(item.id)}>
                       {t(locale, "action.remove")}
                     </button>
@@ -1339,10 +1525,29 @@ export function App() {
               </ul>
             </div>
           ) : null}
+          {composerImages.length > 0 ? (
+            <div className="composer-images" aria-label={t(locale, "composer.imagesLabel")}>
+              {composerImages.map((image) => (
+                <div className="composer-image" key={image.id}>
+                  <img src={image.previewUrl} alt={image.name || t(locale, "message.imageAttachment")} />
+                  <button
+                    type="button"
+                    className="composer-image-remove"
+                    onClick={() => removeComposerImage(image.id)}
+                    title={t(locale, "composer.removeImage")}
+                    aria-label={t(locale, "composer.removeImage")}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={onComposerKeyDown}
+            onPaste={(event) => void onComposerPaste(event)}
             placeholder={
               queueMode
                 ? t(locale, "composer.queuePlaceholder")
@@ -1351,6 +1556,14 @@ export function App() {
                   : t(locale, "composer.placeholder")
             }
             rows={4}
+          />
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            hidden
+            onChange={(event) => void onComposerImagePick(event)}
           />
           <div className="composer-footer">
             <span title={sendHint || undefined}>
@@ -1365,12 +1578,21 @@ export function App() {
                       : t(locale, "composer.chooseWorkspace")}
             </span>
             <div className="composer-actions">
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={composerImages.length >= MAX_COMPOSER_IMAGES}
+                title={t(locale, "action.attachImage")}
+              >
+                {t(locale, "action.attachImage")}
+              </button>
               {queueMode ? (
                 <button
                   type="button"
                   className="quiet-button"
                   onClick={() => void steerCurrentRun()}
-                  disabled={!prompt.trim() || workspaceMissing || modelMissing || !!(providerStatus && !providerStatus.ready)}
+                  disabled={(!prompt.trim() && composerImages.length === 0) || workspaceMissing || modelMissing || !!(providerStatus && !providerStatus.ready)}
                   title={t(locale, "action.steerHelp")}
                 >
                   {t(locale, "action.steer")}

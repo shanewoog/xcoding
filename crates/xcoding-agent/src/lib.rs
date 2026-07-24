@@ -60,6 +60,18 @@ impl<'a> AgentService<'a> {
     where
         F: FnMut(SessionEvent),
     {
+        let images = sanitize_chat_images(params.images.clone())?;
+        let mut params = params;
+        if !images.is_empty() {
+            params.message = encode_user_message_with_images(&params.message, &images);
+            // images already encoded into message for persistence; avoid double-send later
+            params.images = None;
+        }
+        if params.message.trim().is_empty() {
+            return Err(AgentError::Core(xcoding_core::CoreError::InvalidInput(
+                "message must not be empty".to_owned(),
+            )));
+        }
         let session = self.core.start_chat(params)?;
         match self.run_session(&session, None, &mut on_event).await {
             Ok(result) => Ok(result),
@@ -254,7 +266,7 @@ impl<'a> AgentService<'a> {
         messages.extend(self.core.messages(session.id)?.into_iter().map(
             |message| match message.role {
                 MessageRole::System => ChatMessage::system(message.content),
-                MessageRole::User => ChatMessage::user(message.content),
+                MessageRole::User => user_chat_message_from_stored(&message.content),
                 MessageRole::Assistant => ChatMessage::assistant(message.content),
                 // Historical tool rows are not full OpenAI tool pairs yet. Keep them as
                 // assistant notes so resume still has the outcomes, and re-seed the
@@ -270,10 +282,7 @@ impl<'a> AgentService<'a> {
             // Prefer the live resolve pair over the degraded historical note.
             if let Some(last) = messages.last() {
                 if last.role == "assistant"
-                    && last
-                        .content
-                        .as_deref()
-                        .is_some_and(|content| content.contains(output))
+                    && message_content_contains_text(last.content.as_ref(), output)
                 {
                     messages.pop();
                 }
@@ -1156,6 +1165,152 @@ fn mcp_display_name(tool_call: &ToolCall) -> String {
     } else {
         tool_call.name.as_str().to_owned()
     }
+}
+
+
+fn message_content_contains_text(
+    content: Option<&xcoding_providers::ChatMessageContent>,
+    needle: &str,
+) -> bool {
+    match content {
+        Some(xcoding_providers::ChatMessageContent::Text(text)) => text.contains(needle),
+        Some(xcoding_providers::ChatMessageContent::Parts(parts)) => parts.iter().any(|part| {
+            matches!(part, xcoding_providers::ChatContentPart::Text { text } if text.contains(needle))
+        }),
+        None => false,
+    }
+}
+
+fn user_chat_message_from_stored(content: &str) -> ChatMessage {
+    match parse_stored_user_message(content) {
+        (text, images) if images.is_empty() => ChatMessage::user(text),
+        (text, images) => ChatMessage::user_with_images(text, &images),
+    }
+}
+
+fn parse_stored_user_message(content: &str) -> (String, Vec<(String, String)>) {
+    const BEGIN: &str = "<!-- xcoding-images";
+    const END: &str = "xcoding-images -->";
+    let Some(start) = content.find(BEGIN) else {
+        return (content.to_owned(), Vec::new());
+    };
+    let Some(end_rel) = content[start..].find(END) else {
+        return (content.to_owned(), Vec::new());
+    };
+    let end = start + end_rel + END.len();
+    let block = content[start..end].to_owned();
+    let text = format!("{}{}", &content[..start], &content[end..])
+        .trim()
+        .to_owned();
+    let payload = block
+        .trim_start_matches(BEGIN)
+        .trim_end_matches(END)
+        .trim()
+        .trim_start_matches(':')
+        .trim();
+    let images = parse_image_payload(payload);
+    (text, images)
+}
+
+fn parse_image_payload(payload: &str) -> Vec<(String, String)> {
+    // format: mime|base64;mime|base64
+    let mut images = Vec::new();
+    for item in payload.split(';') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let Some((mime, data)) = item.split_once('|') else {
+            continue;
+        };
+        let mime = mime.trim();
+        let data = data.trim();
+        if mime.starts_with("image/") && !data.is_empty() {
+            images.push((mime.to_owned(), data.to_owned()));
+        }
+    }
+    images
+}
+
+fn encode_user_message_with_images(
+    message: &str,
+    images: &[xcoding_protocol::ChatImageAttachment],
+) -> String {
+    let text = message.trim();
+    if images.is_empty() {
+        return text.to_owned();
+    }
+    let mut payload = String::from("<!-- xcoding-images:");
+    for (index, image) in images.iter().enumerate() {
+        if index > 0 {
+            payload.push(';');
+        }
+        payload.push_str(image.mime_type.trim());
+        payload.push('|');
+        payload.push_str(image.data_base64.trim());
+    }
+    payload.push_str(" xcoding-images -->");
+    if text.is_empty() {
+        payload
+    } else {
+        format!("{text}\n\n{payload}")
+    }
+}
+
+fn sanitize_chat_images(
+    images: Option<Vec<xcoding_protocol::ChatImageAttachment>>,
+) -> Result<Vec<xcoding_protocol::ChatImageAttachment>, AgentError> {
+    let Some(images) = images else {
+        return Ok(Vec::new());
+    };
+    const MAX_IMAGES: usize = 4;
+    const MAX_BYTES_ESTIMATE: usize = 6 * 1024 * 1024; // ~4.5MB binary after base64
+    if images.len() > MAX_IMAGES {
+        return Err(AgentError::Core(xcoding_core::CoreError::InvalidInput(
+            format!("at most {MAX_IMAGES} images can be attached"),
+        )));
+    }
+    let mut cleaned = Vec::with_capacity(images.len());
+    for image in images {
+        let mime = image.mime_type.trim().to_ascii_lowercase();
+        if !matches!(
+            mime.as_str(),
+            "image/png" | "image/jpeg" | "image/jpg" | "image/webp" | "image/gif"
+        ) {
+            return Err(AgentError::Core(xcoding_core::CoreError::InvalidInput(
+                format!("unsupported image type: {mime}"),
+            )));
+        }
+        let data = image
+            .data_base64
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        if data.is_empty() {
+            return Err(AgentError::Core(xcoding_core::CoreError::InvalidInput(
+                "image data is empty".to_owned(),
+            )));
+        }
+        if data.len() > MAX_BYTES_ESTIMATE {
+            return Err(AgentError::Core(xcoding_core::CoreError::InvalidInput(
+                "image is too large; keep each image under ~4MB".to_owned(),
+            )));
+        }
+        let mime = if mime == "image/jpg" {
+            "image/jpeg".to_owned()
+        } else {
+            mime
+        };
+        cleaned.push(xcoding_protocol::ChatImageAttachment {
+            mime_type: mime,
+            data_base64: data,
+            name: image
+                .name
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+        });
+    }
+    Ok(cleaned)
 }
 
 #[cfg(test)]

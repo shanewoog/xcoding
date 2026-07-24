@@ -879,3 +879,56 @@ input.workspace-missing {
   max-width: 100%;
 }
 
+
+.composer-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-bottom: 0.7rem;
+}
+.composer-image {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-input);
+}
+.composer-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.composer-image-remove {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.2rem;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: rgba(10, 12, 16, 0.82);
+  color: var(--text);
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0;
+}
+.message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+.message-image {
+  max-width: min(280px, 100%);
+  max-height: 220px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  object-fit: contain;
+  background: var(--bg-input);
+}
+.message-text + .message-images {
+  margin-top: 0.65rem;
+}

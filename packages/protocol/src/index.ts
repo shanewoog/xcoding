@@ -170,6 +170,15 @@ export interface SetConfigResult {
   config: WorkspaceConfig;
 }
 
+export interface ChatImageAttachment {
+  /** MIME type, e.g. image/png */
+  mime_type: string;
+  /** Raw base64 payload without data: prefix */
+  data_base64: string;
+  /** Optional original file name for display */
+  name?: string;
+}
+
 export interface ChatParams {
   workspace_root: string;
   message: string;
@@ -179,6 +188,8 @@ export interface ChatParams {
   title?: string;
   /** Continue an existing finished session instead of creating a new one. */
   session_id?: string;
+  /** Optional image attachments for vision-capable models. */
+  images?: ChatImageAttachment[];
 }
 
 export interface ChatResult {
