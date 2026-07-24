@@ -46,11 +46,18 @@ fn open_core(_app: &AppHandle) -> Result<CoreService, String> {
 /// CoreService holds a rusqlite Connection (!Send), so agent work cannot live in a
 /// Send async future that awaits across DB usage. Run the full agent turn on a
 /// blocking worker and block_on there (outside any async poll context).
+///
+/// Use a dedicated current-thread runtime instead of nesting on Tauri's global
+/// runtime from `spawn_blocking`, which can stall completion after the model reply.
 fn block_on_local<F, T>(future: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    tauri::async_runtime::block_on(future)
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("local agent runtime")
+        .block_on(future)
 }
 
 async fn run_agent_blocking<T, F>(work: F) -> Result<T, String>

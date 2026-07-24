@@ -317,11 +317,16 @@ impl<'a> AgentService<'a> {
             let mut content = String::new();
             let mut tool_calls = Vec::new();
 
+            // Some OpenAI-compatible providers stop sending bytes without closing the
+            // body or emitting [DONE]. Idle-timeout so the turn can complete.
+            let mut last_event_at = tokio::time::Instant::now();
+            const STREAM_IDLE: Duration = Duration::from_secs(20);
             loop {
                 tokio::select! {
                     event = stream.next() => {
                         match event {
                             Some(event) => {
+                                last_event_at = tokio::time::Instant::now();
                                 self.ensure_not_cancelled(session.id)?;
                                 match event? {
                                     ProviderEvent::TextDelta(delta) => {
@@ -339,6 +344,9 @@ impl<'a> AgentService<'a> {
                             }
                             None => break,
                         }
+                    }
+                    _ = tokio::time::sleep_until(last_event_at + STREAM_IDLE) => {
+                        break;
                     }
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
                         self.ensure_not_cancelled(session.id)?;
@@ -512,54 +520,20 @@ impl<'a> AgentService<'a> {
 
     fn enrich_task_summary(&self, session: &Session) -> Result<xcoding_protocol::TaskSummary, AgentError> {
         let mut summary = self.core.task_summary(session.id)?;
-        let tools = match ToolRegistry::new(&session.workspace_root) {
-            Ok(tools) => tools,
-            Err(_) => return Ok(summary),
-        };
-
-        if let Ok(status) = tools.execute_authorized(&ToolCall {
-            id: "task_summary_git_status".to_owned(),
-            name: ToolName::GitStatus,
-            arguments: json!({}),
-        }) {
-            summary.git_branch = status
-                .output
-                .get("branch")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            summary.git_status = status
-                .output
-                .get("raw")
-                .and_then(Value::as_str)
-                .map(|raw| truncate_summary_text(raw, 4_000));
-        }
-
-        if let Ok(diff) = tools.execute_authorized(&ToolCall {
-            id: "task_summary_git_diff".to_owned(),
-            name: ToolName::GitDiff,
-            arguments: json!({}),
-        }) {
-            let staged = diff
-                .output
-                .get("staged")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let unstaged = diff
-                .output
-                .get("unstaged")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let combined = match (staged.is_empty(), unstaged.is_empty()) {
-                (true, true) => String::new(),
-                (false, true) => format!("# staged\n{staged}"),
-                (true, false) => format!("# unstaged\n{unstaged}"),
-                (false, false) => format!("# staged\n{staged}\n\n# unstaged\n{unstaged}"),
-            };
-            if !combined.is_empty() {
-                summary.git_diff = Some(truncate_summary_text(&combined, 8_000));
+        let workspace = session.workspace_root.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(collect_git_task_summary(&workspace));
+        });
+        // Never block chat completion on slow/hanging git in huge workspaces.
+        match rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(Some((branch, status, diff))) => {
+                summary.git_branch = branch;
+                summary.git_status = status;
+                summary.git_diff = diff;
             }
+            _ => {}
         }
-
         Ok(summary)
     }
 
@@ -680,6 +654,60 @@ fn tool_execution_success(tool_call: &ToolCall, output: &Value) -> bool {
     }
     true
 }
+fn collect_git_task_summary(
+    workspace_root: &str,
+) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    let tools = ToolRegistry::new(workspace_root).ok()?;
+    let mut branch = None;
+    let mut status_text = None;
+    let mut diff_text = None;
+
+    if let Ok(status) = tools.execute_authorized(&ToolCall {
+        id: "task_summary_git_status".to_owned(),
+        name: ToolName::GitStatus,
+        arguments: json!({}),
+    }) {
+        branch = status
+            .output
+            .get("branch")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        status_text = status
+            .output
+            .get("raw")
+            .and_then(Value::as_str)
+            .map(|raw| truncate_summary_text(raw, 4_000));
+    }
+
+    if let Ok(diff) = tools.execute_authorized(&ToolCall {
+        id: "task_summary_git_diff".to_owned(),
+        name: ToolName::GitDiff,
+        arguments: json!({}),
+    }) {
+        let staged = diff
+            .output
+            .get("staged")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let unstaged = diff
+            .output
+            .get("unstaged")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let combined = match (staged.is_empty(), unstaged.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!("# staged\n{staged}"),
+            (true, false) => format!("# unstaged\n{unstaged}"),
+            (false, false) => format!("# staged\n{staged}\n\n# unstaged\n{unstaged}"),
+        };
+        if !combined.is_empty() {
+            diff_text = Some(truncate_summary_text(&combined, 8_000));
+        }
+    }
+
+    Some((branch, status_text, diff_text))
+}
+
 fn truncate_summary_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         value.to_owned()

@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 dotenvy = "0.15"
 tauri = { version = "2", features = [] }
 uuid = { version = "1", features = ["serde", "v4"] }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
 xcoding-agent = { path = "../../../crates/xcoding-agent" }
 xcoding-core = { path = "../../../crates/xcoding-core" }
 xcoding-protocol = { path = "../../../crates/xcoding-protocol" }

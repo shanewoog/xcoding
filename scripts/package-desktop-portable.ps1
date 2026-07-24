@@ -61,14 +61,25 @@ if (-not $exe) {
 }
 
 if (Test-Path $outDir) {
-  Remove-Item -LiteralPath $outDir -Recurse -Force
+  try {
+    Remove-Item -LiteralPath $outDir -Recurse -Force -ErrorAction Stop
+  } catch {
+    Write-Host "Warning: could not recreate $outDir (in use). Updating binaries in place."
+  }
 }
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
 $destExe = Join-Path $outDir "XCoding.exe"
-Copy-Item -LiteralPath $exe -Destination $destExe -Force
+try {
+  Copy-Item -LiteralPath $exe -Destination $destExe -Force -ErrorAction Stop
+} catch {
+  $fallback = Join-Path $outDir "XCoding.new.exe"
+  Copy-Item -LiteralPath $exe -Destination $fallback -Force
+  Write-Host "Warning: XCoding.exe locked; wrote $fallback instead."
+  $destExe = $fallback
+}
 # Keep original name for debugging if needed.
-Copy-Item -LiteralPath $exe -Destination (Join-Path $outDir "xcoding-desktop.exe") -Force
+Copy-Item -LiteralPath $exe -Destination (Join-Path $outDir "xcoding-desktop.exe") -Force -ErrorAction SilentlyContinue
 
 $envExample = @"
 # Put this file next to XCoding.exe and rename to .env

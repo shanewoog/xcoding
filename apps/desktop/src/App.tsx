@@ -417,18 +417,46 @@ export function App() {
       if (payload.type === "message_completed") {
         setMessages((current) => mergeMessage(current, payload.message));
         setStreamedText("");
+        // Unlock composer as soon as the assistant turn is complete, even if the
+        // chat invoke is still finishing post-summary work.
+        setIsRunning(false);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === payload.session_id ? { ...session, status: "done" } : session,
+          ),
+        );
       }
       if (payload.type === "plan") setPlan(payload.steps);
       if (payload.type === "patch_preview") setPatchPreview(payload.preview);
       if (payload.type === "approval_requested") {
         setPendingAction(payload.action);
         setApprovalSummary(payload.summary);
+        setIsRunning(false);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === payload.session_id ? { ...session, status: "need_user" } : session,
+          ),
+        );
       }
       if (payload.type === "session_cancelled") {
         setPendingAction(null);
         setApprovalSummary(null);
+        setIsRunning(false);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === payload.session_id ? { ...session, status: "cancelled" } : session,
+          ),
+        );
       }
-      if (payload.type === "task_completed") setTaskSummary(payload.summary);
+      if (payload.type === "task_completed") {
+        setTaskSummary(payload.summary);
+        setIsRunning(false);
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === payload.session_id ? { ...session, status: "done" } : session,
+          ),
+        );
+      }
       const nextActivity = eventActivity(payload, `${payload.type}-${Date.now()}`, locale);
       if (nextActivity) {
         setActivity((current) => {
@@ -556,7 +584,7 @@ export function App() {
   }
 
   async function resolveAction(approved: boolean): Promise<void> {
-    if (!pendingAction || !activeSessionId || isRunning) return;
+    if (!pendingAction || !activeSessionId) return;
     setError(null);
     setIsRunning(true);
     try {
@@ -603,7 +631,7 @@ export function App() {
   }
 
   async function cancelSession(): Promise<void> {
-    if (!activeSessionId || isRunning) return;
+    if (!activeSessionId) return;
     setError(null);
     setIsRunning(true);
     try {
@@ -1023,8 +1051,8 @@ export function App() {
                 {t(locale, "action.newChat")}
               </button>
             ) : null}
-            {activeSession?.status === "need_user" ? (
-              <button type="button" className="quiet-button" onClick={() => void cancelSession()} disabled={isRunning}>
+            {activeSession && (activeSession.status === "need_user" || activeSession.status === "running" || isRunning) ? (
+              <button type="button" className="quiet-button" onClick={() => void cancelSession()}>
                 {t(locale, "action.cancel")}
               </button>
             ) : null}

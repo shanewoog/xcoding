@@ -4757,6 +4757,7 @@ dependencies = [
  "dotenvy",
  "tauri",
  "tauri-build",
+ "tokio",
  "uuid",
  "xcoding-agent",
  "xcoding-core",
