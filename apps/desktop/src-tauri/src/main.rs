@@ -105,6 +105,16 @@ fn chat(app: AppHandle, params: ChatParams) -> Result<ChatResult, String> {
 }
 
 fn load_dotenv_files() {
+    // Portable / green build: prefer `.env` next to the executable first.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(".env");
+            if candidate.is_file() {
+                let _ = dotenvy::from_path(&candidate);
+            }
+        }
+    }
+    // Then process cwd / ancestor `.env` (dev and repo-root launches).
     let _ = dotenvy::dotenv();
     if let Ok(cwd) = std::env::current_dir() {
         let mut dir = cwd;

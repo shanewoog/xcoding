@@ -73,3 +73,24 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
 ### Trace 面板
 
 当会话尚无计划、活动、恢复点、回放或摘要时，右侧显示简短的 Trace 空状态提示。Plan、Restore points、Replay 在空时折叠，有内容时展开。待审批操作会固定在 Trace 面板顶部。
+
+## 绿色免安装版（Portable）
+
+不需要安装程序。构建并打包：
+
+```powershell
+pnpm desktop:portable
+# 或
+.\scripts\package-desktop-portable.ps1
+```
+
+输出目录：`dist/portable/XCoding/`
+
+使用方式：
+
+1. 把整个文件夹拷到任意位置
+2. 复制 `.env.example` 为 `.env`，填入 API Key 与 Base URL
+3. 双击 `XCoding.exe`
+
+依赖：Windows 10/11 + WebView2 Runtime（系统通常已自带）。会话数据库仍写在系统应用数据目录，不在绿色文件夹内。
+

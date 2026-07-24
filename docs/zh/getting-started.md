@@ -68,6 +68,14 @@ pnpm cli -- chat "说明这个仓库的结构" --workspace .
 
 CLI 数据库位于 `<workspace>/.xcoding/xcoding.db`。配置保存该工作区的模式、供应商和模型偏好；额外 auto-edit 命令白名单保存在 `.xcoding/command-allowlist`，黑名单保存在 `.xcoding/command-denylist`（可用 `config set --command-allowlist` / `--command-denylist` 或 Desktop 默认设置编辑）。除非命令显式传入其他值，新建聊天都会使用这些默认配置。
 
+
+## 绿色 Desktop（免安装）
+
+```powershell
+pnpm desktop:portable
+```
+
+产出 `dist/portable/XCoding/XCoding.exe`：同目录放 `.env` 后可双击运行。详见 [desktop.md](./desktop.md)。
 ## 使用 Desktop
 
 在设置了相同凭据变量的终端中启动 Tauri Desktop：

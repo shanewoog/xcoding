@@ -68,6 +68,14 @@ pnpm cli -- chat "Explain the structure of this repository" --workspace .
 
 The CLI database is `<workspace>/.xcoding/xcoding.db`. Configuration stores mode, provider, and model for that workspace. Extra auto-edit command patterns live in `.xcoding/command-allowlist`; blocks live in `.xcoding/command-denylist` (editable via `config set --command-allowlist` / `--command-denylist` or Desktop defaults). New chats use those defaults unless a command explicitly supplies a different value.
 
+
+## Portable Desktop (no install)
+
+```powershell
+pnpm desktop:portable
+```
+
+Produces `dist/portable/XCoding/XCoding.exe`. Place a `.env` beside the exe, then double-click. See [zh desktop docs](../zh/desktop.md) for details.
 ## Use Desktop
 
 Start the Tauri desktop app from a shell with the same credential variables:
