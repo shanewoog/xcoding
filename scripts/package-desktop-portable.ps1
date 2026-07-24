@@ -2,7 +2,7 @@
 # Output: dist/portable/XCoding/
 # Usage:
 #   .\scripts\package-desktop-portable.ps1
-#   .\scripts\package-desktop-portable.ps1 -SkipBuild   # repack existing release binary
+#   .\scripts\package-desktop-portable.ps1 -SkipBuild
 
 param(
   [switch]$SkipBuild
@@ -32,7 +32,9 @@ $releaseCandidates = @(
 )
 
 if (-not $SkipBuild) {
-  Write-Host "Building frontend + Tauri release binary (no installer bundle)..."
+  Write-Host "Building frontend + Tauri production binary (custom-protocol, no installer)..."
+  # IMPORTANT: use tauri CLI so production enables feature `custom-protocol`.
+  # Plain `cargo build --release` stays in dev mode and loads http://localhost:1420.
   & $pnpm --filter @xcoding/desktop exec tauri build --no-bundle
   if ($LASTEXITCODE -ne 0) { throw "tauri build failed with exit $LASTEXITCODE" }
 }
@@ -68,7 +70,7 @@ $readme = @"
 2. Copy `.env.example` to `.env` and fill in your API key.
 3. Double-click `XCoding.exe`.
 
-No installer is required.
+No installer is required. Do NOT need a local Vite/dev server.
 
 ## Requirements
 
@@ -79,7 +81,7 @@ No installer is required.
 
 - Session database is stored under the OS app data directory, not inside this folder.
 - Do not commit real API keys.
-- Prefer `ask` mode for first runs.
+- Prefer ask mode for first runs.
 "@
 Set-Content -Path (Join-Path $outDir "README.txt") -Value $readme -Encoding utf8
 

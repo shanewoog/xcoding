@@ -94,3 +94,13 @@ pnpm desktop:portable
 
 依赖：Windows 10/11 + WebView2 Runtime（系统通常已自带）。会话数据库仍写在系统应用数据目录，不在绿色文件夹内。
 
+
+### 若出现 “localhost 拒绝连接”
+
+说明打开的是 **开发模式** 二进制（UI 去连 `http://localhost:1420`）。请重新执行：
+
+```powershell
+pnpm desktop:portable
+```
+
+不要用纯 `cargo build --release` 打包绿色版；必须走 `tauri build`（会启用 `custom-protocol` 内嵌前端）。

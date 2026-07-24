@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "XCoding",
         "width": 960,
         "height": 720,
