@@ -64,6 +64,7 @@ async function main() {
       "provider_auth",
       "workspace_config",
       "git",
+      "mcp_config",
     ]) {
       const check = presentReport.checks.find((item) => item.name === name);
       assert.ok(check, `missing check ${name}`);

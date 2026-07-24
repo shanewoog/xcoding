@@ -735,6 +735,34 @@ Output:
 
 Skill names are folder names: `1-64` chars of `[A-Za-z0-9._-]`, starting with alphanumeric. Optional YAML frontmatter may set `name` (must match folder) and `description`; the body after frontmatter is the skill content.
 
+### `mcp`
+
+High-risk exec. Invokes a configured MCP tool. Provider-facing names are namespaced as `mcp__<server>__<tool>`; the protocol normalizes them to:
+
+```json
+{
+  "name": "mcp",
+  "arguments": {
+    "server": "demo",
+    "tool": "echo",
+    "arguments": { "text": "hello" }
+  }
+}
+```
+
+Servers are declared in `.xcoding/mcp.json` (`mcpServers` map, stdio `command`/`args`/`env`/`enabled`). Every MCP call requires user approval. Result:
+
+```json
+{
+  "server": "demo",
+  "tool": "echo",
+  "is_error": false,
+  "content": [{ "type": "text", "text": "echo:hello" }],
+  "structured_content": null
+}
+```
+
+
 ## 6.6 `git_status` / `git_diff` / `git_log` / `git_show` / `git_add` / `git_commit` / `git_push` / `git_fetch` / `git_pull`
 
 Read-only helpers for context, history, and final summaries.

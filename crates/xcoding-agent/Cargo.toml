@@ -15,4 +15,5 @@ xcoding-core = { path = "../xcoding-core" }
 xcoding-protocol = { path = "../xcoding-protocol" }
 xcoding-providers = { path = "../xcoding-providers" }
 xcoding-policy = { path = "../xcoding-policy" }
+xcoding-mcp = { path = "../xcoding-mcp" }
 xcoding-tools = { path = "../xcoding-tools" }

@@ -18,7 +18,8 @@ use xcoding_providers::{
     ChatMessage, OpenAiCompatibleProvider, ProviderError, ProviderEvent, ProviderToolCall,
     ToolDefinition,
 };
-use xcoding_tools::{ToolError, ToolRegistry};
+use xcoding_mcp::{McpError, McpRuntime};
+use xcoding_tools::{ToolError, ToolExecution, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 8;
 
@@ -38,6 +39,8 @@ pub enum AgentError {
     ToolCallLimit,
     #[error("session cancelled")]
     Cancelled,
+    #[error(transparent)]
+    Mcp(#[from] McpError),
 }
 
 pub struct AgentService<'a> {
@@ -93,6 +96,7 @@ impl<'a> AgentService<'a> {
         )?;
         let session = self.core.resume_chat(params.session_id)?;
         let tools = ToolRegistry::new(&session.workspace_root)?;
+        let mut mcp = McpRuntime::prepare(&session.workspace_root)?;
 
         let output = if params.approved {
             self.emit(
@@ -100,11 +104,11 @@ impl<'a> AgentService<'a> {
                 SessionEvent::ToolStart {
                     session_id: session.id,
                     tool_call: action.tool_call.clone(),
-                    summary: format!("Approved {}", action.tool_call.name.as_str()),
+                    summary: format!("Approved {}", mcp_display_name(&action.tool_call)),
                 },
             );
             match self
-                .execute_and_record(&session, &tools, &action.tool_call, &mut on_event)
+                .execute_and_record(&session, &tools, &action.tool_call, &mut mcp, &mut on_event)
                 .await
             {
                 Ok(output) => output,
@@ -237,13 +241,16 @@ impl<'a> AgentService<'a> {
         }
 
         let tools = ToolRegistry::new(&session.workspace_root)?;
+        let mut mcp = McpRuntime::prepare(&session.workspace_root)?;
         let provider = OpenAiCompatibleProvider::from_environment()?;
         let context = ContextSnapshot::load(tools.workspace_root());
         let mode_label = match session.mode {
             xcoding_protocol::Mode::Ask => "ask",
             xcoding_protocol::Mode::AutoEdit => "auto-edit",
         };
-        let mut messages = vec![ChatMessage::system(context.system_prompt(mode_label))];
+        let mut system_prompt = context.system_prompt(mode_label);
+        append_mcp_catalog(&mut system_prompt, &mcp);
+        let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(self.core.messages(session.id)?.into_iter().map(
             |message| match message.role {
                 MessageRole::System => ChatMessage::system(message.content),
@@ -301,7 +308,7 @@ impl<'a> AgentService<'a> {
             },
         );
 
-        let definitions = tool_definitions();
+        let definitions = tool_definitions_with_mcp(mcp.tools());
         for _ in 0..MAX_TOOL_ROUNDS {
             self.ensure_not_cancelled(session.id)?;
             let mut stream = provider
@@ -395,7 +402,7 @@ impl<'a> AgentService<'a> {
                 match decision {
                     PermissionDecision::Allow => {
                         let output = self
-                            .execute_and_record(session, &tools, &tool_call, on_event)
+                            .execute_and_record(session, &tools, &tool_call, &mut mcp, on_event)
                             .await?;
                         messages.push(ChatMessage::tool_result(&tool_call.id, output));
                     }
@@ -561,6 +568,7 @@ impl<'a> AgentService<'a> {
         session: &Session,
         tools: &ToolRegistry,
         tool_call: &ToolCall,
+        mcp: &mut McpRuntime,
         on_event: &mut F,
     ) -> Result<String, AgentError>
     where
@@ -587,7 +595,9 @@ impl<'a> AgentService<'a> {
             }
         }
 
-        let execution = if tool_call.name == ToolName::RunCommand {
+        let execution = if tool_call.name == ToolName::Mcp {
+            execute_mcp_tool(mcp, tool_call)
+        } else if tool_call.name == ToolName::RunCommand {
             // Run commands off the async runtime so the server can accept cancel RPC.
             let probe = self.core.cancel_probe();
             let workspace = session.workspace_root.clone();
@@ -656,13 +666,19 @@ impl<'a> AgentService<'a> {
 
 fn tool_execution_success(tool_call: &ToolCall, output: &Value) -> bool {
     if tool_call.name == ToolName::RunCommand {
-        output
-            .get("success")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    } else {
-        true
+        return output
+            .get("exit_code")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(1)
+            == 0;
     }
+    if tool_call.name == ToolName::Mcp {
+        return !output
+            .get("is_error")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    }
+    true
 }
 fn truncate_summary_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
@@ -848,11 +864,40 @@ fn approval_summary(tools: &ToolRegistry, tool_call: &ToolCall) -> String {
                 if ff_only { " (ff-only)" } else { " (no-rebase)" }
             )
         }
+        ToolName::Mcp => {
+            let server = tool_call
+                .arguments
+                .get("server")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<server>");
+            let tool = tool_call
+                .arguments
+                .get("tool")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<tool>");
+            format!("Review MCP {server}.{tool}")
+        }
         _ => format!("Review {}", tool_call.name.as_str()),
     }
 }
 
 pub fn tool_definitions() -> Vec<ToolDefinition> {
+    builtin_tool_definitions()
+}
+
+fn tool_definitions_with_mcp(mcp_tools: &[xcoding_mcp::McpToolDefinition]) -> Vec<ToolDefinition> {
+    let mut definitions = builtin_tool_definitions();
+    for tool in mcp_tools {
+        definitions.push(ToolDefinition {
+            name: tool.namespaced_name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
+        });
+    }
+    definitions
+}
+
+fn builtin_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "list_dir".to_owned(),
@@ -933,33 +978,156 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 fn provider_tool_call(tool_call: &ToolCall) -> Result<ProviderToolCall, AgentError> {
+    let (name, arguments) = if tool_call.name == ToolName::Mcp {
+        let server = tool_call
+            .arguments
+            .get("server")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AgentError::InvalidProviderToolCall(
+                    "mcp tool call is missing server".to_owned(),
+                )
+            })?;
+        let tool = tool_call
+            .arguments
+            .get("tool")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AgentError::InvalidProviderToolCall("mcp tool call is missing tool".to_owned())
+            })?;
+        let nested = tool_call
+            .arguments
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        (
+            xcoding_mcp::encode_tool_name(server, tool),
+            nested.to_string(),
+        )
+    } else {
+        (
+            tool_call.name.as_str().to_owned(),
+            tool_call.arguments.to_string(),
+        )
+    };
     Ok(ProviderToolCall {
         id: tool_call.id.clone(),
         kind: "function".to_owned(),
-        function: xcoding_providers::ProviderFunctionCall {
-            name: tool_call.name.as_str().to_owned(),
-            arguments: tool_call.arguments.to_string(),
-        },
+        function: xcoding_providers::ProviderFunctionCall { name, arguments },
     })
 }
 
 fn protocol_tool_call(provider_call: ProviderToolCall) -> Result<ToolCall, AgentError> {
+    let arguments = serde_json::from_str(&provider_call.function.arguments).map_err(|error| {
+        AgentError::InvalidProviderToolCall(format!(
+            "invalid tool arguments from provider: {error}"
+        ))
+    })?;
+    if let Some((server, tool)) = xcoding_mcp::decode_tool_name(&provider_call.function.name) {
+        return Ok(ToolCall {
+            id: provider_call.id,
+            name: ToolName::Mcp,
+            arguments: json!({
+                "server": server,
+                "tool": tool,
+                "arguments": arguments,
+            }),
+        });
+    }
     let name =
         serde_json::from_value(Value::String(provider_call.function.name)).map_err(|error| {
             AgentError::InvalidProviderToolCall(format!(
                 "unsupported tool requested by provider: {error}"
             ))
         })?;
-    let arguments = serde_json::from_str(&provider_call.function.arguments).map_err(|error| {
-        AgentError::InvalidProviderToolCall(format!(
-            "invalid tool arguments from provider: {error}"
-        ))
-    })?;
     Ok(ToolCall {
         id: provider_call.id,
         name,
         arguments,
     })
+}
+
+fn execute_mcp_tool(
+    mcp: &mut McpRuntime,
+    tool_call: &ToolCall,
+) -> Result<ToolExecution, ToolError> {
+    let server = tool_call
+        .arguments
+        .get("server")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::InvalidArguments("mcp tool requires server".to_owned()))?;
+    let tool = tool_call
+        .arguments
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::InvalidArguments("mcp tool requires tool".to_owned()))?;
+    let arguments = tool_call
+        .arguments
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let result = mcp
+        .call(server, tool, arguments)
+        .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+    let output = json!({
+        "server": result.server,
+        "tool": result.tool,
+        "is_error": result.is_error,
+        "content": result.content,
+        "structured_content": result.structured_content,
+    });
+    Ok(ToolExecution {
+        summary: format!(
+            "MCP {}.{} {}",
+            result.server,
+            result.tool,
+            if result.is_error { "error" } else { "ok" }
+        ),
+        output,
+    })
+}
+
+fn append_mcp_catalog(prompt: &mut String, mcp: &McpRuntime) {
+    if !mcp.tools().is_empty() {
+        prompt.push_str(
+            "\n\nMCP tools (namespaced as mcp__server__tool; always require user approval):\n",
+        );
+        for tool in mcp.tools() {
+            prompt.push_str(&format!(
+                "- {}: {}\n",
+                tool.namespaced_name, tool.description
+            ));
+        }
+        prompt.push_str(
+            "Invoke MCP tools by their full namespaced names. Do not invent MCP servers that are not listed.\n",
+        );
+    }
+    if !mcp.startup_errors().is_empty() {
+        prompt.push_str("\nMCP startup warnings:\n");
+        for error in mcp.startup_errors() {
+            prompt.push_str("- ");
+            prompt.push_str(error);
+            prompt.push('\n');
+        }
+    }
+}
+
+fn mcp_display_name(tool_call: &ToolCall) -> String {
+    if tool_call.name == ToolName::Mcp {
+        let server = tool_call
+            .arguments
+            .get("server")
+            .and_then(Value::as_str)
+            .unwrap_or("server");
+        let tool = tool_call
+            .arguments
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        xcoding_mcp::encode_tool_name(server, tool)
+    } else {
+        tool_call.name.as_str().to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -992,6 +1160,27 @@ mod tests {
                 "git_pull"
             ]
         );
+    }
+
+    #[test]
+    fn maps_namespaced_mcp_tool_calls() {
+        let provider = ProviderToolCall {
+            id: "call_mcp_echo".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "mcp__demo__echo".to_owned(),
+                arguments: r#"{"text":"hi"}"#.to_owned(),
+            },
+        };
+        let protocol = protocol_tool_call(provider).expect("decode");
+        assert_eq!(protocol.name, ToolName::Mcp);
+        assert_eq!(protocol.arguments["server"], "demo");
+        assert_eq!(protocol.arguments["tool"], "echo");
+        assert_eq!(protocol.arguments["arguments"]["text"], "hi");
+
+        let round_trip = provider_tool_call(&protocol).expect("encode");
+        assert_eq!(round_trip.function.name, "mcp__demo__echo");
+        assert_eq!(round_trip.function.arguments, r#"{"text":"hi"}"#);
     }
 }
 

@@ -55,6 +55,12 @@ On Windows, replacing an existing file requires deleting the destination before 
 
 Optional skills live at `.xcoding/skills/<name>/SKILL.md`. XCoding lists their names and descriptions in the system prompt and loads full instructions only when the agent calls the read-only `load_skill` tool.
 
+## MCP tools
+
+Optional MCP servers are configured in `.xcoding/mcp.json` under `mcpServers`. V1 supports stdio JSON-RPC only: XCoding starts each enabled server for a turn, performs `initialize` / `notifications/initialized` / `tools/list`, and exposes tools as provider names `mcp__server__tool`.
+
+Protocol tool calls use `name: "mcp"` with arguments `{ "server", "tool", "arguments" }`. MCP tools are always treated as high-risk `exec` and always require approval, even in `auto-edit`. Failed server startup is recorded as a system-prompt warning; it does not crash the session unless config JSON is invalid.
+
 ## Credentials
 
 XCoding does not store cloud credentials in the repository or its session database. Configure the OpenAI-compatible provider through environment variables:

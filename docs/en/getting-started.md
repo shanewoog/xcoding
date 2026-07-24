@@ -126,6 +126,22 @@ Ordinary high-risk workspace writes under `.git` / `.xcoding` always need approv
 
 Optional: add workspace skills under `.xcoding/skills/<name>/SKILL.md` so the agent can call `load_skill`.
 
+Optional: configure stdio MCP servers in `.xcoding/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "demo": {
+      "command": "node",
+      "args": ["mock-mcp-server.mjs"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Enabled servers are started for each agent turn. Their tools appear to the model as namespaced functions `mcp__<server>__<tool>`. Protocol tool name is `mcp` with arguments `{ server, tool, arguments }`. Every MCP call requires user approval in both `ask` and `auto-edit` modes. `xcoding doctor` reports `mcp_config` status.
+
 ## Next Reading
 
 - [Session Recovery And Safety](./session-safety.md)

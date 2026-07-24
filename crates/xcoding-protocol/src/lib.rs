@@ -200,6 +200,8 @@ pub enum ToolName {
     GitPush,
     GitFetch,
     GitPull,
+    /// External MCP tool (`mcp__server__tool` at the provider layer).
+    Mcp,
 }
 
 impl ToolName {
@@ -220,6 +222,7 @@ impl ToolName {
             Self::GitPush => "git_push",
             Self::GitFetch => "git_fetch",
             Self::GitPull => "git_pull",
+            Self::Mcp => "mcp",
         }
     }
 }
@@ -675,3 +678,4 @@ mod tests {
         );
     }
 }
+

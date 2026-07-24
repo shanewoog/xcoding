@@ -140,3 +140,19 @@ pnpm cli -- chat "CLI 包是做什么的？" --workspace . --session <session-id
 Desktop：选中已完成的会话后再发送（按钮显示 **Continue**）。点 **New chat** 开启新会话。
 
 可选：在 `.xcoding/skills/<name>/SKILL.md` 添加工作区 skill，Agent 可通过 `load_skill` 加载。
+
+可选：在 `.xcoding/mcp.json` 配置 stdio MCP 服务器：
+
+```json
+{
+  "mcpServers": {
+    "demo": {
+      "command": "node",
+      "args": ["mock-mcp-server.mjs"],
+      "enabled": true
+    }
+  }
+}
+```
+
+已启用服务器会在每次 Agent 回合启动。其工具以命名空间函数名 `mcp__<server>__<tool>` 暴露给模型；协议层工具名为 `mcp`，参数为 `{ server, tool, arguments }`。无论 `ask` 还是 `auto-edit`，MCP 调用都需要用户审批。`xcoding doctor` 会报告 `mcp_config` 状态。

@@ -155,7 +155,7 @@ Duration target: continuous after V1
 - stronger command policy engine (Wave Z: workspace denylist, expanded hard denials, structured `policy_code`)
 - more cloud providers
 - skills system (Wave Y: workspace `.xcoding/skills/*/SKILL.md` catalog + read-only `load_skill`)
-- MCP support
+- MCP support (Wave AA: stdio MCP client via `.xcoding/mcp.json`, namespaced `mcp__server__tool` tools, always approval-gated)
 - better patch confidence and conflict UX (Wave X: structured `patch_conflict` tool errors, agent re-read guidance, Desktop CONFLICT badge, CLI retry hint)
 - richer git workflows (Wave S: structured `git_log` + `git_show`; Wave T: approved `git_add` + `git_commit`; Wave U: approved `git_push` without force; Wave V: approved `git_fetch` + `git_pull` (default ff-only); Wave W: Desktop/CLI dedicated git review presentation; reset/force/rebase later)
 - performance work on large repos

@@ -1475,6 +1475,7 @@ dependencies = [
  "uuid",
  "xcoding-context",
  "xcoding-core",
+ "xcoding-mcp",
  "xcoding-policy",
  "xcoding-protocol",
  "xcoding-providers",
@@ -1496,6 +1497,15 @@ dependencies = [
  "xcoding-policy",
  "xcoding-protocol",
  "xcoding-store",
+]
+
+[[package]]
+name = "xcoding-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

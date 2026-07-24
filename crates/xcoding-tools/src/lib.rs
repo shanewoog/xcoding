@@ -190,6 +190,10 @@ impl ToolRegistry {
                 // Mutates .git index/refs or talks to a remote; always high-risk write.
                 Ok((PermissionKind::Write, true, false))
             }
+            ToolName::Mcp => {
+                // External MCP tools can perform arbitrary side effects; always ask.
+                Ok((PermissionKind::Exec, true, false))
+            }
             ToolName::ApplyPatch => {
                 let args: ApplyPatchArgs = parse_arguments(&tool_call.arguments)?;
                 Ok((PermissionKind::Write, is_high_risk_path(&args.path), false))
@@ -269,6 +273,9 @@ impl ToolRegistry {
             ToolName::GitPush => self.git_push(parse_arguments(&tool_call.arguments)?),
             ToolName::GitFetch => self.git_fetch(parse_arguments(&tool_call.arguments)?),
             ToolName::GitPull => self.git_pull(parse_arguments(&tool_call.arguments)?),
+            ToolName::Mcp => Err(ToolError::InvalidArguments(
+                "MCP tools must be executed by the agent MCP runtime".to_owned(),
+            )),
         }
     }
 
@@ -3031,3 +3038,4 @@ mod tests {
     }
 
 }
+

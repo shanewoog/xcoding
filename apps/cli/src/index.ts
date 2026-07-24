@@ -2,7 +2,7 @@
 
 import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioRpcClient } from "@xcoding/client";
 import type {
@@ -580,6 +580,36 @@ async function runDoctorCommand(
     gitDetail = error instanceof Error ? error.message : String(error);
   }
   checks.push({ name: "git", ok: gitOk, detail: gitDetail });
+
+  try {
+    const mcpPath = join(workspace, ".xcoding", "mcp.json");
+    if (!existsSync(mcpPath)) {
+      checks.push({
+        name: "mcp_config",
+        ok: true,
+        detail: "no .xcoding/mcp.json (MCP disabled)",
+      });
+    } else {
+      const raw = await readFile(mcpPath, "utf8");
+      const parsed = JSON.parse(raw) as {
+        mcpServers?: Record<string, { enabled?: boolean }>;
+      };
+      const servers = parsed.mcpServers ?? {};
+      const names = Object.keys(servers);
+      const enabled = names.filter((name) => servers[name]?.enabled !== false).length;
+      checks.push({
+        name: "mcp_config",
+        ok: true,
+        detail: `servers=${names.length} enabled=${enabled}`,
+      });
+    }
+  } catch (error) {
+    checks.push({
+      name: "mcp_config",
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   const report = {
     ready: checks.every((check) => check.ok),

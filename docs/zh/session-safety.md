@@ -50,6 +50,12 @@ Windows 上替换已有文件时，需要先删除目标文件，再重命名临
 - 正在运行的命令会被终止：`run_command` 在阻塞线程中执行，轮询取消探针，取消后杀掉子进程。
 - stdio JSON-RPC server 在 `session.chat` / `session.resolve` 执行期间仍可接受 `session.cancel` 及其他短请求。
 
+## MCP 工具
+
+可选 MCP 服务器配置在 `.xcoding/mcp.json` 的 `mcpServers` 下。V1 仅支持 stdio JSON-RPC：每个 Agent 回合会启动已启用服务器，完成 `initialize` / `notifications/initialized` / `tools/list`，并以 `mcp__server__tool` 命名空间暴露给模型。
+
+协议层工具名为 `mcp`，参数为 `{ "server", "tool", "arguments" }`。MCP 一律按高风险 `exec` 处理，在 `ask` 与 `auto-edit` 下都需要审批。服务器启动失败会写入系统提示警告；仅当 `mcp.json` 非法 JSON 时才会直接失败。
+
 ## 凭据
 
 XCoding 不会把云模型凭据保存到仓库或会话数据库中。请通过环境变量配置 OpenAI 兼容供应商：

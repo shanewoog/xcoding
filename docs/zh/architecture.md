@@ -96,6 +96,7 @@ XCoding/
   crates/
     xcoding-core/        # agent loop、编排
     xcoding-tools/       # fs/search/patch/shell/git 工具
+    xcoding-mcp/         # stdio MCP 客户端与工作区 mcp.json
     xcoding-policy/      # 权限决策
     xcoding-providers/   # 云模型供应商
     xcoding-context/     # 规则、检索、摘要
@@ -195,6 +196,7 @@ V1 工具：
 | `git_push` | write (high-risk) | 推送分支到远端（始终需要审批；不 force） |
 | `git_fetch` | write (high-risk) | 从远端 fetch（始终需要审批；不 force） |
 | `git_pull` | write (high-risk) | 从远端 pull（始终需要审批；默认 ff-only，不 force/rebase） |
+| `mcp` | exec (high-risk) | 调用已配置 MCP 工具（`server` + `tool` + `arguments`）；始终需审批 |
 
 工具要求：
 

@@ -11,6 +11,7 @@ members = [
   "crates/xcoding-server",
   "crates/xcoding-store",
   "crates/xcoding-tools",
+  "crates/xcoding-mcp",
 ]
 
 [workspace.package]

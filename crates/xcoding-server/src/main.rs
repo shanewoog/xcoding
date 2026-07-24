@@ -337,6 +337,7 @@ fn rpc_error_for_agent(error: AgentError) -> RpcError {
         AgentError::InvalidProviderToolCall(message) => RpcError::provider_error(message),
         AgentError::ToolCallLimit => RpcError::provider_error(error.to_string()),
         AgentError::Cancelled => RpcError::invalid_params("session cancelled".to_owned()),
+        AgentError::Mcp(error) => RpcError::invalid_params(error.to_string()),
     }
 }
 

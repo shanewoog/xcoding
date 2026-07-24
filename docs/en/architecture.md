@@ -96,6 +96,7 @@ XCoding/
   crates/
     xcoding-core/        # agent loop, orchestration
     xcoding-tools/       # fs/search/patch/shell/git tools
+    xcoding-mcp/         # stdio MCP client and workspace mcp.json
     xcoding-policy/      # permission decisions
     xcoding-providers/   # cloud model providers
     xcoding-context/     # rules, retrieval, summarization
@@ -195,6 +196,7 @@ V1 tools:
 | `git_push` | write (high-risk) | push branch to remote (always requires approval; no force) |
 | `git_fetch` | write (high-risk) | fetch from remote (always requires approval; no force) |
 | `git_pull` | write (high-risk) | pull from remote (always requires approval; default ff-only; no force/rebase) |
+| `mcp` | exec (high-risk) | call a configured MCP tool (`server` + `tool` + `arguments`); always requires approval |
 
 Tool requirements:
 
