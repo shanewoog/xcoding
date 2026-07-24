@@ -61,6 +61,16 @@ function sessionTitle(session: Session, locale: Locale): string {
   );
 }
 
+function toolMessagePreview(content: string): string {
+  const line = content
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find((part) => part.length > 0) || content.trim();
+  const collapsed = line.replace(/\s+/g, " ");
+  if (collapsed.length <= 72) return collapsed;
+  return `${collapsed.slice(0, 71)}…`;
+}
+
 function latestPlan(events: PersistedSessionEvent[]): PlanStep[] {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index].event;
@@ -1277,15 +1287,23 @@ export function App() {
         </header>
         <div className="conversation" aria-live="polite" ref={conversationRef}>
           {messages.map((message) => (
-            <article className={`message message-${message.role}`} key={message.id}>
-              <p>{formatMessageRole(message.role, locale)}</p>
-              <div>{message.content}</div>
-            </article>
+            message.role === "tool" ? (
+              <details className={`message message-${message.role}`} key={message.id}>
+                <summary>
+                  <span>{formatMessageRole(message.role, locale)}</span>
+                  <span className="message-preview">{toolMessagePreview(message.content)}</span>
+                </summary>
+                <div className="message-body">{message.content}</div>
+              </details>
+            ) : (
+              <article className={`message message-${message.role}`} key={message.id}>
+                <div className="message-body">{message.content}</div>
+              </article>
+            )
           ))}
           {streamedText ? (
             <article className="message message-assistant streaming">
-              <p>{t(locale, "role.assistant")}</p>
-              <div>{streamedText}</div>
+              <div className="message-body">{streamedText}</div>
             </article>
           ) : null}
           {messages.length === 0 && !streamedText && !isRunning ? (

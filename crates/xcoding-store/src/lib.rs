@@ -28,6 +28,22 @@ pub struct SessionStore {
     connection: Connection,
 }
 
+fn title_from_message(message: &str) -> String {
+    let line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 48;
+    if collapsed.chars().count() <= MAX_CHARS {
+        return collapsed;
+    }
+    let mut out: String = collapsed.chars().take(MAX_CHARS.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 impl SessionStore {
     pub fn in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
@@ -87,7 +103,7 @@ impl SessionStore {
             )?;
             let rows = statement.query_map([workspace_root], Self::row_to_session)?;
             for row in rows {
-                sessions.push(row?);
+                sessions.push(self.fill_session_title(row?)?);
             }
         } else {
             let mut statement = self.connection.prepare(
@@ -96,7 +112,7 @@ impl SessionStore {
             )?;
             let rows = statement.query_map([], Self::row_to_session)?;
             for row in rows {
-                sessions.push(row?);
+                sessions.push(self.fill_session_title(row?)?);
             }
         }
 
@@ -135,7 +151,8 @@ impl SessionStore {
     }
 
     pub fn get_session(&self, id: Uuid) -> Result<Option<Session>, StoreError> {
-        self.connection
+        let session = self
+            .connection
             .query_row(
                 "SELECT id, workspace_root, mode, provider, model, status, created_at, updated_at, title
                  FROM sessions WHERE id = ?1",
@@ -143,7 +160,11 @@ impl SessionStore {
                 Self::row_to_session,
             )
             .optional()
-            .map_err(StoreError::from)
+            .map_err(StoreError::from)?;
+        match session {
+            Some(session) => Ok(Some(self.fill_session_title(session)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn delete_session(&self, id: Uuid) -> Result<bool, StoreError> {
@@ -382,6 +403,61 @@ impl SessionStore {
         }
 
         self.get_session(id)
+    }
+
+    pub fn set_session_title(
+        &self,
+        id: Uuid,
+        title: impl Into<String>,
+    ) -> Result<Option<Session>, StoreError> {
+        let title = title.into();
+        let changed = self.connection.execute(
+            "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+            params![title, Utc::now().to_rfc3339(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_session(id)
+    }
+
+    pub fn first_user_message_content(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT content FROM messages
+                 WHERE session_id = ?1 AND role = ?2
+                 ORDER BY created_at ASC, rowid ASC
+                 LIMIT 1",
+                params![session_id.to_string(), serde_json::to_string(&MessageRole::User)?],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    fn fill_session_title(&self, mut session: Session) -> Result<Session, StoreError> {
+        if session
+            .title
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return Ok(session);
+        }
+        if let Some(content) = self.first_user_message_content(session.id)? {
+            let derived = title_from_message(&content);
+            if !derived.is_empty() {
+                let _ = self.connection.execute(
+                    "UPDATE sessions SET title = ?1 WHERE id = ?2 AND (title IS NULL OR trim(title) = '')",
+                    params![derived.clone(), session.id.to_string()],
+                )?;
+                session.title = Some(derived);
+            }
+        }
+        Ok(session)
     }
 
     fn migrate(&self) -> Result<(), StoreError> {

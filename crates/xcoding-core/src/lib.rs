@@ -104,12 +104,23 @@ impl CoreService {
         }
 
         let config = self.workspace_config(&params.workspace_root)?;
+        let derived_title = params
+            .title
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                let title = title_from_user_message(&params.message);
+                if title.is_empty() {
+                    None
+                } else {
+                    Some(title)
+                }
+            });
         let session = self.store.create_session(CreateSessionParams {
             workspace_root: params.workspace_root,
             mode: params.mode.unwrap_or(config.mode),
             provider: params.provider.unwrap_or(config.provider),
             model: params.model.unwrap_or(config.model),
-            title: params.title,
+            title: derived_title,
         })?;
         let session = self.set_status(session.id, SessionStatus::Running)?;
         self.store
@@ -841,6 +852,23 @@ fn line_change_counts(original: &str, applied: &str) -> (u32, u32) {
     }
     (added, removed)
 }
+
+fn title_from_user_message(message: &str) -> String {
+    let line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 48;
+    if collapsed.chars().count() <= MAX_CHARS {
+        return collapsed;
+    }
+    let mut out: String = collapsed.chars().take(MAX_CHARS.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
