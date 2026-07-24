@@ -655,9 +655,9 @@ export function App() {
         <div className="settings-grid">
           <section className="settings-card" aria-label={t(locale, "settings.section.language")}>
             <p className="panel-title">{t(locale, "settings.section.language")}</p>
-            <label className="field-label" htmlFor="ui-locale">{t(locale, "lang.label")}</label>
             <select
               id="ui-locale"
+              aria-label={t(locale, "lang.label")}
               value={locale}
               onChange={(event) => setLocale(event.target.value as Locale)}
               disabled={isRunning || isSavingConfig}
