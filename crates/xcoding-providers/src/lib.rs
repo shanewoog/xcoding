@@ -150,11 +150,10 @@ pub struct OpenAiCompatibleProvider {
 
 /// Inspect cloud-provider credentials without making a network request.
 /// Does not return the full API key.
-/// Resolve credentials (optional UI overrides first) and list provider models.
-pub fn list_models_blocking(
+fn resolve_provider_credentials(
     base_url_override: Option<&str>,
     api_key_override: Option<&str>,
-) -> Result<ListModelsResult, String> {
+) -> Result<(String, String), String> {
     bootstrap_credentials();
 
     let api_key = api_key_override
@@ -181,6 +180,27 @@ pub fn list_models_blocking(
         })
         .unwrap_or_else(|| "https://ai.v58.dev/v1".to_owned());
 
+    Ok((api_key, base_url))
+}
+
+/// Resolve credentials (optional UI overrides first) and list provider models.
+pub async fn list_models(
+    base_url_override: Option<&str>,
+    api_key_override: Option<&str>,
+) -> Result<ListModelsResult, String> {
+    let (api_key, base_url) = resolve_provider_credentials(base_url_override, api_key_override)?;
+    OpenAiCompatibleProvider::new(api_key, base_url)
+        .list_models()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Blocking helper for non-async callers. Avoid using this on the UI thread.
+pub fn list_models_blocking(
+    base_url_override: Option<&str>,
+    api_key_override: Option<&str>,
+) -> Result<ListModelsResult, String> {
+    let (api_key, base_url) = resolve_provider_credentials(base_url_override, api_key_override)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

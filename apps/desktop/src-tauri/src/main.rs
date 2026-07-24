@@ -16,8 +16,8 @@ use xcoding_protocol::{
     UserConfig, WorkspaceConfig,
 };
 use xcoding_providers::{
-    apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models_blocking,
-    load_user_config, save_user_config, user_config_dir,
+    apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models, load_user_config,
+    save_user_config, user_config_dir,
 };
 
 fn boot_log(message: &str) {
@@ -43,17 +43,37 @@ fn open_core(_app: &AppHandle) -> Result<CoreService, String> {
     CoreService::open(database_path()?).map_err(|error| error.to_string())
 }
 
+/// CoreService holds a rusqlite Connection (!Send), so agent work cannot live in a
+/// Send async future that awaits across DB usage. Run the full agent turn on a
+/// blocking worker and block_on there (outside any async poll context).
+fn block_on_local<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    tauri::async_runtime::block_on(future)
+}
+
+async fn run_agent_blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("agent worker failed: {error}"))?
+}
+
 #[tauri::command]
 fn provider_status() -> Result<ProviderAuthStatus, String> {
     Ok(inspect_auth())
 }
 
 #[tauri::command]
-fn list_provider_models(
+async fn list_provider_models(
     base_url: Option<String>,
     api_key: Option<String>,
 ) -> Result<ListModelsResult, String> {
-    list_models_blocking(base_url.as_deref(), api_key.as_deref())
+    list_models(base_url.as_deref(), api_key.as_deref()).await
 }
 
 #[tauri::command]
@@ -145,16 +165,20 @@ fn session_replay(app: AppHandle, session_id: String) -> Result<ReplaySessionRes
 }
 
 #[tauri::command]
-fn rollback_restore_point(
+async fn rollback_restore_point(
     app: AppHandle,
     params: RollbackRestorePointParams,
 ) -> Result<RollbackRestorePointResult, String> {
-    let core = open_core(&app)?;
-    AgentService::new(&core)
-        .rollback(params, move |event| {
-            let _ = app.emit("session-event", event);
-        })
-        .map_err(|error| error.to_string())
+    let app_for_events = app.clone();
+    run_agent_blocking(move || {
+        let core = open_core(&app)?;
+        AgentService::new(&core)
+            .rollback(params, move |event| {
+                let _ = app_for_events.emit("session-event", event);
+            })
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -176,24 +200,32 @@ fn cancel_session(
 }
 
 #[tauri::command]
-fn resolve_action(
+async fn resolve_action(
     app: AppHandle,
     params: ResolveActionParams,
 ) -> Result<ResolveActionResult, String> {
-    let core = open_core(&app)?;
-    tauri::async_runtime::block_on(AgentService::new(&core).resolve(params, move |event| {
-        let _ = app.emit("session-event", event);
-    }))
-    .map_err(|error| error.to_string())
+    let app_for_events = app.clone();
+    run_agent_blocking(move || {
+        let core = open_core(&app)?;
+        block_on_local(AgentService::new(&core).resolve(params, move |event| {
+            let _ = app_for_events.emit("session-event", event);
+        }))
+        .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn chat(app: AppHandle, params: ChatParams) -> Result<ChatResult, String> {
-    let core = open_core(&app)?;
-    tauri::async_runtime::block_on(AgentService::new(&core).chat(params, move |event| {
-        let _ = app.emit("session-event", event);
-    }))
-    .map_err(|error| error.to_string())
+async fn chat(app: AppHandle, params: ChatParams) -> Result<ChatResult, String> {
+    let app_for_events = app.clone();
+    run_agent_blocking(move || {
+        let core = open_core(&app)?;
+        block_on_local(AgentService::new(&core).chat(params, move |event| {
+            let _ = app_for_events.emit("session-event", event);
+        }))
+        .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 fn load_portable_dotenv() {
