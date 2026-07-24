@@ -1018,9 +1018,6 @@ export function App() {
                 {formatSessionStatus(activeSession.status, locale)}
               </span>
             ) : null}
-            <button type="button" className="quiet-button" onClick={() => setView("settings")}>
-              {t(locale, "action.settings")}
-            </button>
             {activeSession ? (
               <button type="button" className="quiet-button" onClick={() => startNewChat()} disabled={isRunning}>
                 {t(locale, "action.newChat")}
@@ -1325,3 +1322,4 @@ export function App() {
     </main>
   );
 }
+
