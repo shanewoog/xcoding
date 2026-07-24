@@ -257,6 +257,77 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 .composer-footer button:disabled { opacity: 0.5; cursor: not-allowed; }
 .composer-footer span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.followup-queue {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  gap: 0.55rem;
+  margin-bottom: 0.75rem;
+  padding: 0.7rem 0.8rem;
+}
+.followup-queue-header {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.75rem;
+  justify-content: space-between;
+}
+.followup-queue-header strong {
+  color: var(--text);
+  font-size: 0.82rem;
+}
+.followup-queue-header span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+.followup-queue ul {
+  display: grid;
+  gap: 0.4rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.followup-queue li {
+  align-items: center;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 0.45rem 0.55rem;
+}
+.followup-index {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.followup-text {
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.followup-queue .quiet-button {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  padding: 0.28rem 0.45rem;
+}
+.composer-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.45rem;
+}
+.composer-footer > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .trace-panel { display: grid; align-content: start; gap: 1.1rem; }
 .panel-title { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
 .plan-list {

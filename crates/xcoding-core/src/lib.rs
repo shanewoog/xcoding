@@ -42,6 +42,13 @@ impl CancelProbe {
             .insert(session_id);
     }
 
+    pub fn clear(&self, session_id: uuid::Uuid) {
+        self.inner
+            .lock()
+            .expect("cancel probe lock")
+            .remove(&session_id);
+    }
+
     pub fn is_cancelled(&self, session_id: uuid::Uuid) -> bool {
         self.inner
             .lock()
@@ -134,7 +141,11 @@ impl CoreService {
         }
 
         match session.status {
-            SessionStatus::Done | SessionStatus::Failed | SessionStatus::Created => {}
+            // Cancelled is interruptible so Desktop can steer a run with a new message.
+            SessionStatus::Done
+            | SessionStatus::Failed
+            | SessionStatus::Created
+            | SessionStatus::Cancelled => {}
             SessionStatus::NeedUser => {
                 return Err(CoreError::InvalidInput(
                     "session is waiting for approval; resolve or cancel it before continuing"
@@ -146,13 +157,9 @@ impl CoreService {
                     "session is already running".to_owned(),
                 ));
             }
-            SessionStatus::Cancelled => {
-                return Err(CoreError::InvalidInput(
-                    "cancelled sessions cannot be continued".to_owned(),
-                ));
-            }
         }
 
+        self.cancel_probe.clear(session_id);
         self.store
             .append_message(session_id, MessageRole::User, params.message.trim())?;
         self.set_status(session_id, SessionStatus::Running)
@@ -1264,5 +1271,44 @@ mod tests {
             session_id: Some(session.id),
         });
         assert!(wrong_workspace.is_err(), "workspace mismatch rejected");
+    }
+
+    #[test]
+    fn continues_cancelled_session_after_interrupt() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "First".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+                session_id: None,
+            })
+            .expect("chat starts");
+        core.cancel_session(session.id).expect("interrupt");
+        assert!(
+            core.is_session_cancelled(session.id).expect("flag"),
+            "cancel probe marked"
+        );
+
+        let continued = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Steer this way".to_owned(),
+                mode: None,
+                provider: None,
+                model: None,
+                title: None,
+                session_id: Some(session.id),
+            })
+            .expect("cancelled session can be steered");
+        assert_eq!(continued.id, session.id);
+        assert_eq!(continued.status, SessionStatus::Running);
+        assert!(
+            !core.is_session_cancelled(session.id).expect("flag cleared"),
+            "cancel probe cleared on continue"
+        );
     }
 }

@@ -174,6 +174,9 @@ export function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
+  const [followUpQueue, setFollowUpQueue] = useState<Array<{ id: string; sessionId: string; text: string }>>([]);
+  const followUpQueueRef = useRef<Array<{ id: string; sessionId: string; text: string }>>([]);
+  const drainFollowUpsRef = useRef(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamedText, setStreamedText] = useState("");
   const [plan, setPlan] = useState<PlanStep[]>([]);
@@ -199,6 +202,10 @@ export function App() {
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
   );
+
+  useEffect(() => {
+    followUpQueueRef.current = followUpQueue;
+  }, [followUpQueue]);
 
   useEffect(() => {
     saveLocale(locale);
@@ -473,11 +480,18 @@ export function App() {
   }, [locale]);
 
   function canContinueSession(session: Session | null): boolean {
-    return !!session && (session.status === "done" || session.status === "failed" || session.status === "created");
+    return !!session && (
+      session.status === "done"
+      || session.status === "failed"
+      || session.status === "created"
+      || session.status === "cancelled"
+    );
   }
 
   function startNewChat(): void {
     setActiveSessionId(null);
+    setFollowUpQueue([]);
+    followUpQueueRef.current = [];
     setMessages([]);
     setStreamedText("");
     setPlan([]);
@@ -489,6 +503,32 @@ export function App() {
     setTaskSummary(null);
     setReplaySteps([]);
     setError(null);
+  }
+
+  function enqueueFollowUp(sessionId: string, text: string): void {
+    const item = {
+      id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      sessionId,
+      text,
+    };
+    setFollowUpQueue((current) => {
+      const next = [...current, item];
+      followUpQueueRef.current = next;
+      return next;
+    });
+  }
+
+  function removeFollowUp(id: string): void {
+    setFollowUpQueue((current) => {
+      const next = current.filter((item) => item.id !== id);
+      followUpQueueRef.current = next;
+      return next;
+    });
+  }
+
+  function visibleFollowUps(sessionId: string | null): Array<{ id: string; sessionId: string; text: string }> {
+    if (!sessionId) return [];
+    return followUpQueue.filter((item) => item.sessionId === sessionId);
   }
 
   useEffect(() => {
@@ -528,37 +568,62 @@ export function App() {
     }
   }
 
-  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
+  async function sendChatMessage(
+    message: string,
+    options?: { steer?: boolean; sessionId?: string | null; skipDrain?: boolean },
+  ): Promise<string | null> {
     const root = workspaceRoot.trim();
-    const message = prompt.trim();
-    if (isRunning) return;
-    // Always accept the click so grey-out is not a dead end: surface the exact missing prerequisite.
     if (!root) {
       setError(t(locale, "error.needWorkspace"));
-      return;
+      return null;
     }
-    if (!message) {
+    if (!message.trim()) {
       setError(t(locale, "error.needPrompt"));
-      return;
+      return null;
     }
     if (providerStatus && !providerStatus.ready) {
       setError(t(locale, "error.needProvider"));
-      return;
+      return null;
     }
     if (!model.trim()) {
       setError(t(locale, "error.needModel"));
-      return;
+      return null;
     }
     if (!isTauriRuntime) {
       setError(t(locale, "error.tauriOnly"));
-      return;
+      return null;
     }
 
-    const continuing = canContinueSession(activeSession);
+    const targetSessionId = options?.sessionId ?? activeSessionId;
+    let sessionForContinue =
+      (targetSessionId
+        ? sessions.find((session) => session.id === targetSessionId) ?? activeSession
+        : activeSession);
+
+    if (
+      options?.steer
+      && targetSessionId
+      && (isRunning || sessionForContinue?.status === "running" || sessionForContinue?.status === "need_user")
+    ) {
+      try {
+        await invoke<CancelSessionResult>("cancel_session", {
+          params: { session_id: targetSessionId },
+        });
+        await refreshSessions();
+        sessionForContinue = sessionForContinue
+          ? { ...sessionForContinue, status: "cancelled" }
+          : null;
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        return null;
+      }
+    }
+
+    const continuing =
+      canContinueSession(sessionForContinue)
+      || (!!targetSessionId && !!options?.steer);
     setError(null);
     setIsRunning(true);
-    setPrompt("");
     if (!continuing) {
       setActiveSessionId(null);
       setMessages([]);
@@ -577,27 +642,32 @@ export function App() {
       setApprovalSummary(null);
       setPatchPreview(null);
       setTaskSummary(null);
+      const sid = (sessionForContinue?.id || targetSessionId) as string;
       setMessages((current) => [
         ...current,
         {
           id: `local-user-${Date.now()}`,
-          session_id: activeSession!.id,
+          session_id: sid,
           role: "user",
           content: message,
           created_at: new Date().toISOString(),
         },
       ]);
     }
+
     const params: ChatParams = {
       workspace_root: root,
       message,
       mode,
       provider: defaultProvider,
       model,
-      session_id: continuing ? activeSession!.id : undefined,
+      session_id: continuing ? (sessionForContinue?.id || targetSessionId || undefined) : undefined,
     };
+
+    let finishedSessionId: string | null = continuing ? (sessionForContinue?.id || targetSessionId) : null;
     try {
       const result = await invoke<ChatResult>("chat", { params });
+      finishedSessionId = result.session.id;
       setActiveSessionId(result.session.id);
       const completedMessage = result.message;
       if (completedMessage) setMessages((current) => mergeMessage(current, completedMessage));
@@ -618,25 +688,103 @@ export function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setIsRunning(false);
+      if (!options?.skipDrain) {
+        await drainFollowUpQueue(finishedSessionId);
+      }
     }
+    return finishedSessionId;
+  }
+
+  async function drainFollowUpQueue(sessionId: string | null): Promise<void> {
+    if (drainFollowUpsRef.current || !sessionId) return;
+
+    let status: Session["status"] | undefined;
+    try {
+      const latest = await invoke<Session[]>("list_sessions", {
+        workspaceRoot: workspaceRoot.trim() || null,
+      });
+      setSessions(latest);
+      status = latest.find((session) => session.id === sessionId)?.status;
+    } catch {
+      status = sessions.find((session) => session.id === sessionId)?.status;
+    }
+
+    if (status === "need_user" || status === "running") return;
+
+    const next = followUpQueueRef.current.find((item) => item.sessionId === sessionId);
+    if (!next) return;
+
+    drainFollowUpsRef.current = true;
+    try {
+      setFollowUpQueue((current) => {
+        const remaining = current.filter((item) => item.id !== next.id);
+        followUpQueueRef.current = remaining;
+        return remaining;
+      });
+      // Keep the guard until this send finishes, then chain the next item explicitly.
+      await sendChatMessage(next.text, { sessionId, skipDrain: true });
+    } finally {
+      drainFollowUpsRef.current = false;
+    }
+    await drainFollowUpQueue(sessionId);
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const message = prompt.trim();
+    if (!message) {
+      setError(t(locale, "error.needPrompt"));
+      return;
+    }
+
+    // While a turn is in flight or waiting for approval, queue follow-ups like Codex.
+    if (isRunning || activeSession?.status === "running" || activeSession?.status === "need_user") {
+      if (!activeSessionId) {
+        setError(t(locale, "composer.needActiveSession"));
+        return;
+      }
+      enqueueFollowUp(activeSessionId, message);
+      setPrompt("");
+      setError(null);
+      return;
+    }
+
+    setPrompt("");
+    await sendChatMessage(message);
+  }
+
+  async function steerCurrentRun(): Promise<void> {
+    const message = prompt.trim();
+    if (!message) {
+      setError(t(locale, "error.needPrompt"));
+      return;
+    }
+    if (!activeSessionId) {
+      setError(t(locale, "composer.needActiveSession"));
+      return;
+    }
+    setPrompt("");
+    await sendChatMessage(message, { steer: true, sessionId: activeSessionId });
   }
 
   async function resolveAction(approved: boolean): Promise<void> {
     if (!pendingAction || !activeSessionId) return;
+    const sessionId = activeSessionId;
     setError(null);
     setIsRunning(true);
     try {
       const result = await invoke<ResolveActionResult>("resolve_action", {
-        params: { session_id: activeSessionId, action_id: pendingAction.id, approved },
+        params: { session_id: sessionId, action_id: pendingAction.id, approved },
       });
       const completedMessage = result.message;
       if (completedMessage) setMessages((current) => mergeMessage(current, completedMessage));
       await refreshSessions();
-      await hydrateSession(activeSessionId);
+      await hydrateSession(sessionId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setIsRunning(false);
+      await drainFollowUpQueue(sessionId);
     }
   }
 
@@ -670,16 +818,18 @@ export function App() {
 
   async function cancelSession(): Promise<void> {
     if (!activeSessionId) return;
+    const sessionId = activeSessionId;
     setError(null);
     setIsRunning(true);
     try {
-      await invoke<CancelSessionResult>("cancel_session", { params: { session_id: activeSessionId } });
+      await invoke<CancelSessionResult>("cancel_session", { params: { session_id: sessionId } });
       await refreshSessions();
-      await hydrateSession(activeSessionId);
+      await hydrateSession(sessionId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setIsRunning(false);
+      await drainFollowUpQueue(sessionId);
     }
   }
 
@@ -762,9 +912,8 @@ export function App() {
     !!model.trim() &&
     availableModels.length > 0 &&
     !availableModels.some((entry) => entry.id === model.trim());
-  const sendBlockReason = isRunning
-    ? "running"
-    : workspaceMissing
+  const queueMode = !!(isRunning || activeSession?.status === "running" || activeSession?.status === "need_user");
+  const sendBlockReason = workspaceMissing
       ? "workspace"
       : !prompt.trim()
         ? "prompt"
@@ -772,6 +921,8 @@ export function App() {
           ? "provider"
           : modelMissing
             ? "model"
+            : queueMode && !activeSessionId
+              ? "session"
             : null;
   const sendHint =
     sendBlockReason === "workspace"
@@ -782,11 +933,13 @@ export function App() {
           ? t(locale, "composer.needProvider")
           : sendBlockReason === "model"
             ? t(locale, "composer.needModel")
+            : sendBlockReason === "session"
+              ? t(locale, "composer.needActiveSession")
+            : queueMode
+              ? t(locale, "composer.queueHint")
             : null;
-  const sendTitle =
-    sendBlockReason === "running"
-      ? t(locale, "action.working")
-      : sendHint || t(locale, "action.send");
+  const sendTitle = sendHint || (queueMode ? t(locale, "action.queue") : t(locale, "action.send"));
+  const activeFollowUps = visibleFollowUps(activeSessionId);
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -1149,41 +1302,78 @@ export function App() {
           {error ? <p className="error-message">{error}</p> : null}
         </div>
         <form className="composer" onSubmit={submit}>
+          {activeFollowUps.length > 0 ? (
+            <div className="followup-queue" aria-label={t(locale, "composer.queueList")}>
+              <div className="followup-queue-header">
+                <strong>{t(locale, "composer.queueTitle", { count: String(activeFollowUps.length) })}</strong>
+                <span>{t(locale, "composer.queueHelp")}</span>
+              </div>
+              <ul>
+                {activeFollowUps.map((item, index) => (
+                  <li key={item.id}>
+                    <span className="followup-index">#{index + 1}</span>
+                    <span className="followup-text">{item.text}</span>
+                    <button type="button" className="quiet-button" onClick={() => removeFollowUp(item.id)}>
+                      {t(locale, "action.remove")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={onComposerKeyDown}
             placeholder={
-              canContinueSession(activeSession)
-                ? t(locale, "composer.continuePlaceholder")
-                : t(locale, "composer.placeholder")
+              queueMode
+                ? t(locale, "composer.queuePlaceholder")
+                : canContinueSession(activeSession)
+                  ? t(locale, "composer.continuePlaceholder")
+                  : t(locale, "composer.placeholder")
             }
             rows={4}
-            disabled={isRunning}
           />
           <div className="composer-footer">
             <span title={sendHint || undefined}>
-              {canContinueSession(activeSession)
-                ? t(locale, "composer.continueId", { id: activeSession!.id.slice(0, 8) })
-                : sendHint
-                  ? sendHint
-                  : workspaceRoot.trim()
-                    ? workspaceRoot
-                    : t(locale, "composer.chooseWorkspace")}
-            </span>
-            <button
-              type="submit"
-              className={sendBlockReason && sendBlockReason !== "running" ? "send-needs-setup" : undefined}
-              disabled={isRunning}
-              title={sendTitle}
-              aria-label={sendTitle}
-            >
-              {isRunning
-                ? t(locale, "action.working")
+              {queueMode
+                ? t(locale, "composer.queueModeLabel")
                 : canContinueSession(activeSession)
-                  ? t(locale, "action.continue")
-                  : t(locale, "action.send")}
-            </button>
+                  ? t(locale, "composer.continueId", { id: activeSession!.id.slice(0, 8) })
+                  : sendHint
+                    ? sendHint
+                    : workspaceRoot.trim()
+                      ? workspaceRoot
+                      : t(locale, "composer.chooseWorkspace")}
+            </span>
+            <div className="composer-actions">
+              {queueMode ? (
+                <button
+                  type="button"
+                  className="quiet-button"
+                  onClick={() => void steerCurrentRun()}
+                  disabled={!prompt.trim() || workspaceMissing || modelMissing || !!(providerStatus && !providerStatus.ready)}
+                  title={t(locale, "action.steerHelp")}
+                >
+                  {t(locale, "action.steer")}
+                </button>
+              ) : null}
+              <button
+                type="submit"
+                className={sendBlockReason ? "send-needs-setup" : undefined}
+                disabled={!!sendBlockReason}
+                title={sendTitle}
+                aria-label={sendTitle}
+              >
+                {queueMode
+                  ? t(locale, "action.queue")
+                  : isRunning
+                    ? t(locale, "action.working")
+                    : canContinueSession(activeSession)
+                      ? t(locale, "action.continue")
+                      : t(locale, "action.send")}
+              </button>
+            </div>
           </div>
         </form>
       </section>
