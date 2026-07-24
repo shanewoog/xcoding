@@ -380,9 +380,18 @@ export function App() {
     event.preventDefault();
     const root = workspaceRoot.trim();
     const message = prompt.trim();
-    if (!root || !message || isRunning) {
-      if (!root) setError(t(locale, "error.needWorkspace"));
-      else if (!message) setError(t(locale, "error.needPrompt"));
+    if (isRunning) return;
+    // Always accept the click so grey-out is not a dead end: surface the exact missing prerequisite.
+    if (!root) {
+      setError(t(locale, "error.needWorkspace"));
+      return;
+    }
+    if (!message) {
+      setError(t(locale, "error.needPrompt"));
+      return;
+    }
+    if (providerStatus && !providerStatus.ready) {
+      setError(t(locale, "error.needProvider"));
       return;
     }
     if (!isTauriRuntime) {
@@ -438,6 +447,17 @@ export function App() {
       setPrompt("");
       await refreshSessions();
       await hydrateSession(result.session.id);
+      try {
+        const current = await invoke<UserConfig>("get_user_config");
+        const previous = (current.last_workspace_root || "").trim();
+        if (previous !== root) {
+          await invoke<UserConfig>("set_user_config", {
+            config: { ...current, last_workspace_root: root } satisfies UserConfig,
+          });
+        }
+      } catch {
+        // Non-fatal: chat already succeeded.
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -577,6 +597,27 @@ export function App() {
   });
   const doctorReady = desktopDoctorReady(doctorChecks);
   const workspaceMissing = !workspaceRoot.trim();
+  const sendBlockReason = isRunning
+    ? "running"
+    : workspaceMissing
+      ? "workspace"
+      : !prompt.trim()
+        ? "prompt"
+        : providerStatus && !providerStatus.ready
+          ? "provider"
+          : null;
+  const sendHint =
+    sendBlockReason === "workspace"
+      ? t(locale, "composer.needWorkspace")
+      : sendBlockReason === "prompt"
+        ? t(locale, "composer.needPrompt")
+        : sendBlockReason === "provider"
+          ? t(locale, "composer.needProvider")
+          : null;
+  const sendTitle =
+    sendBlockReason === "running"
+      ? t(locale, "action.working")
+      : sendHint || t(locale, "action.send");
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -903,14 +944,22 @@ export function App() {
             disabled={isRunning}
           />
           <div className="composer-footer">
-            <span>
+            <span title={sendHint || undefined}>
               {canContinueSession(activeSession)
                 ? t(locale, "composer.continueId", { id: activeSession!.id.slice(0, 8) })
-                : workspaceRoot.trim()
-                  ? workspaceRoot
-                  : t(locale, "composer.chooseWorkspace")}
+                : sendHint
+                  ? sendHint
+                  : workspaceRoot.trim()
+                    ? workspaceRoot
+                    : t(locale, "composer.chooseWorkspace")}
             </span>
-            <button type="submit" disabled={isRunning || !workspaceRoot.trim() || !prompt.trim()}>
+            <button
+              type="submit"
+              className={sendBlockReason && sendBlockReason !== "running" ? "send-needs-setup" : undefined}
+              disabled={isRunning}
+              title={sendTitle}
+              aria-label={sendTitle}
+            >
               {isRunning
                 ? t(locale, "action.working")
                 : canContinueSession(activeSession)

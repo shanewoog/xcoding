@@ -73,6 +73,10 @@ async function main() {
     '"field.apiKey"',
     '"action.settings"',
     '"action.saveSettings"',
+    '"composer.needWorkspace"',
+    '"composer.needPrompt"',
+    '"composer.needProvider"',
+    '"error.needProvider"',
   ]) {
     assert.ok(i18nSource.includes(needle), "i18n.ts missing " + needle);
   }

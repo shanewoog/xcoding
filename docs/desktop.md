@@ -94,6 +94,7 @@ Session history items show status, mode, model, and a relative updated time. Mes
 ### Keyboard
 
 - **Ctrl+Enter** (Windows/Linux) or **Cmd+Enter** (macOS) sends the composer message.
+- **Send** stays enabled whenever a task is not running. Missing workspace path, empty message, or missing API key show an error (and footer hint) instead of greying the button out forever.
 
 ### Trace panel
 

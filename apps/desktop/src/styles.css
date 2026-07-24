@@ -122,6 +122,8 @@ button:hover:not(:disabled) { background: #105851; }
 
 .composer { border-top: 1px solid #d7d9dd; padding: 1rem 1.5rem; }
 .composer-footer { color: #71808b; font-size: 0.8rem; margin-top: 0.65rem; }
+.composer-footer button.send-needs-setup { opacity: 0.85; }
+.composer-footer button:disabled { opacity: 0.55; cursor: not-allowed; }
 .composer-footer span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .trace-panel { display: grid; align-content: start; gap: 1.1rem; }

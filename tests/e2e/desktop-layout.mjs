@@ -123,6 +123,16 @@ async function main() {
     "composer should submit on Ctrl/Cmd+Enter",
   );
 
+  // Send stays clickable unless a task is running; missing setup surfaces as an error instead of a dead button.
+  assert.ok(appSource.includes("sendBlockReason"), "App.tsx should compute sendBlockReason");
+  assert.ok(appSource.includes("error.needProvider"), "App.tsx should surface missing provider on send");
+  assert.ok(
+    appSource.includes('disabled={isRunning}') &&
+      !appSource.includes("disabled={isRunning || !workspaceRoot.trim() || !prompt.trim()}"),
+    "Send should not hard-disable on empty workspace/prompt",
+  );
+  assert.ok(cssSource.includes(".send-needs-setup"), "styles.css missing .send-needs-setup");
+
   assert.equal(formatSessionStatus("need_user"), "needs review");
   assert.equal(formatSessionStatus("running"), "running");
   assert.equal(formatMessageRole("user"), "You");
