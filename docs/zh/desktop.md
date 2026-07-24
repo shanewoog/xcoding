@@ -2,49 +2,72 @@
 
 ## 运行
 
-先在终端设置云模型凭据，再启动 Tauri 应用：
+启动 Tauri 应用：
+
+```powershell
+pnpm --filter @xcoding/desktop exec tauri dev
+# 或仓库根目录：
+pnpm desktop
+```
+
+推荐：在应用内打开 **设置**，填写 Base URL 与 API Key，再点 **保存设置**。
+配置写入 `~/.xcoding/config.json`（Windows：`%USERPROFILE%\.xcoding\config.json`）。
+
+仍可用环境变量作为启动时覆盖（进程已有 env 优先，文件只回填缺失项）：
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-# 可选：使用 OpenAI 兼容的云服务时设置。
 $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1"
-pnpm --filter @xcoding/desktop exec tauri dev
 ```
 
-应用会将本地会话历史和工作区默认配置保存在操作系统的应用数据目录中。凭据只从环境变量读取，不会写入会话数据库。
+会话数据库位于 `~/.xcoding/xcoding.db`。命令白/黑名单仍保存在各工作区的 `.xcoding/` 下。
 
-## 首次使用
+## 首次流程
 
-1. 选择界面**语言**（简体中文 / English）；选择会保存在 `localStorage`。
-2. 在左侧输入真实的工作区绝对路径（仅占位示例文字不会启用发送）。
-3. 选择模式和模型默认值，并保存到该工作区。
-4. 在输入区发送仓库任务。
-5. 查看计划、流式回答、工具活动、补丁预览和审批控件。
-6. 选择已保存会话，查看事件、恢复点和任务完成摘要。
+1. 打开 **设置**，选择 **语言**（简体中文或 English）。
+2. 配置 **云供应商**：Base URL（默认 `https://ai.v58.dev/v1`）与 API Key，然后 **保存设置**。
+3. 设置工作区路径、模式与模型（白/黑名单需要先有工作区路径）。
+4. 返回工作台，必要时确认绝对路径，发送任务。
+5. 查看计划、流式回答、工具活动、补丁预览与审批控件。
+6. 选择已保存会话，查看事件、恢复点与任务完成摘要。
 
-Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁与白名单安全命令。高风险写入与非白名单命令仍需审批。左侧默认设置面板可编辑工作区 `.xcoding/command-allowlist` 与 `.xcoding/command-denylist` 模式。
+Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁与白名单安全命令。高风险写入与非白名单命令仍需审批。
 
-## 默认值与诊断
+## 设置页
 
-左侧 **Defaults** 面板保存工作区级别的模式与模型设置（v1 供应商固定为 `openai`）：
+全部配置集中在 **设置** 页（左侧与聊天顶栏按钮）：
 
-| 控件 | 行为 |
-|------|------|
-| 语言 | `简体中文` 或 `English`；持久化到 webview `localStorage` 键 `xcoding.locale` |
-| Mode | `ask`（默认）或 `auto-edit` |
-| Provider | 只读 `openai` |
-| Model | 新会话使用的云模型 id |
-| Save defaults | 将 mode/provider/model 写入当前工作区路径 |
+| 分区 | 保存位置 |
+|------|----------|
+| 语言 | UI 语言；写入 `~/.xcoding/config.json`，并镜像到 `localStorage`（`xcoding.locale`） |
+| 云供应商 | Provider（`openai` 只读）、Base URL、API Key → `~/.xcoding/config.json` |
+| 默认设置 | 工作区路径（上次使用）、模式、模型；白/黑名单 → 工作区 `.xcoding/command-allowlist` / `command-denylist` |
+| 诊断 | 客户端清单：工作区、鉴权、Base URL、默认值 |
 
-切换模式时会更新说明文案：
+模式说明：
 
 - **ask** — 提出补丁与命令，二者都需审批
 - **auto-edit** — 自动应用普通文件补丁与白名单安全命令；**高风险写入与其他命令仍需审批**
-- **命令白名单** — 可选工作区模式（`exe` 或 `exe:subcommand`），保存到 `.xcoding/command-allowlist`；Shell/解释器不可加入
-- **命令黑名单** — 可选工作区拦截模式，保存到 `.xcoding/command-denylist`；黑名单优先于白名单，且不会自动执行
+- **命令白名单** — 可选工作区模式（`exe` 或 `exe:subcommand`）；Shell/解释器不可加入
+- **命令黑名单** — 可选拦截模式；黑名单优先于白名单，且不会自动执行
 
-**Diagnostics** 是客户端检查清单（工作区路径、鉴权、Base URL、默认值）。全部就绪表示可以开始任务；更深入的服务端检查仍请使用 `pnpm cli -- doctor`。
+**诊断** 仅客户端检查。全部就绪表示可以开始任务；更深入检查请用 `pnpm cli -- doctor`。
 
+### `~/.xcoding/config.json` 示例
+
+```json
+{
+  "locale": "zh-CN",
+  "mode": "ask",
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "base_url": "https://ai.v58.dev/v1",
+  "api_key": "sk-...",
+  "last_workspace_root": "D:\\WORK\\BittyData\\XCoding"
+}
+```
+
+v0.1 为便于使用，API Key 以明文保存在用户目录。请勿提交该文件。
 
 ## 高风险命令审批
 
@@ -91,10 +114,10 @@ pnpm desktop:portable
 使用方式：
 
 1. 把整个文件夹拷到任意位置
-2. 复制 `.env.example` 为 `.env`，填入 API Key 与 Base URL
+2. 首次启动后在 **设置** 中填写 API Key 与 Base URL（或复制 `.env.example` 为旁路 `.env`）
 3. 双击 `XCoding.exe`
 
-依赖：Windows 10/11 + WebView2 Runtime（系统通常已自带）。会话数据库仍写在系统应用数据目录，不在绿色文件夹内。
+依赖：Windows 10/11 + WebView2 Runtime（系统通常已自带）。会话数据库与用户配置写在 `%USERPROFILE%\.xcoding\`（`xcoding.db` / `config.json`），不在绿色文件夹内。
 
 
 ### 若出现 “localhost 拒绝连接”

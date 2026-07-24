@@ -1,6 +1,6 @@
 //! Cloud-model adapters for OpenAI-compatible streaming chat completions.
 
-use std::{collections::BTreeMap, env, pin::Pin};
+use std::{collections::BTreeMap, env, fs, path::PathBuf, pin::Pin};
 
 use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
@@ -8,7 +8,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use xcoding_protocol::ProviderAuthStatus;
+use xcoding_protocol::{ProviderAuthStatus, UserConfig};
 
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
@@ -95,7 +95,7 @@ pub struct ProviderFunctionCall {
 #[derive(Debug, Error)]
 pub enum ProviderError {
     #[error(
-        "OPENAI_API_KEY is not set. Set it in the environment or a repo-root .env file, and optionally set XCODING_OPENAI_BASE_URL for an OpenAI-compatible endpoint."
+        "OPENAI_API_KEY is not set. Configure it in Desktop Settings (~/.xcoding/config.json), set the environment variable, or use a repo-root .env file. Optionally set XCODING_OPENAI_BASE_URL for an OpenAI-compatible endpoint."
     )]
     MissingApiKey,
     #[error("provider request failed: {0}")]
@@ -149,7 +149,7 @@ pub struct OpenAiCompatibleProvider {
 /// Inspect cloud-provider credentials without making a network request.
 /// Does not return the full API key.
 pub fn inspect_auth() -> ProviderAuthStatus {
-    load_dotenv_files();
+    bootstrap_credentials();
     let base_url = env::var("XCODING_OPENAI_BASE_URL")
         .unwrap_or_else(|_| "https://ai.v58.dev/v1".to_owned())
         .trim_end_matches('/')
@@ -171,7 +171,7 @@ pub fn inspect_auth() -> ProviderAuthStatus {
             has_api_key: false,
             base_url,
             key_hint: None,
-            message: "OPENAI_API_KEY is not set. Set it in the environment or a repo-root .env file.".to_owned(),
+            message: "OPENAI_API_KEY is not set. Configure it in Desktop Settings (~/.xcoding/config.json), set the environment variable, or use a repo-root .env file.".to_owned(),
         },
     }
 }
@@ -187,8 +187,8 @@ fn mask_api_key(key: &str) -> String {
 
 impl OpenAiCompatibleProvider {
     pub fn from_environment() -> Result<Self, ProviderError> {
-        // Existing process env wins. Fill missing vars from nearby .env files.
-        load_dotenv_files();
+        // Existing process env wins. Fill missing vars from dotenv and user config.
+        bootstrap_credentials();
         let api_key = env::var("OPENAI_API_KEY")
             .map_err(|_| ProviderError::MissingApiKey)
             .and_then(|key| {
@@ -380,6 +380,111 @@ impl ToolCallAccumulator {
     }
 }
 
+/// Resolve the user config directory: `%USERPROFILE%/.xcoding` or `$HOME/.xcoding`.
+pub fn user_config_dir() -> PathBuf {
+    if let Ok(home) = env::var("USERPROFILE") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join(".xcoding");
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join(".xcoding");
+        }
+    }
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".xcoding")
+}
+
+/// Path to `~/.xcoding/config.json`.
+pub fn user_config_path() -> PathBuf {
+    user_config_dir().join("config.json")
+}
+
+/// Load user preferences from `~/.xcoding/config.json`, or defaults when missing/invalid.
+pub fn load_user_config() -> UserConfig {
+    let path = user_config_path();
+    match fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Err(_) => UserConfig::default(),
+    }
+}
+
+/// Persist user preferences to `~/.xcoding/config.json`.
+pub fn save_user_config(config: &UserConfig) -> Result<(), String> {
+    let dir = user_config_dir();
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let path = dir.join("config.json");
+    let body = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    fs::write(&path, format!("{body}\n")).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Apply provider credentials from user config into the process environment.
+/// Overwrites existing values when the config provides non-empty credentials.
+pub fn apply_user_config_to_env(config: &UserConfig) {
+    if let Some(key) = config
+        .api_key
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        unsafe {
+            env::set_var("OPENAI_API_KEY", key);
+        }
+    }
+    let base = config.base_url.trim();
+    if !base.is_empty() {
+        let normalized = base.trim_end_matches('/').to_owned();
+        unsafe {
+            env::set_var("XCODING_OPENAI_BASE_URL", normalized);
+        }
+    }
+}
+
+/// Fill missing credential env vars from user config without overwriting existing values.
+pub fn fill_env_from_user_config() {
+    let config = load_user_config();
+    let has_key = env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if !has_key {
+        if let Some(key) = config
+            .api_key
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            unsafe {
+                env::set_var("OPENAI_API_KEY", key);
+            }
+        }
+    }
+    let has_base = env::var("XCODING_OPENAI_BASE_URL")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if !has_base {
+        let base = config.base_url.trim();
+        if !base.is_empty() {
+            let normalized = base.trim_end_matches('/').to_owned();
+            unsafe {
+                env::set_var("XCODING_OPENAI_BASE_URL", normalized);
+            }
+        }
+    }
+}
+
+/// Load dotenv files then fill missing env from `~/.xcoding/config.json`.
+pub fn bootstrap_credentials() {
+    load_dotenv_files();
+    fill_env_from_user_config();
+}
+
 fn load_dotenv_files() {
     // dotenvy does not override existing process environment values.
     let _ = dotenvy::dotenv();
@@ -481,6 +586,7 @@ mod tests {
         let message = ProviderError::MissingApiKey.to_string();
         assert!(message.contains("OPENAI_API_KEY is not set"));
         assert!(message.contains(".env"));
+        assert!(message.contains("config.json") || message.contains(".xcoding"));
         assert!(message.contains("XCODING_OPENAI_BASE_URL"));
     }
 
@@ -525,4 +631,41 @@ mod tests {
         assert!(!status.message.is_empty());
         assert_eq!(status.ready, status.has_api_key);
     }
+    #[test]
+    fn user_config_roundtrip_under_temp_home() {
+        let temp = std::env::temp_dir().join(format!("xcoding-user-config-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).expect("temp home");
+        let previous_userprofile = env::var("USERPROFILE").ok();
+        let previous_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("USERPROFILE", &temp);
+            env::set_var("HOME", &temp);
+        }
+        let mut config = UserConfig::default();
+        config.locale = "zh-CN".to_owned();
+        config.model = "gpt-test".to_owned();
+        config.base_url = "https://example.test/v1".to_owned();
+        config.api_key = Some("sk-test-key-1234".to_owned());
+        config.last_workspace_root = Some("D:\\work\\demo".to_owned());
+        save_user_config(&config).expect("save");
+        let loaded = load_user_config();
+        assert_eq!(loaded.locale, "zh-CN");
+        assert_eq!(loaded.model, "gpt-test");
+        assert_eq!(loaded.base_url, "https://example.test/v1");
+        assert_eq!(loaded.api_key.as_deref(), Some("sk-test-key-1234"));
+        assert_eq!(loaded.last_workspace_root.as_deref(), Some("D:\\work\\demo"));
+        unsafe {
+            match previous_userprofile {
+                Some(value) => env::set_var("USERPROFILE", value),
+                None => env::remove_var("USERPROFILE"),
+            }
+            match previous_home {
+                Some(value) => env::set_var("HOME", value),
+                None => env::remove_var("HOME"),
+            }
+        }
+        let _ = fs::remove_dir_all(&temp);
+    }
+
 }

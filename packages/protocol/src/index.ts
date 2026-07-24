@@ -44,6 +44,17 @@ export interface ProviderAuthStatus {
   message: string;
 }
 
+/** User-level preferences stored under ~/.xcoding/config.json */
+export interface UserConfig {
+  locale: string;
+  mode: Mode;
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key?: string;
+  last_workspace_root?: string;
+}
+
 export interface CreateSessionParams {
   workspace_root: string;
   mode?: Mode;

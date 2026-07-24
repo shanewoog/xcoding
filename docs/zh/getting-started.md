@@ -84,7 +84,7 @@ pnpm desktop:portable
 pnpm --filter @xcoding/desktop exec tauri dev
 ```
 
-Desktop 将数据库保存在操作系统的应用数据目录中，并按工作区路径保存配置。因此，Desktop 的本地历史和设置与 CLI 数据库相互独立。
+Desktop 将数据库保存在 `~/.xcoding/xcoding.db`，用户偏好保存在 `~/.xcoding/config.json`。工作区策略仍在项目 `.xcoding/` 下。Desktop 历史与 CLI 数据库相互独立。
 
 
 ## 项目规则

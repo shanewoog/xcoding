@@ -84,7 +84,7 @@ Start the Tauri desktop app from a shell with the same credential variables:
 pnpm --filter @xcoding/desktop exec tauri dev
 ```
 
-Desktop stores its database in the operating system application-data directory and keys configuration by workspace path. Its local history and settings are therefore separate from the CLI database.
+Desktop stores its database at `~/.xcoding/xcoding.db` and user preferences (locale, provider Base URL, API key, last workspace, default mode/model) at `~/.xcoding/config.json`. Workspace mode/model and command policy remain workspace-scoped. Desktop history is therefore separate from the CLI database.
 
 
 ## Project Rules
@@ -105,7 +105,7 @@ Check whether cloud credentials are visible to the server without making a model
 pnpm cli -- auth --workspace .
 ```
 
-Desktop shows the same readiness state (ready / API key missing, base URL, masked key hint) in the left settings panel.
+Desktop shows the same readiness state (ready / API key missing, base URL, masked key hint) in Settings and as a compact badge on the left panel. Configure the API key under **Settings → Cloud provider**.
 
 ## Environment Doctor
 

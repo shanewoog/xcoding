@@ -65,6 +65,17 @@ async function main() {
   assert.ok(i18nSource.includes("export function saveLocale"), "i18n.ts missing saveLocale");
   assert.ok(i18nSource.includes('"lang.label"'), "i18n.ts missing lang.label");
   assert.ok(i18nSource.includes("简体中文"), "i18n.ts missing Chinese labels");
+  for (const needle of [
+    '"settings.title"',
+    '"settings.subtitle"',
+    '"settings.section.provider"',
+    '"field.baseUrl"',
+    '"field.apiKey"',
+    '"action.settings"',
+    '"action.saveSettings"',
+  ]) {
+    assert.ok(i18nSource.includes(needle), "i18n.ts missing " + needle);
+  }
   const cliSource = await readFile(resolve(repositoryRoot, "apps/cli/src/index.ts"), "utf8");
 
   for (const needle of [

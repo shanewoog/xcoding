@@ -18,7 +18,7 @@ xcoding config set --workspace <path> --mode ask --model gpt-5.5
 xcoding config set --workspace <path> --mode auto-edit
 ```
 
-CLI 将这些值保存到该工作区的 `.xcoding/xcoding.db`。Desktop 会在应用数据目录的数据库中按工作区路径保存自己的配置，因此当前不会与 CLI 共用数据库。
+CLI 将这些值保存到该工作区的 `.xcoding/xcoding.db`。Desktop 将本地历史保存在 `~/.xcoding/xcoding.db`，用户偏好（供应商凭据、语言、默认值）保存在 `~/.xcoding/config.json`，与 CLI 工作区数据库相互独立。
 
 ## 会话命令
 

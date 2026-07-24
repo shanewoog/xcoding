@@ -22,6 +22,7 @@ import type {
   SessionEvent,
   TaskSummary,
   ProviderAuthStatus,
+  UserConfig,
   WorkspaceConfig,
 } from "@xcoding/protocol";
 import { activityPolicyBadge, buildActivity, eventActivity, mergeActivity } from "./activity";
@@ -44,7 +45,7 @@ import {
   hasTraceContent,
   sessionMetaLine,
 } from "./layout";
-import { loadLocale, saveLocale, t, type Locale } from "./i18n";
+import { isLocale, loadLocale, saveLocale, t, type Locale } from "./i18n";
 
 const defaultModel = "gpt-5.5";
 const defaultProvider = "openai";
@@ -182,6 +183,11 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [view, setView] = useState<"workbench" | "settings">("workbench");
+  const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("https://ai.v58.dev/v1");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [userConfigReady, setUserConfigReady] = useState(false); // used to delay hydration
   const conversationRef = useRef<HTMLDivElement | null>(null);
 
   const activeSession = useMemo(
@@ -193,6 +199,37 @@ export function App() {
     saveLocale(locale);
     document.documentElement.lang = locale === "zh-CN" ? "zh-CN" : "en";
   }, [locale]);
+
+  useEffect(() => {
+    if (!isTauriRuntime) {
+      setUserConfigReady(true);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const config = await invoke<UserConfig>("get_user_config");
+        if (cancelled) return;
+        if (isLocale(config.locale)) setLocale(config.locale);
+        setMode(config.mode);
+        setModel(config.model || defaultModel);
+        setBaseUrl(config.base_url || "https://ai.v58.dev/v1");
+        setApiKey(config.api_key || "");
+        if (config.last_workspace_root?.trim()) {
+          setWorkspaceRoot(config.last_workspace_root.trim());
+        }
+      } catch (cause) {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      } finally {
+        if (!cancelled) setUserConfigReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshProviderStatus = useCallback(async () => {
     if (!isTauriRuntime) return;
@@ -270,7 +307,10 @@ export function App() {
     }
   }, [locale]);
 
-  useEffect(() => { void refreshWorkspace(); }, [refreshWorkspace]);
+  useEffect(() => {
+    if (!userConfigReady) return;
+    void refreshWorkspace();
+  }, [refreshWorkspace, userConfigReady]);
   useEffect(() => {
     if (activeSessionId) void hydrateSession(activeSessionId);
   }, [activeSessionId, hydrateSession]);
@@ -467,9 +507,8 @@ export function App() {
     }
   }
 
-  async function saveWorkspaceConfig(): Promise<void> {
-    const root = workspaceRoot.trim();
-    if (!root || isSavingConfig || isRunning) return;
+  async function saveAllSettings(): Promise<void> {
+    if (isSavingConfig || isRunning) return;
     if (!isTauriRuntime) {
       setError(t(locale, "error.tauriOnly"));
       return;
@@ -477,20 +516,41 @@ export function App() {
     setError(null);
     setIsSavingConfig(true);
     try {
-      const config = await invoke<WorkspaceConfig>("set_workspace_config", {
-        params: {
-          workspace_root: root,
+      const root = workspaceRoot.trim();
+      const savedUser = await invoke<UserConfig>("set_user_config", {
+        config: {
+          locale,
           mode,
           provider: defaultProvider,
-          model,
-          command_allowlist: parseCommandAllowlistText(commandAllowlistText),
-          command_denylist: parseCommandDenylistText(commandDenylistText),
-        },
+          model: model.trim() || defaultModel,
+          base_url: baseUrl.trim() || "https://ai.v58.dev/v1",
+          api_key: apiKey.trim() || undefined,
+          last_workspace_root: root || undefined,
+        } satisfies UserConfig,
       });
-      setMode(config.mode);
-      setModel(config.model);
-      setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
-      setCommandDenylistText(formatCommandDenylistText(config.command_denylist));
+      setMode(savedUser.mode);
+      setModel(savedUser.model || defaultModel);
+      setBaseUrl(savedUser.base_url || "https://ai.v58.dev/v1");
+      setApiKey(savedUser.api_key || "");
+      if (isLocale(savedUser.locale)) setLocale(savedUser.locale);
+      if (root) {
+        const config = await invoke<WorkspaceConfig>("set_workspace_config", {
+          params: {
+            workspace_root: root,
+            mode: savedUser.mode,
+            provider: defaultProvider,
+            model: savedUser.model || defaultModel,
+            command_allowlist: parseCommandAllowlistText(commandAllowlistText),
+            command_denylist: parseCommandDenylistText(commandDenylistText),
+          },
+        });
+        setMode(config.mode);
+        setModel(config.model);
+        setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
+        setCommandDenylistText(formatCommandDenylistText(config.command_denylist));
+      }
+      await refreshProviderStatus();
+      await refreshSessions();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -525,56 +585,113 @@ export function App() {
     }
   }
 
-  return (
-    <main className="workbench">
-      <aside className="sessions-panel" aria-label={t(locale, "aria.sessions")}>
-        <div className="sessions-top">
-          <div className="brand-row">
-            <div>
-              <p className="eyebrow">{t(locale, "brand.eyebrow")}</p>
-              <h1>{t(locale, "brand.sessions")}</h1>
-            </div>
+  if (view === "settings") {
+    return (
+      <main className="settings-page">
+        <header className="settings-header">
+          <div>
+            <p className="eyebrow">{t(locale, "brand.eyebrow")}</p>
+            <h1>{t(locale, "settings.title")}</h1>
+            <p className="mode-help">{t(locale, "settings.subtitle")}</p>
+          </div>
+          <div className="settings-header-actions">
+            <button type="button" className="quiet-button" onClick={() => setView("workbench")}>
+              {t(locale, "action.back")}
+            </button>
             <button
               type="button"
-              className="quiet-button"
-              onClick={() => void refreshWorkspace()}
-              aria-label={t(locale, "aria.refreshWorkspace")}
+              className="primary-button"
+              onClick={() => void saveAllSettings()}
+              disabled={isRunning || isSavingConfig}
             >
-              {t(locale, "action.refresh")}
+              {isSavingConfig ? t(locale, "action.saving") : t(locale, "action.saveSettings")}
             </button>
           </div>
-          <label className="field-label" htmlFor="ui-locale">{t(locale, "lang.label")}</label>
-          <select
-            id="ui-locale"
-            value={locale}
-            onChange={(event) => setLocale(event.target.value as Locale)}
-          >
-            <option value="zh-CN">{t(locale, "lang.zhCN")}</option>
-            <option value="en">{t(locale, "lang.en")}</option>
-          </select>
-          <label className="field-label" htmlFor="workspace-root">{t(locale, "field.workspace")}</label>
-          <input
-            id="workspace-root"
-            className={workspaceMissing ? "workspace-missing" : undefined}
-            value={workspaceRoot}
-            onChange={(event) => setWorkspaceRoot(event.target.value)}
-            placeholder={t(locale, "field.workspacePlaceholder")}
-            spellCheck={false}
-          />
-          <p className="mode-help">{t(locale, "field.workspaceHint")}</p>
-          <section className="workspace-settings" aria-label={t(locale, "aria.workspaceDefaults")}>
-            <p className="panel-title">{t(locale, "field.defaults")}</p>
+        </header>
+
+        {error ? <p className="error-message settings-error">{error}</p> : null}
+
+        <div className="settings-grid">
+          <section className="settings-card" aria-label={t(locale, "settings.section.language")}>
+            <p className="panel-title">{t(locale, "settings.section.language")}</p>
+            <label className="field-label" htmlFor="ui-locale">{t(locale, "lang.label")}</label>
+            <select
+              id="ui-locale"
+              value={locale}
+              onChange={(event) => setLocale(event.target.value as Locale)}
+              disabled={isRunning || isSavingConfig}
+            >
+              <option value="zh-CN">{t(locale, "lang.zhCN")}</option>
+              <option value="en">{t(locale, "lang.en")}</option>
+            </select>
+          </section>
+
+          <section className="settings-card" aria-label={t(locale, "settings.section.provider")}>
+            <p className="panel-title">{t(locale, "settings.section.provider")}</p>
+            <label className="field-label" htmlFor="default-provider">{t(locale, "field.provider")}</label>
+            <input
+              id="default-provider"
+              value={defaultProvider}
+              readOnly
+              spellCheck={false}
+              title={t(locale, "provider.readonlyTitle")}
+            />
+            <label className="field-label" htmlFor="provider-base-url">{t(locale, "field.baseUrl")}</label>
+            <input
+              id="provider-base-url"
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              disabled={isRunning || isSavingConfig}
+              spellCheck={false}
+              placeholder="https://ai.v58.dev/v1"
+            />
+            <label className="field-label" htmlFor="provider-api-key">{t(locale, "field.apiKey")}</label>
+            <div className="secret-field">
+              <input
+                id="provider-api-key"
+                type={showApiKey ? "text" : "password"}
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                disabled={isRunning || isSavingConfig}
+                spellCheck={false}
+                autoComplete="off"
+                placeholder={t(locale, "field.apiKeyPlaceholder")}
+              />
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={() => setShowApiKey((current) => !current)}
+              >
+                {showApiKey ? t(locale, "action.hideKey") : t(locale, "action.showKey")}
+              </button>
+            </div>
             <div className={`auth-status ${providerStatus?.ready ? "ready" : "missing"}`} role="status">
               <strong>{providerStatus?.ready ? t(locale, "auth.ready") : t(locale, "auth.missing")}</strong>
               <small>{providerStatus?.message || t(locale, "auth.checking")}</small>
               <small>
-                {t(locale, "auth.base", { url: providerStatus?.base_url || "https://ai.v58.dev/v1" })}
+                {t(locale, "auth.base", { url: providerStatus?.base_url || baseUrl || "https://ai.v58.dev/v1" })}
                 {providerStatus?.key_hint ? ` · ${t(locale, "auth.key", { hint: providerStatus.key_hint })}` : ""}
               </small>
               <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>
                 {t(locale, "action.refreshAuth")}
               </button>
             </div>
+            <p className="mode-help">{t(locale, "settings.providerHelp")}</p>
+          </section>
+
+          <section className="settings-card" aria-label={t(locale, "aria.workspaceDefaults")}>
+            <p className="panel-title">{t(locale, "field.defaults")}</p>
+            <label className="field-label" htmlFor="settings-workspace">{t(locale, "field.workspace")}</label>
+            <input
+              id="settings-workspace"
+              className={workspaceMissing ? "workspace-missing" : undefined}
+              value={workspaceRoot}
+              onChange={(event) => setWorkspaceRoot(event.target.value)}
+              placeholder={t(locale, "field.workspacePlaceholder")}
+              spellCheck={false}
+              disabled={isRunning || isSavingConfig}
+            />
+            <p className="mode-help">{t(locale, "field.workspaceHint")}</p>
             <label className="field-label" htmlFor="default-mode">{t(locale, "field.mode")}</label>
             <select
               id="default-mode"
@@ -586,14 +703,6 @@ export function App() {
               <option value="auto-edit">{t(locale, "mode.autoEdit")}</option>
             </select>
             <p className="mode-help">{modeHelpText(mode, locale)}</p>
-            <label className="field-label" htmlFor="default-provider">{t(locale, "field.provider")}</label>
-            <input
-              id="default-provider"
-              value={defaultProvider}
-              readOnly
-              spellCheck={false}
-              title={t(locale, "provider.readonlyTitle")}
-            />
             <label className="field-label" htmlFor="default-model">{t(locale, "field.model")}</label>
             <input
               id="default-model"
@@ -608,7 +717,7 @@ export function App() {
               className="command-allowlist-input"
               value={commandAllowlistText}
               onChange={(event) => setCommandAllowlistText(event.target.value)}
-              disabled={isRunning || isSavingConfig}
+              disabled={isRunning || isSavingConfig || !workspaceRoot.trim()}
               spellCheck={false}
               rows={4}
               placeholder={"rg\nmake:test\ngit:--version"}
@@ -620,22 +729,20 @@ export function App() {
               className="command-allowlist-input"
               value={commandDenylistText}
               onChange={(event) => setCommandDenylistText(event.target.value)}
-              disabled={isRunning || isSavingConfig}
+              disabled={isRunning || isSavingConfig || !workspaceRoot.trim()}
               spellCheck={false}
               rows={3}
               placeholder={"powershell\ncurl"}
             />
             <p className="mode-help">{commandDenylistHelpText(locale)}</p>
-            <button
-              type="button"
-              className="quiet-button"
-              onClick={() => void saveWorkspaceConfig()}
-              disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}
-            >
-              {isSavingConfig ? t(locale, "action.saving") : t(locale, "action.saveDefaults")}
-            </button>
-            <div className={`doctor-panel ${doctorReady ? "ready" : "blocked"}`} aria-label={t(locale, "aria.diagnostics")}>
-              <p className="panel-title">{t(locale, "doctor.title")}</p>
+            {!workspaceRoot.trim() ? (
+              <p className="mode-help">{t(locale, "settings.workspacePolicyHint")}</p>
+            ) : null}
+          </section>
+
+          <section className="settings-card" aria-label={t(locale, "aria.diagnostics")}>
+            <p className="panel-title">{t(locale, "doctor.title")}</p>
+            <div className={`doctor-panel ${doctorReady ? "ready" : "blocked"}`}>
               <ul className="doctor-list">
                 {doctorChecks.map((check) => (
                   <li key={check.name} className={check.ok ? "ok" : "bad"}>
@@ -646,6 +753,57 @@ export function App() {
               </ul>
             </div>
           </section>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="workbench">
+      <aside className="sessions-panel" aria-label={t(locale, "aria.sessions")}>
+        <div className="sessions-top">
+          <div className="brand-row">
+            <div>
+              <p className="eyebrow">{t(locale, "brand.eyebrow")}</p>
+              <h1>{t(locale, "brand.sessions")}</h1>
+            </div>
+            <div className="brand-actions">
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={() => setView("settings")}
+                aria-label={t(locale, "aria.openSettings")}
+              >
+                {t(locale, "action.settings")}
+              </button>
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={() => void refreshWorkspace()}
+                aria-label={t(locale, "aria.refreshWorkspace")}
+              >
+                {t(locale, "action.refresh")}
+              </button>
+            </div>
+          </div>
+          <label className="field-label" htmlFor="workspace-root">{t(locale, "field.workspace")}</label>
+          <input
+            id="workspace-root"
+            className={workspaceMissing ? "workspace-missing" : undefined}
+            value={workspaceRoot}
+            onChange={(event) => setWorkspaceRoot(event.target.value)}
+            placeholder={t(locale, "field.workspacePlaceholder")}
+            spellCheck={false}
+          />
+          <p className="mode-help">{t(locale, "field.workspaceHint")}</p>
+          <div className={`auth-status compact ${providerStatus?.ready ? "ready" : "missing"}`} role="status">
+            <strong>{providerStatus?.ready ? t(locale, "auth.ready") : t(locale, "auth.missing")}</strong>
+            <small>
+              {providerStatus?.key_hint
+                ? t(locale, "auth.key", { hint: providerStatus.key_hint })
+                : (providerStatus?.message || t(locale, "auth.checking"))}
+            </small>
+          </div>
         </div>
         <nav className="session-list" aria-label={t(locale, "aria.savedSessions")}>
           <p className="panel-title session-list-title">{t(locale, "field.history")}</p>
@@ -683,6 +841,9 @@ export function App() {
                 {formatSessionStatus(activeSession.status, locale)}
               </span>
             ) : null}
+            <button type="button" className="quiet-button" onClick={() => setView("settings")}>
+              {t(locale, "action.settings")}
+            </button>
             {activeSession ? (
               <button type="button" className="quiet-button" onClick={() => startNewChat()} disabled={isRunning}>
                 {t(locale, "action.newChat")}

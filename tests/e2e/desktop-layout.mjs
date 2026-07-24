@@ -93,6 +93,9 @@ async function main() {
     "loadLocale",
     "saveLocale",
     "field.workspaceHint",
+    "settings-page",
+    "brand-actions",
+    'setView("settings")',
   ]) {
     assert.ok(appSource.includes(needle), "App.tsx missing " + needle);
   }
@@ -108,6 +111,8 @@ async function main() {
     "status-need_user",
     "input.workspace-missing",
     "#ui-locale",
+    ".settings-page",
+    ".brand-actions",
   ]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }

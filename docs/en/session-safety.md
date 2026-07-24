@@ -18,7 +18,7 @@ xcoding config set --workspace <path> --mode ask --model gpt-5.5
 xcoding config set --workspace <path> --mode auto-edit
 ```
 
-The CLI stores these values in that workspace's `.xcoding/xcoding.db`. Desktop stores its own workspace-keyed values in its application-data database, so its settings do not currently share a database with the CLI.
+The CLI stores these values in that workspace's `.xcoding/xcoding.db`. Desktop stores its local history in `~/.xcoding/xcoding.db` and user preferences in `~/.xcoding/config.json`.
 
 ## Session Commands
 

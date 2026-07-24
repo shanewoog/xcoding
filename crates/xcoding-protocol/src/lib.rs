@@ -380,6 +380,43 @@ pub struct ProviderAuthStatus {
     pub message: String,
 }
 
+/// User-level Desktop/CLI preferences stored under `~/.xcoding/config.json`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct UserConfig {
+    /// UI locale: `en` or `zh-CN`.
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// OpenAI-compatible API base URL.
+    #[serde(default = "default_base_url")]
+    pub base_url: String,
+    /// Full API key when configured. Never log this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Last workspace path opened in Desktop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_workspace_root: Option<String>,
+}
+
+impl Default for UserConfig {
+    fn default() -> Self {
+        Self {
+            locale: default_locale(),
+            mode: Mode::default(),
+            provider: default_provider(),
+            model: default_model(),
+            base_url: default_base_url(),
+            api_key: None,
+            last_workspace_root: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PingResult {
     pub ok: bool,
@@ -597,6 +634,14 @@ fn default_provider() -> String {
 
 fn default_model() -> String {
     "gpt-5.5".to_owned()
+}
+
+fn default_base_url() -> String {
+    "https://ai.v58.dev/v1".to_owned()
+}
+
+fn default_locale() -> String {
+    "en".to_owned()
 }
 
 #[cfg(test)]
