@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { FormEvent, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import type {
   CancelSessionResult,
   ChatParams,
@@ -173,6 +173,7 @@ export function App() {
   const [commandDenylistText, setCommandDenylistText] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamedText, setStreamedText] = useState("");
   const [plan, setPlan] = useState<PlanStep[]>([]);
@@ -488,6 +489,43 @@ export function App() {
     setTaskSummary(null);
     setReplaySteps([]);
     setError(null);
+  }
+
+  useEffect(() => {
+    if (!sessionMenu) return;
+    const close = () => setSessionMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+    };
+  }, [sessionMenu]);
+
+  function openSessionMenu(event: ReactMouseEvent, sessionId: string): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setSessionMenu({ sessionId, x: event.clientX, y: event.clientY });
+  }
+
+  async function deleteSession(sessionId: string): Promise<void> {
+    if (!isTauriRuntime) return;
+    const confirmed = window.confirm(t(locale, "history.deleteConfirm"));
+    setSessionMenu(null);
+    if (!confirmed) return;
+    setError(null);
+    try {
+      await invoke("delete_session", { sessionId });
+      setSessions((current) => current.filter((session) => session.id !== sessionId));
+      if (activeSessionId === sessionId) {
+        startNewChat();
+      }
+      await refreshSessions();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t(locale, "history.deleteFailed"));
+    }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -1019,6 +1057,7 @@ export function App() {
               className={`session-item ${session.id === activeSessionId ? "is-active" : ""} status-${session.status}`}
               key={session.id}
               onClick={() => setActiveSessionId(session.id)}
+              onContextMenu={(event) => openSessionMenu(event, session.id)}
             >
               <span className="session-item-title">{sessionTitle(session, locale)}</span>
               <span className={`status-badge status-${session.status}`}>{formatSessionStatus(session.status, locale)}</span>
@@ -1026,6 +1065,24 @@ export function App() {
             </button>
           ))}
         </nav>
+        {sessionMenu ? (
+          <div
+            className="session-context-menu"
+            style={{ left: sessionMenu.x, top: sessionMenu.y }}
+            role="menu"
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className="danger"
+              role="menuitem"
+              onClick={() => void deleteSession(sessionMenu.sessionId)}
+            >
+              {t(locale, "action.delete")}
+            </button>
+          </div>
+        ) : null}
       </aside>
 
       <section className="chat-panel" aria-label={t(locale, "aria.conversation")}>

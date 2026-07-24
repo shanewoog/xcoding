@@ -146,6 +146,22 @@ impl SessionStore {
             .map_err(StoreError::from)
     }
 
+    pub fn delete_session(&self, id: Uuid) -> Result<bool, StoreError> {
+        let id = id.to_string();
+        self.connection
+            .execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
+        self.connection
+            .execute("DELETE FROM pending_actions WHERE session_id = ?1", params![id])?;
+        self.connection
+            .execute("DELETE FROM restore_points WHERE session_id = ?1", params![id])?;
+        self.connection
+            .execute("DELETE FROM session_events WHERE session_id = ?1", params![id])?;
+        let deleted = self
+            .connection
+            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(deleted > 0)
+    }
+
     pub fn append_message(
         &self,
         session_id: Uuid,
@@ -635,7 +651,7 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xcoding_protocol::Mode;
+    use xcoding_protocol::{Mode, ToolName};
 
     #[test]
     fn persists_workspace_configurations() {
@@ -696,5 +712,56 @@ mod tests {
 
         assert_eq!(messages, vec![message]);
         assert_eq!(running.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn deletes_session_and_related_rows() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: Some("Delete me".to_owned()),
+            })
+            .expect("session saves");
+        store
+            .append_message(session.id, MessageRole::User, "hello")
+            .expect("message saves");
+        store
+            .create_pending_action(
+                session.id,
+                ToolCall {
+                    id: "call-1".to_owned(),
+                    name: ToolName::ListDir,
+                    arguments: serde_json::json!({"path": "."}),
+                },
+            )
+            .expect("pending action");
+        store
+            .create_restore_point(session.id, "README.md", Some("old"), "new")
+            .expect("restore point");
+        let assistant = Message {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            role: MessageRole::Assistant,
+            content: "done".to_owned(),
+            created_at: Utc::now(),
+        };
+        store
+            .record_event(&SessionEvent::MessageCompleted {
+                session_id: session.id,
+                message: assistant,
+            })
+            .expect("event");
+
+        assert!(store.delete_session(session.id).expect("delete"));
+        assert!(store.get_session(session.id).expect("lookup").is_none());
+        assert!(store.list_messages(session.id).expect("messages").is_empty());
+        assert!(store.list_pending_actions(session.id).expect("actions").is_empty());
+        assert!(store.list_restore_points(session.id).expect("restore").is_empty());
+        assert!(store.list_events(session.id).expect("events").is_empty());
+        assert!(!store.delete_session(session.id).expect("second delete"));
     }
 }

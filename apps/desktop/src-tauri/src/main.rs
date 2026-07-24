@@ -139,6 +139,14 @@ fn list_sessions(app: AppHandle, workspace_root: Option<String>) -> Result<Vec<S
 }
 
 #[tauri::command]
+fn delete_session(app: AppHandle, session_id: String) -> Result<(), String> {
+    let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
+    open_core(&app)?
+        .delete_session(session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn workspace_config(app: AppHandle, workspace_root: String) -> Result<WorkspaceConfig, String> {
     open_core(&app)?
         .workspace_config(&workspace_root)
@@ -319,6 +327,7 @@ fn main() {
             list_provider_models,
             set_user_config,
             list_sessions,
+            delete_session,
             workspace_config,
             set_workspace_config,
             session_detail,

@@ -284,6 +284,18 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    pub fn delete_session(&self, session_id: uuid::Uuid) -> Result<(), CoreError> {
+        let deleted = self
+            .store
+            .delete_session(session_id)
+            .map_err(CoreError::from)?;
+        if !deleted {
+            return Err(CoreError::SessionNotFound(session_id.to_string()));
+        }
+        self.cancel_probe.mark(session_id);
+        Ok(())
+    }
+
     pub fn messages(&self, session_id: uuid::Uuid) -> Result<Vec<Message>, CoreError> {
         self.store
             .list_messages(session_id)

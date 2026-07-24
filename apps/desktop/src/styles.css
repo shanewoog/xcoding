@@ -171,6 +171,32 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.session-context-menu {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  min-width: 9.5rem;
+  padding: 0.25rem;
+  position: fixed;
+  z-index: 40;
+}
+.session-context-menu button {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text);
+  display: block;
+  padding: 0.55rem 0.7rem;
+  text-align: left;
+  width: 100%;
+}
+.session-context-menu button:hover {
+  background: var(--bg-hover);
+}
+.session-context-menu button.danger {
+  color: #f0a0a0;
+}
 
 .chat-panel {
   background: var(--bg);
@@ -317,18 +343,22 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   padding: 0.35rem;
 }
 .message {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
-  border-radius: 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  border-top: 1px solid var(--border);
   color: var(--text);
   display: grid;
   gap: 0.35rem;
   line-height: 1.55;
-  margin-bottom: 1rem;
+  margin: 0;
   max-width: 76ch;
-  padding: 0.85rem 0.95rem;
+  padding: 1rem 0.1rem;
   white-space: pre-wrap;
+}
+.message:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 .message p {
   color: var(--text-muted);
@@ -341,19 +371,22 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   color: var(--text);
 }
 .message-user {
-  background: #121820;
-  border-color: #2a3a4d;
-  border-left-color: var(--user);
+  background: transparent;
+}
+.message-user p {
+  color: var(--user);
 }
 .message-assistant {
-  background: #121816;
-  border-color: #243630;
-  border-left-color: var(--accent);
+  background: transparent;
+}
+.message-assistant p {
+  color: var(--accent);
 }
 .message-tool {
-  background: #1a1710;
-  border-color: #3a3220;
-  border-left-color: var(--tool);
+  background: transparent;
+}
+.message-tool p {
+  color: var(--tool);
 }
 .review-panel {
   background: var(--bg-elevated);
