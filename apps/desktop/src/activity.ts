@@ -1,4 +1,5 @@
 import type { SessionEvent } from "@xcoding/protocol";
+import { t, type Locale } from "./i18n";
 
 export type ActivityState = "running" | "done" | "failed";
 
@@ -52,20 +53,20 @@ export function classifyActivitySummary(
   return state === "running" ? "running" : "generic";
 }
 
-export function activityPolicyBadge(policy: ActivityPolicy): string | null {
+export function activityPolicyBadge(policy: ActivityPolicy, locale: Locale = "en"): string | null {
   switch (policy) {
     case "auto-apply":
-      return "AUTO-APPLY";
+      return t(locale, "badge.autoApply");
     case "auto-run":
-      return "AUTO-RUN";
+      return t(locale, "badge.autoRun");
     case "awaiting":
-      return "AWAITING";
+      return t(locale, "badge.awaiting");
     case "blocked":
-      return "BLOCKED";
+      return t(locale, "badge.blocked");
     case "high-risk":
-      return "HIGH-RISK";
+      return t(locale, "badge.highRisk");
     case "conflict":
-      return "CONFLICT";
+      return t(locale, "badge.conflict");
     default:
       return null;
   }
@@ -90,7 +91,11 @@ function toolDetail(argumentsJson: unknown): string {
   }
 }
 
-export function eventActivity(event: SessionEvent, sequence: string): ActivityItem | null {
+export function eventActivity(
+  event: SessionEvent,
+  sequence: string,
+  locale: Locale = "en",
+): ActivityItem | null {
   if (event.type === "tool_start") {
     const label = event.summary;
     const state: ActivityState = "running";
@@ -113,7 +118,7 @@ export function eventActivity(event: SessionEvent, sequence: string): ActivityIt
       id: event.tool_call.id,
       label,
       detail: isConflict
-        ? "Re-read the file and retry apply_patch with updated old_text."
+        ? t(locale, "activity.conflictDetail")
         : toolDetail(event.tool_call.arguments),
       state,
       policy: isConflict ? "conflict" : classifyActivitySummary(label, state),
@@ -142,7 +147,7 @@ export function eventActivity(event: SessionEvent, sequence: string): ActivityIt
   if (event.type === "session_cancelled") {
     return {
       id: sequence,
-      label: "Session cancelled",
+      label: t(locale, "activity.sessionCancelled"),
       detail: event.message,
       state: "failed",
       policy: "failed",
@@ -151,7 +156,7 @@ export function eventActivity(event: SessionEvent, sequence: string): ActivityIt
   if (event.type === "error") {
     return {
       id: sequence,
-      label: "Agent error",
+      label: t(locale, "activity.agentError"),
       detail: event.message,
       state: "failed",
       policy: "failed",
@@ -162,10 +167,11 @@ export function eventActivity(event: SessionEvent, sequence: string): ActivityIt
 
 export function buildActivity(
   events: Array<{ id: string; event: SessionEvent }>,
+  locale: Locale = "en",
 ): ActivityItem[] {
   const items = new Map<string, ActivityItem>();
   for (const item of events) {
-    const activity = eventActivity(item.event, item.id);
+    const activity = eventActivity(item.event, item.id, locale);
     if (!activity) continue;
     items.set(activity.id, mergeActivity(items.get(activity.id), activity));
   }

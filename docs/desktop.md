@@ -15,11 +15,12 @@ The app stores local session history and workspace defaults in its operating-sys
 
 ## First Workflow
 
-1. Enter the absolute workspace path in the left panel.
-2. Choose the mode and model defaults, then save them for that workspace.
-3. Send a repository request from the composer.
-4. Review the plan, streamed response, tool activity, patch previews, and approval controls.
-5. Select saved sessions to review their events, restore points, and task completion summary.
+1. Choose **Language** (English or 简体中文); the choice is stored in `localStorage`.
+2. Enter a real absolute workspace path in the left panel (placeholder text alone does not enable Send).
+3. Choose the mode and model defaults, then save them for that workspace.
+4. Send a repository request from the composer.
+5. Review the plan, streamed response, tool activity, patch previews, and approval controls.
+6. Select saved sessions to review their events, restore points, and task completion summary.
 
 Desktop uses the same guarded agent service as the CLI. The default mode is `ask`; `auto-edit` applies ordinary file patches and allowlisted safe commands automatically. High-risk writes and non-allowlisted commands still require approval. The defaults panel can edit workspace `.xcoding/command-allowlist` and `.xcoding/command-denylist` patterns.
 
@@ -29,6 +30,7 @@ The left **Defaults** panel stores workspace-scoped mode and model settings (pro
 
 | Control | Behavior |
 |---------|----------|
+| Language | `English` or `简体中文`; persists in the browser/webview `localStorage` key `xcoding.locale` |
 | Mode | `ask` (default) or `auto-edit` |
 | Provider | Read-only `openai` |
 | Model | Cloud model id for new sessions |

@@ -44,13 +44,19 @@ import {
   hasTraceContent,
   sessionMetaLine,
 } from "./layout";
+import { loadLocale, saveLocale, t, type Locale } from "./i18n";
 
 const defaultModel = "gpt-5.5";
 const defaultProvider = "openai";
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 
-function sessionTitle(session: Session): string {
-  return session.title?.trim() || `${session.workspace_root.split(/[\\/]/).pop() || "Workspace"} session`;
+function sessionTitle(session: Session, locale: Locale): string {
+  return (
+    session.title?.trim() ||
+    t(locale, "session.fallbackTitle", {
+      name: session.workspace_root.split(/[\\/]/).pop() || t(locale, "session.workspaceFallback"),
+    })
+  );
 }
 
 function latestPlan(events: PersistedSessionEvent[]): PlanStep[] {
@@ -78,10 +84,13 @@ function latestPatchPreview(events: PersistedSessionEvent[], action: PendingActi
   return null;
 }
 
-function buildPatchDiffLines(preview: PatchPreview): Array<{ kind: "add" | "remove" | "meta"; text: string }> {
+function buildPatchDiffLines(
+  preview: PatchPreview,
+  locale: Locale,
+): Array<{ kind: "add" | "remove" | "meta"; text: string }> {
   const lines: Array<{ kind: "add" | "remove" | "meta"; text: string }> = [];
   if (!preview.old_text) {
-    lines.push({ kind: "meta", text: "(new file)" });
+    lines.push({ kind: "meta", text: t(locale, "review.newFile") });
   } else {
     for (const line of preview.old_text.split("\n")) {
       lines.push({ kind: "remove", text: line });
@@ -101,50 +110,56 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-function gitSnapshotText(summary: TaskSummary): string {
+function gitSnapshotText(summary: TaskSummary, locale: Locale): string {
   return [
-    summary.git_branch ? `Branch: ${summary.git_branch}` : "",
-    summary.git_status ? `Status:\n${summary.git_status}` : "",
-    summary.git_diff ? `Diff:\n${summary.git_diff}` : "",
+    summary.git_branch ? t(locale, "summary.branch", { name: summary.git_branch }) : "",
+    summary.git_status ? t(locale, "summary.status", { text: summary.git_status }) : "",
+    summary.git_diff ? t(locale, "summary.diff", { text: summary.git_diff }) : "",
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
-function formatTaskSummaryText(summary: TaskSummary): string {
+function formatTaskSummaryText(summary: TaskSummary, locale: Locale): string {
   const added = summary.lines_added ?? 0;
   const removed = summary.lines_removed ?? 0;
   const lines: string[] = [
-    `Task complete: ${summary.changed_files.length} changed file(s), +${added}/-${removed} line(s)`,
-    `Commands: ${summary.commands_succeeded}/${summary.commands_run} succeeded` +
-      (summary.commands_failed ? `, ${summary.commands_failed} failed` : ""),
+    t(locale, "summary.taskComplete", {
+      files: summary.changed_files.length,
+      added,
+      removed,
+    }),
+    t(locale, "summary.commands", {
+      ok: summary.commands_succeeded,
+      total: summary.commands_run,
+    }) + (summary.commands_failed ? t(locale, "summary.commandsFailed", { n: summary.commands_failed }) : ""),
   ];
   const fileChanges = summary.file_changes ?? [];
   if (fileChanges.length > 0) {
-    lines.push("Files:");
+    lines.push(t(locale, "summary.files"));
     for (const change of fileChanges) {
       lines.push(`  [${change.kind}] ${change.path} (+${change.lines_added}/-${change.lines_removed})`);
     }
   } else if (summary.changed_files.length > 0) {
-    lines.push(`Changed: ${summary.changed_files.join(", ")}`);
+    lines.push(t(locale, "summary.changed", { files: summary.changed_files.join(", ") }));
   }
-  const git = gitSnapshotText(summary);
+  const git = gitSnapshotText(summary, locale);
   if (git) lines.push(git);
   return lines.join("\n");
 }
 
-function fileChangeLabel(kind: string): string {
-  if (kind === "created") return "created";
-  if (kind === "deleted") return "deleted";
-  return "modified";
+function fileChangeLabel(kind: string, locale: Locale): string {
+  if (kind === "created") return t(locale, "file.created");
+  if (kind === "deleted") return t(locale, "file.deleted");
+  return t(locale, "file.modified");
 }
-
 
 function mergeMessage(messages: Message[], message: Message): Message[] {
   return messages.some((current) => current.id === message.id) ? messages : [...messages, message];
 }
 
 export function App() {
+  const [locale, setLocale] = useState<Locale>(() => loadLocale());
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<Mode>("ask");
@@ -163,16 +178,21 @@ export function App() {
   const [restorePoints, setRestorePoints] = useState<RestorePoint[]>([]);
   const [taskSummary, setTaskSummary] = useState<TaskSummary | null>(null);
   const [replaySteps, setReplaySteps] = useState<ReplayStep[]>([]);
-  const [isSavingConfig, setIsSavingConfig] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderAuthStatus | null>(null);
-
+  const [error, setError] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
   const conversationRef = useRef<HTMLDivElement | null>(null);
+
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
   );
+
+  useEffect(() => {
+    saveLocale(locale);
+    document.documentElement.lang = locale === "zh-CN" ? "zh-CN" : "en";
+  }, [locale]);
 
   const refreshProviderStatus = useCallback(async () => {
     if (!isTauriRuntime) return;
@@ -227,7 +247,7 @@ export function App() {
       setMessages(detail.messages);
       setStreamedText("");
       setPlan(latestPlan(detail.events));
-      setActivity(buildActivity(detail.events));
+      setActivity(buildActivity(detail.events, locale));
       setPendingAction(pending);
       setApprovalSummary(latestApprovalSummary(detail.events, pending));
       setPatchPreview(latestPatchPreview(detail.events, pending));
@@ -248,7 +268,7 @@ export function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [locale]);
 
   useEffect(() => { void refreshWorkspace(); }, [refreshWorkspace]);
   useEffect(() => {
@@ -283,7 +303,7 @@ export function App() {
         setApprovalSummary(null);
       }
       if (payload.type === "task_completed") setTaskSummary(payload.summary);
-      const nextActivity = eventActivity(payload, `${payload.type}-${Date.now()}`);
+      const nextActivity = eventActivity(payload, `${payload.type}-${Date.now()}`, locale);
       if (nextActivity) {
         setActivity((current) => {
           const index = current.findIndex((item) => item.id === nextActivity.id);
@@ -295,7 +315,7 @@ export function App() {
       }
     }).then((stop) => { unlisten = stop; });
     return () => unlisten?.();
-  }, []);
+  }, [locale]);
 
   function canContinueSession(session: Session | null): boolean {
     return !!session && (session.status === "done" || session.status === "failed" || session.status === "created");
@@ -320,9 +340,13 @@ export function App() {
     event.preventDefault();
     const root = workspaceRoot.trim();
     const message = prompt.trim();
-    if (!root || !message || isRunning) return;
+    if (!root || !message || isRunning) {
+      if (!root) setError(t(locale, "error.needWorkspace"));
+      else if (!message) setError(t(locale, "error.needPrompt"));
+      return;
+    }
     if (!isTauriRuntime) {
-      setError("Open XCoding through Tauri to run a coding task.");
+      setError(t(locale, "error.tauriOnly"));
       return;
     }
 
@@ -400,7 +424,6 @@ export function App() {
     }
   }
 
-  
   async function loadReplay(): Promise<void> {
     if (!activeSessionId || !isTauriRuntime) return;
     setError(null);
@@ -411,6 +434,7 @@ export function App() {
       setError(errorValue instanceof Error ? errorValue.message : String(errorValue));
     }
   }
+
   async function rollbackRestorePoint(restorePoint: RestorePoint): Promise<void> {
     if (!activeSessionId || isRunning) return;
     setError(null);
@@ -447,7 +471,7 @@ export function App() {
     const root = workspaceRoot.trim();
     if (!root || isSavingConfig || isRunning) return;
     if (!isTauriRuntime) {
-      setError("Open XCoding through Tauri to save workspace defaults.");
+      setError(t(locale, "error.tauriOnly"));
       return;
     }
     setError(null);
@@ -489,46 +513,96 @@ export function App() {
     mode,
     model,
     provider: defaultProvider,
+    locale,
   });
   const doctorReady = desktopDoctorReady(doctorChecks);
+  const workspaceMissing = !workspaceRoot.trim();
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
-      const form = event.currentTarget.form;
-      if (form) form.requestSubmit();
+      event.currentTarget.form?.requestSubmit();
     }
   }
 
   return (
     <main className="workbench">
-      <aside className="sessions-panel" aria-label="Sessions">
+      <aside className="sessions-panel" aria-label={t(locale, "aria.sessions")}>
         <div className="sessions-top">
           <div className="brand-row">
-            <div><p className="eyebrow">XCoding</p><h1>Sessions</h1></div>
-            <button type="button" className="quiet-button" onClick={() => void refreshWorkspace()} aria-label="Refresh workspace">Refresh</button>
-          </div>
-          <label className="field-label" htmlFor="workspace-root">Workspace</label>
-          <input id="workspace-root" value={workspaceRoot} onChange={(event) => setWorkspaceRoot(event.target.value)} placeholder="D:\\work\\project" spellCheck={false} />
-          <section className="workspace-settings" aria-label="Workspace defaults">
-            <p className="panel-title">Defaults</p>
-            <div className={`auth-status ${providerStatus?.ready ? "ready" : "missing"}`} role="status">
-              <strong>{providerStatus?.ready ? "Cloud ready" : "API key missing"}</strong>
-              <small>{providerStatus?.message || "Checking provider credentials..."}</small>
-              <small>Base {providerStatus?.base_url || "https://ai.v58.dev/v1"}{providerStatus?.key_hint ? ` · key ${providerStatus.key_hint}` : ""}</small>
-              <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>Refresh auth</button>
+            <div>
+              <p className="eyebrow">{t(locale, "brand.eyebrow")}</p>
+              <h1>{t(locale, "brand.sessions")}</h1>
             </div>
-            <label className="field-label" htmlFor="default-mode">Mode</label>
-            <select id="default-mode" value={mode} onChange={(event) => setMode(event.target.value as Mode)} disabled={isRunning || isSavingConfig}>
-              <option value="ask">Ask</option>
-              <option value="auto-edit">Auto edit</option>
+            <button
+              type="button"
+              className="quiet-button"
+              onClick={() => void refreshWorkspace()}
+              aria-label={t(locale, "aria.refreshWorkspace")}
+            >
+              {t(locale, "action.refresh")}
+            </button>
+          </div>
+          <label className="field-label" htmlFor="ui-locale">{t(locale, "lang.label")}</label>
+          <select
+            id="ui-locale"
+            value={locale}
+            onChange={(event) => setLocale(event.target.value as Locale)}
+          >
+            <option value="zh-CN">{t(locale, "lang.zhCN")}</option>
+            <option value="en">{t(locale, "lang.en")}</option>
+          </select>
+          <label className="field-label" htmlFor="workspace-root">{t(locale, "field.workspace")}</label>
+          <input
+            id="workspace-root"
+            className={workspaceMissing ? "workspace-missing" : undefined}
+            value={workspaceRoot}
+            onChange={(event) => setWorkspaceRoot(event.target.value)}
+            placeholder={t(locale, "field.workspacePlaceholder")}
+            spellCheck={false}
+          />
+          <p className="mode-help">{t(locale, "field.workspaceHint")}</p>
+          <section className="workspace-settings" aria-label={t(locale, "aria.workspaceDefaults")}>
+            <p className="panel-title">{t(locale, "field.defaults")}</p>
+            <div className={`auth-status ${providerStatus?.ready ? "ready" : "missing"}`} role="status">
+              <strong>{providerStatus?.ready ? t(locale, "auth.ready") : t(locale, "auth.missing")}</strong>
+              <small>{providerStatus?.message || t(locale, "auth.checking")}</small>
+              <small>
+                {t(locale, "auth.base", { url: providerStatus?.base_url || "https://ai.v58.dev/v1" })}
+                {providerStatus?.key_hint ? ` · ${t(locale, "auth.key", { hint: providerStatus.key_hint })}` : ""}
+              </small>
+              <button type="button" className="quiet-button" onClick={() => void refreshProviderStatus()} disabled={isRunning}>
+                {t(locale, "action.refreshAuth")}
+              </button>
+            </div>
+            <label className="field-label" htmlFor="default-mode">{t(locale, "field.mode")}</label>
+            <select
+              id="default-mode"
+              value={mode}
+              onChange={(event) => setMode(event.target.value as Mode)}
+              disabled={isRunning || isSavingConfig}
+            >
+              <option value="ask">{t(locale, "mode.ask")}</option>
+              <option value="auto-edit">{t(locale, "mode.autoEdit")}</option>
             </select>
-            <p className="mode-help">{modeHelpText(mode)}</p>
-            <label className="field-label" htmlFor="default-provider">Provider</label>
-            <input id="default-provider" value={defaultProvider} readOnly spellCheck={false} title="V1 supports the OpenAI-compatible provider named openai" />
-            <label className="field-label" htmlFor="default-model">Model</label>
-            <input id="default-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={isRunning || isSavingConfig} spellCheck={false} />
-            <label className="field-label" htmlFor="command-allowlist">Command allowlist</label>
+            <p className="mode-help">{modeHelpText(mode, locale)}</p>
+            <label className="field-label" htmlFor="default-provider">{t(locale, "field.provider")}</label>
+            <input
+              id="default-provider"
+              value={defaultProvider}
+              readOnly
+              spellCheck={false}
+              title={t(locale, "provider.readonlyTitle")}
+            />
+            <label className="field-label" htmlFor="default-model">{t(locale, "field.model")}</label>
+            <input
+              id="default-model"
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              disabled={isRunning || isSavingConfig}
+              spellCheck={false}
+            />
+            <label className="field-label" htmlFor="command-allowlist">{t(locale, "field.allowlist")}</label>
             <textarea
               id="command-allowlist"
               className="command-allowlist-input"
@@ -539,8 +613,8 @@ export function App() {
               rows={4}
               placeholder={"rg\nmake:test\ngit:--version"}
             />
-            <p className="mode-help">{commandAllowlistHelpText()}</p>
-            <label className="field-label" htmlFor="command-denylist">Command denylist</label>
+            <p className="mode-help">{commandAllowlistHelpText(locale)}</p>
+            <label className="field-label" htmlFor="command-denylist">{t(locale, "field.denylist")}</label>
             <textarea
               id="command-denylist"
               className="command-allowlist-input"
@@ -551,10 +625,17 @@ export function App() {
               rows={3}
               placeholder={"powershell\ncurl"}
             />
-            <p className="mode-help">{commandDenylistHelpText()}</p>
-            <button type="button" className="quiet-button" onClick={() => void saveWorkspaceConfig()} disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}>{isSavingConfig ? "Saving..." : "Save defaults"}</button>
-            <div className={`doctor-panel ${doctorReady ? "ready" : "blocked"}`} aria-label="Workspace diagnostics">
-              <p className="panel-title">Diagnostics</p>
+            <p className="mode-help">{commandDenylistHelpText(locale)}</p>
+            <button
+              type="button"
+              className="quiet-button"
+              onClick={() => void saveWorkspaceConfig()}
+              disabled={!workspaceRoot.trim() || isRunning || isSavingConfig}
+            >
+              {isSavingConfig ? t(locale, "action.saving") : t(locale, "action.saveDefaults")}
+            </button>
+            <div className={`doctor-panel ${doctorReady ? "ready" : "blocked"}`} aria-label={t(locale, "aria.diagnostics")}>
+              <p className="panel-title">{t(locale, "doctor.title")}</p>
               <ul className="doctor-list">
                 {doctorChecks.map((check) => (
                   <li key={check.name} className={check.ok ? "ok" : "bad"}>
@@ -566,77 +647,135 @@ export function App() {
             </div>
           </section>
         </div>
-        <nav className="session-list" aria-label="Saved sessions">
-          <p className="panel-title session-list-title">History</p>
-          {sessions.length === 0 ? <p className="empty-state">No saved sessions in this workspace.</p> : null}
+        <nav className="session-list" aria-label={t(locale, "aria.savedSessions")}>
+          <p className="panel-title session-list-title">{t(locale, "field.history")}</p>
+          {sessions.length === 0 ? <p className="empty-state">{t(locale, "history.empty")}</p> : null}
           {sessions.map((session) => (
-            <button type="button" className={`session-item ${session.id === activeSessionId ? "is-active" : ""} status-${session.status}`} key={session.id} onClick={() => setActiveSessionId(session.id)}>
-              <span className="session-item-title">{sessionTitle(session)}</span>
-              <span className={`status-badge status-${session.status}`}>{formatSessionStatus(session.status)}</span>
-              <small>{sessionMetaLine(session)}</small>
+            <button
+              type="button"
+              className={`session-item ${session.id === activeSessionId ? "is-active" : ""} status-${session.status}`}
+              key={session.id}
+              onClick={() => setActiveSessionId(session.id)}
+            >
+              <span className="session-item-title">{sessionTitle(session, locale)}</span>
+              <span className={`status-badge status-${session.status}`}>{formatSessionStatus(session.status, locale)}</span>
+              <small>{sessionMetaLine(session, Date.now(), locale)}</small>
             </button>
           ))}
         </nav>
       </aside>
 
-      <section className="chat-panel" aria-label="Coding conversation">
+      <section className="chat-panel" aria-label={t(locale, "aria.conversation")}>
         <header className="chat-header">
-          <div><p className="eyebrow">Cloud model · {activeSession?.model || model}{activeSession ? ` · ${formatSessionStatus(activeSession.status)}` : ""}</p><h2>{activeSession ? sessionTitle(activeSession) : "New coding task"}{canContinueSession(activeSession) ? " · follow-up" : ""}</h2></div>
+          <div>
+            <p className="eyebrow">
+              {t(locale, "chat.cloudModel")} · {activeSession?.model || model}
+              {activeSession ? ` · ${formatSessionStatus(activeSession.status, locale)}` : ""}
+            </p>
+            <h2>
+              {activeSession ? sessionTitle(activeSession, locale) : t(locale, "chat.newTask")}
+              {canContinueSession(activeSession) ? ` · ${t(locale, "chat.followUp")}` : ""}
+            </h2>
+          </div>
           <div className="header-controls">
-            {activeSession ? <span className={`status-badge status-${activeSession.status}`}>{formatSessionStatus(activeSession.status)}</span> : null}
-            {activeSession ? <button type="button" className="quiet-button" onClick={() => startNewChat()} disabled={isRunning}>New chat</button> : null}
-            {activeSession?.status === "need_user" ? <button type="button" className="quiet-button" onClick={() => void cancelSession()} disabled={isRunning}>Cancel</button> : null}
-            <label className="mode-control">Mode<select value={mode} onChange={(event) => setMode(event.target.value as Mode)} disabled={isRunning}><option value="ask">Ask</option><option value="auto-edit">Auto edit</option></select></label>
+            {activeSession ? (
+              <span className={`status-badge status-${activeSession.status}`}>
+                {formatSessionStatus(activeSession.status, locale)}
+              </span>
+            ) : null}
+            {activeSession ? (
+              <button type="button" className="quiet-button" onClick={() => startNewChat()} disabled={isRunning}>
+                {t(locale, "action.newChat")}
+              </button>
+            ) : null}
+            {activeSession?.status === "need_user" ? (
+              <button type="button" className="quiet-button" onClick={() => void cancelSession()} disabled={isRunning}>
+                {t(locale, "action.cancel")}
+              </button>
+            ) : null}
+            <label className="mode-control">
+              {t(locale, "field.mode")}
+              <select value={mode} onChange={(event) => setMode(event.target.value as Mode)} disabled={isRunning}>
+                <option value="ask">{t(locale, "mode.ask")}</option>
+                <option value="auto-edit">{t(locale, "mode.autoEdit")}</option>
+              </select>
+            </label>
           </div>
         </header>
         <div className="conversation" aria-live="polite" ref={conversationRef}>
           {messages.map((message) => (
             <article className={`message message-${message.role}`} key={message.id}>
-              <p>{formatMessageRole(message.role)}</p>
+              <p>{formatMessageRole(message.role, locale)}</p>
               <div>{message.content}</div>
             </article>
           ))}
           {streamedText ? (
             <article className="message message-assistant streaming">
-              <p>Assistant</p>
+              <p>{t(locale, "role.assistant")}</p>
               <div>{streamedText}</div>
             </article>
           ) : null}
           {messages.length === 0 && !streamedText && !isRunning ? (
             <div className="empty-chat">
-              <p className="empty-state">Describe the repository task you want XCoding to inspect.</p>
+              <p className="empty-state">{t(locale, "chat.empty")}</p>
               <ul className="empty-hints">
-                <li>Left: workspace, mode/model defaults, diagnostics, session history</li>
-                <li>Center: conversation and composer</li>
-                <li>Right: review, plan, activity, restore, replay</li>
+                <li>{t(locale, "chat.hint.left")}</li>
+                <li>{t(locale, "chat.hint.center")}</li>
+                <li>{t(locale, "chat.hint.right")}</li>
               </ul>
-              <p className="empty-state composer-hint">Tip: Ctrl+Enter sends the message.</p>
+              <p className="empty-state composer-hint">{t(locale, "chat.tip")}</p>
             </div>
           ) : null}
           {error ? <p className="error-message">{error}</p> : null}
         </div>
         <form className="composer" onSubmit={submit}>
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={onComposerKeyDown} placeholder={canContinueSession(activeSession) ? "Continue this session..." : "Ask about this codebase..."} rows={4} disabled={isRunning} />
-          <div className="composer-footer"><span>{canContinueSession(activeSession) ? `Continue · ${activeSession!.id.slice(0, 8)}` : workspaceRoot.trim() ? workspaceRoot : "Choose a workspace path"}</span><button type="submit" disabled={isRunning || !workspaceRoot.trim() || !prompt.trim()}>{isRunning ? "Working..." : canContinueSession(activeSession) ? "Continue" : "Send"}</button></div>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={onComposerKeyDown}
+            placeholder={
+              canContinueSession(activeSession)
+                ? t(locale, "composer.continuePlaceholder")
+                : t(locale, "composer.placeholder")
+            }
+            rows={4}
+            disabled={isRunning}
+          />
+          <div className="composer-footer">
+            <span>
+              {canContinueSession(activeSession)
+                ? t(locale, "composer.continueId", { id: activeSession!.id.slice(0, 8) })
+                : workspaceRoot.trim()
+                  ? workspaceRoot
+                  : t(locale, "composer.chooseWorkspace")}
+            </span>
+            <button type="submit" disabled={isRunning || !workspaceRoot.trim() || !prompt.trim()}>
+              {isRunning
+                ? t(locale, "action.working")
+                : canContinueSession(activeSession)
+                  ? t(locale, "action.continue")
+                  : t(locale, "action.send")}
+            </button>
+          </div>
         </form>
       </section>
 
-      <aside className="trace-panel" aria-label="Agent trace">
+      <aside className="trace-panel" aria-label={t(locale, "aria.trace")}>
         {pendingAction ? (() => {
-          const review = buildReviewPresentation(pendingAction, approvalSummary, Boolean(patchPreview));
+          const review = buildReviewPresentation(pendingAction, approvalSummary, Boolean(patchPreview), locale);
           return (
             <section className={`review-panel${review.highRisk ? " high-risk" : ""}`} aria-label={review.title}>
-              <p className="panel-title">Review</p>
+              <p className="panel-title">{t(locale, "trace.review")}</p>
               <div className="review-header">
                 <strong>{review.title}</strong>
-                {review.highRisk ? <span className="risk-badge">HIGH-RISK</span> : null}
+                {review.highRisk ? <span className="risk-badge">{t(locale, "risk.high")}</span> : null}
               </div>
               <p className="review-summary">{review.summary}</p>
               {review.bodyKind === "patch" && patchPreview ? (
                 <>
                   <code>{patchPreview.path}</code>
                   <pre className="diff-preview">
-                    {buildPatchDiffLines(patchPreview).map((line, index) => (
+                    {buildPatchDiffLines(patchPreview, locale).map((line, index) => (
                       <span key={index} className={`diff-line ${line.kind}`}>
                         {line.kind === "remove" ? `- ${line.text}` : line.kind === "add" ? `+ ${line.text}` : line.text}
                       </span>
@@ -645,17 +784,28 @@ export function App() {
                 </>
               ) : null}
               {review.bodyKind === "command" ? (
-                <pre className="command-preview" aria-label="Command to approve">{review.commandText ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}</pre>
+                <pre className="command-preview" aria-label="Command to approve">
+                  {review.commandText ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}
+                </pre>
               ) : null}
               {review.bodyKind === "git" ? (
-                <pre className="command-preview git-preview" aria-label="Git operation to approve">{review.gitDetail ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}</pre>
+                <pre className="command-preview git-preview" aria-label="Git operation to approve">
+                  {review.gitDetail ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}
+                </pre>
               ) : null}
               {review.bodyKind === "generic" ? <code>{JSON.stringify(pendingAction.tool_call.arguments)}</code> : null}
               {review.riskHint ? <p className="risk-hint">{review.riskHint}</p> : null}
               <div className="review-actions">
-                <button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>Reject</button>
-                <button type="button" className={review.highRisk ? "approve-risk-button" : undefined} onClick={() => void resolveAction(true)} disabled={isRunning}>
-                  {review.highRisk ? "Approve high-risk" : "Approve"}
+                <button type="button" className="reject-button" onClick={() => void resolveAction(false)} disabled={isRunning}>
+                  {t(locale, "action.reject")}
+                </button>
+                <button
+                  type="button"
+                  className={review.highRisk ? "approve-risk-button" : undefined}
+                  onClick={() => void resolveAction(true)}
+                  disabled={isRunning}
+                >
+                  {review.highRisk ? t(locale, "action.approveRisk") : t(locale, "action.approve")}
                 </button>
               </div>
             </section>
@@ -664,37 +814,54 @@ export function App() {
 
         {!showTraceContent && !pendingAction ? (
           <section className="trace-empty">
-            <p className="panel-title">Trace</p>
-            <p className="empty-state">Plan, activity, and review panels fill in while the agent works.</p>
+            <p className="panel-title">{t(locale, "trace.emptyTitle")}</p>
+            <p className="empty-state">{t(locale, "trace.emptyBody")}</p>
           </section>
         ) : null}
 
         {taskSummary ? (
           <section className="task-summary">
             <div className="summary-header">
-              <p className="panel-title">Task summary</p>
+              <p className="panel-title">{t(locale, "trace.summary")}</p>
               <div className="summary-actions">
-                <button type="button" className="quiet-button" onClick={() => void copyText(formatTaskSummaryText(taskSummary))}>Copy summary</button>
+                <button
+                  type="button"
+                  className="quiet-button"
+                  onClick={() => void copyText(formatTaskSummaryText(taskSummary, locale))}
+                >
+                  {t(locale, "action.copy")}
+                </button>
                 {taskSummary.git_status || taskSummary.git_diff ? (
-                  <button type="button" className="quiet-button" onClick={() => void copyText(gitSnapshotText(taskSummary))}>Copy git</button>
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    onClick={() => void copyText(gitSnapshotText(taskSummary, locale))}
+                  >
+                    {t(locale, "action.copy")} Git
+                  </button>
                 ) : null}
               </div>
             </div>
             <strong>
-              {taskSummary.changed_files.length} changed file(s)
+              {taskSummary.changed_files.length} {locale === "zh-CN" ? "个变更文件" : "changed file(s)"}
               {typeof taskSummary.lines_added === "number" || typeof taskSummary.lines_removed === "number" ? (
                 <> · +{taskSummary.lines_added ?? 0}/−{taskSummary.lines_removed ?? 0}</>
               ) : null}
             </strong>
             <small>
-              {taskSummary.commands_succeeded}/{taskSummary.commands_run} command(s) succeeded
-              {taskSummary.commands_failed ? `, ${taskSummary.commands_failed} failed` : ""}
+              {t(locale, "trace.commandsSucceeded", {
+                ok: taskSummary.commands_succeeded,
+                total: taskSummary.commands_run,
+              })}
+              {taskSummary.commands_failed
+                ? t(locale, "trace.commandsFailed", { n: taskSummary.commands_failed })
+                : ""}
             </small>
             {(taskSummary.file_changes?.length ?? 0) > 0 ? (
               <ul className="file-change-list">
                 {taskSummary.file_changes!.map((change) => (
                   <li key={change.path}>
-                    <span className={`change-kind ${change.kind}`}>{fileChangeLabel(change.kind)}</span>
+                    <span className={`change-kind ${change.kind}`}>{fileChangeLabel(change.kind, locale)}</span>
                     <code>{change.path}</code>
                     <small className="line-delta">+{change.lines_added}/−{change.lines_removed}</small>
                   </li>
@@ -707,22 +874,31 @@ export function App() {
                 ))}
               </ul>
             ) : null}
-            {taskSummary.git_branch ? <small>Branch {taskSummary.git_branch}</small> : null}
+            {taskSummary.git_branch ? <small>{t(locale, "trace.branch", { name: taskSummary.git_branch })}</small> : null}
             {taskSummary.git_status ? (
-              <details className="summary-details"><summary>Git status</summary><pre className="summary-pre">{taskSummary.git_status}</pre></details>
+              <details className="summary-details">
+                <summary>{t(locale, "trace.gitStatus")}</summary>
+                <pre className="summary-pre">{taskSummary.git_status}</pre>
+              </details>
             ) : null}
             {taskSummary.git_diff ? (
-              <details className="summary-details"><summary>Git diff</summary><pre className="summary-pre">{taskSummary.git_diff}</pre></details>
+              <details className="summary-details">
+                <summary>{t(locale, "trace.gitDiff")}</summary>
+                <pre className="summary-pre">{taskSummary.git_diff}</pre>
+              </details>
             ) : null}
           </section>
         ) : null}
 
         <section className="trace-section">
-          <p className="panel-title">Activity{activity.length ? ` · ${activity.length}` : ""}</p>
+          <p className="panel-title">
+            {t(locale, "trace.activity")}
+            {activity.length ? ` · ${activity.length}` : ""}
+          </p>
           <div className="activity-list">
-            {activity.length === 0 ? <p className="empty-state">Agent activity will be recorded here.</p> : null}
+            {activity.length === 0 ? <p className="empty-state">{t(locale, "trace.activityEmpty")}</p> : null}
             {activity.map((item) => {
-              const badge = activityPolicyBadge(item.policy);
+              const badge = activityPolicyBadge(item.policy, locale);
               return (
                 <article className={`activity ${item.state} policy-${item.policy}`} key={item.id}>
                   <div className="activity-header">
@@ -737,33 +913,49 @@ export function App() {
         </section>
 
         <details className="trace-section" open={plan.length > 0}>
-          <summary className="panel-title">Plan{plan.length ? ` · ${plan.length}` : ""}</summary>
+          <summary className="panel-title">
+            {t(locale, "trace.plan")}
+            {plan.length ? ` · ${plan.length}` : ""}
+          </summary>
           <ol className="plan-list">
-            {plan.length === 0 ? <li className="empty-state">The plan appears when a task starts.</li> : null}
+            {plan.length === 0 ? <li className="empty-state">{t(locale, "trace.planEmpty")}</li> : null}
             {plan.map((step) => <li key={step.id}>{step.description}</li>)}
           </ol>
         </details>
 
         <details className="trace-section" open={restorePoints.length > 0}>
-          <summary className="panel-title">Restore points{restorePoints.length ? ` · ${restorePoints.length}` : ""}</summary>
+          <summary className="panel-title">
+            {t(locale, "trace.restore")}
+            {restorePoints.length ? ` · ${restorePoints.length}` : ""}
+          </summary>
           <div className="restore-list">
-            {restorePoints.length === 0 ? <p className="empty-state">Applied patches appear here.</p> : null}
+            {restorePoints.length === 0 ? <p className="empty-state">{t(locale, "trace.restoreEmpty")}</p> : null}
             {restorePoints.map((restorePoint) => (
               <div className="restore-point" key={restorePoint.id}>
                 <div>
                   <strong>{restorePoint.path}</strong>
-                  <small>{new Date(restorePoint.created_at).toLocaleString()}</small>
+                  <small>{new Date(restorePoint.created_at).toLocaleString(locale === "zh-CN" ? "zh-CN" : "en-US")}</small>
                 </div>
-                <button type="button" className="quiet-button" onClick={() => void rollbackRestorePoint(restorePoint)} disabled={isRunning || !restorePoint.applied_text}>Rollback</button>
+                <button
+                  type="button"
+                  className="quiet-button"
+                  onClick={() => void rollbackRestorePoint(restorePoint)}
+                  disabled={isRunning || !restorePoint.applied_text}
+                >
+                  {t(locale, "action.rollback")}
+                </button>
               </div>
             ))}
           </div>
         </details>
 
         <details className="trace-section" open={replaySteps.length > 0}>
-          <summary className="panel-title">Replay{replaySteps.length ? ` · ${replaySteps.length}` : ""}</summary>
+          <summary className="panel-title">
+            {t(locale, "trace.replay")}
+            {replaySteps.length ? ` · ${replaySteps.length}` : ""}
+          </summary>
           <div className="restore-list">
-            {replaySteps.length === 0 ? <p className="empty-state">Load a finished session to reconstruct major steps.</p> : null}
+            {replaySteps.length === 0 ? <p className="empty-state">{t(locale, "trace.replayEmpty")}</p> : null}
             {replaySteps.map((step, index) => (
               <div className="restore-point" key={`${step.kind}-${index}`}>
                 <div>
@@ -774,7 +966,14 @@ export function App() {
               </div>
             ))}
           </div>
-          <button type="button" className="quiet-button" onClick={() => void loadReplay()} disabled={!activeSessionId || isRunning}>Replay steps</button>
+          <button
+            type="button"
+            className="quiet-button"
+            onClick={() => void loadReplay()}
+            disabled={!activeSessionId || isRunning}
+          >
+            {t(locale, "action.replaySteps")}
+          </button>
         </details>
       </aside>
     </main>

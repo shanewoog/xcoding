@@ -79,6 +79,7 @@ async function main() {
   const appSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8");
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
   const configSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/config.ts"), "utf8");
+  const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
   const docsDesktop = await readFile(resolve(repositoryRoot, "docs/desktop.md"), "utf8");
   const roadmapEn = await readFile(resolve(repositoryRoot, "docs/en/roadmap.md"), "utf8");
   const roadmapZh = await readFile(resolve(repositoryRoot, "docs/zh/roadmap.md"), "utf8");
@@ -120,7 +121,7 @@ async function main() {
   }
 
   assert.ok(
-    configSource.includes("allowlisted safe commands"),
+    i18nSource.includes("allowlisted safe commands") || configSource.includes("allowlisted safe commands"),
     "modeHelpText should mention allowlisted commands",
   );
   assert.ok(

@@ -1,4 +1,13 @@
 import type { PendingAction, PersistedSessionEvent, ToolCall } from "@xcoding/protocol";
+import { t, type Locale } from "./i18n";
+
+const GIT_WRITE_TOOLS = new Set([
+  "git_add",
+  "git_commit",
+  "git_push",
+  "git_fetch",
+  "git_pull",
+]);
 
 export type ReviewBodyKind = "patch" | "command" | "git" | "generic";
 
@@ -11,14 +20,6 @@ export type ReviewPresentation = {
   bodyKind: ReviewBodyKind;
   riskHint: string | null;
 };
-
-const GIT_WRITE_TOOLS = new Set([
-  "git_add",
-  "git_commit",
-  "git_push",
-  "git_fetch",
-  "git_pull",
-]);
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
@@ -35,8 +36,8 @@ function asOptionalBool(value: unknown): boolean | null {
 
 export function formatCommandText(toolCall: ToolCall): string | null {
   if (toolCall.name !== "run_command") return null;
-  const executable = asString(toolCall.arguments.executable) ?? "<command>";
-  const args = asStringArray(toolCall.arguments.args);
+  const executable = asString(toolCall.arguments?.executable) ?? "<command>";
+  const args = asStringArray(toolCall.arguments?.args);
   return args.length === 0 ? executable : `${executable} ${args.join(" ")}`;
 }
 
@@ -81,18 +82,18 @@ export function formatGitDetail(toolCall: ToolCall): string | null {
   }
 }
 
-export function gitToolTitle(toolName: string): string | null {
+export function gitToolTitle(toolName: string, locale: Locale = "en"): string | null {
   switch (toolName) {
     case "git_add":
-      return "High-risk git add approval";
+      return t(locale, "review.gitAdd");
     case "git_commit":
-      return "High-risk git commit approval";
+      return t(locale, "review.gitCommit");
     case "git_push":
-      return "High-risk git push approval";
+      return t(locale, "review.gitPush");
     case "git_fetch":
-      return "High-risk git fetch approval";
+      return t(locale, "review.gitFetch");
     case "git_pull":
-      return "High-risk git pull approval";
+      return t(locale, "review.gitPull");
     default:
       return null;
   }
@@ -124,6 +125,7 @@ export function buildReviewPresentation(
   action: PendingAction,
   summary: string | null,
   hasPatchPreview: boolean,
+  locale: Locale = "en",
 ): ReviewPresentation {
   const toolName = action.tool_call.name;
   const commandText = formatCommandText(action.tool_call);
@@ -132,8 +134,8 @@ export function buildReviewPresentation(
 
   if (toolName === "apply_patch" || hasPatchPreview) {
     return {
-      title: "Patch approval",
-      summary: summary ?? "Review and approve the proposed patch.",
+      title: t(locale, "review.patchTitle"),
+      summary: summary ?? t(locale, "review.patchSummary"),
       highRisk: false,
       commandText: null,
       gitDetail: null,
@@ -145,42 +147,39 @@ export function buildReviewPresentation(
   if (toolName === "run_command") {
     const highRisk = highRiskFromSummary;
     return {
-      title: highRisk ? "High-risk command approval" : "Command approval",
+      title: highRisk ? t(locale, "review.commandRiskTitle") : t(locale, "review.commandTitle"),
       summary:
         summary ??
-        (commandText ? `Review and approve command: ${commandText}` : "Review and approve command."),
+        (commandText
+          ? t(locale, "review.commandSummaryWith", { command: commandText })
+          : t(locale, "review.commandSummary")),
       highRisk,
       commandText,
       gitDetail: null,
       bodyKind: "command",
-      riskHint: highRisk
-        ? "Shell or force-push style commands can change the system or remote git history. Approve only if you trust the exact command."
-        : null,
+      riskHint: highRisk ? t(locale, "review.commandRiskHint") : null,
     };
   }
 
   if (isGitWriteTool(toolName)) {
     return {
-      title: gitToolTitle(toolName) ?? "High-risk git approval",
-      summary: summary ?? `Review HIGH-RISK ${toolName}`,
+      title: gitToolTitle(toolName, locale) ?? t(locale, "review.gitTitle"),
+      summary: summary ?? t(locale, "review.gitSummary", { tool: toolName }),
       highRisk: true,
       commandText: null,
       gitDetail,
       bodyKind: "git",
-      riskHint:
-        "Git write and remote tools always need approval, even in auto-edit. Check remote, branch, paths, and message before approving.",
+      riskHint: t(locale, "review.gitRiskHint"),
     };
   }
 
   return {
-    title: "Action approval",
-    summary: summary ?? `Review ${toolName}`,
+    title: t(locale, "review.genericTitle"),
+    summary: summary ?? t(locale, "review.genericSummary", { tool: toolName }),
     highRisk: highRiskFromSummary,
     commandText: null,
     gitDetail: null,
     bodyKind: "generic",
-    riskHint: highRiskFromSummary
-      ? "This action is marked high-risk. Approve only if you trust the exact operation."
-      : null,
+    riskHint: highRiskFromSummary ? t(locale, "review.genericRiskHint") : null,
   };
 }

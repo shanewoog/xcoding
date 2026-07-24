@@ -1,4 +1,5 @@
 import type { Mode, ProviderAuthStatus } from "@xcoding/protocol";
+import { t, type Locale } from "./i18n";
 
 export type DesktopDoctorCheck = {
   name: string;
@@ -6,14 +7,12 @@ export type DesktopDoctorCheck = {
   detail: string;
 };
 
-export function modeHelpText(mode: Mode): string {
-  return mode === "auto-edit"
-    ? "Auto edit applies ordinary file patches and allowlisted safe commands automatically. High-risk writes and other commands still need approval."
-    : "Ask proposes patches and commands for approval before applying.";
+export function modeHelpText(mode: Mode, locale: Locale = "en"): string {
+  return mode === "auto-edit" ? t(locale, "mode.help.autoEdit") : t(locale, "mode.help.ask");
 }
 
-export function commandAllowlistHelpText(): string {
-  return "One pattern per line (exe or exe:subcommand). Extends the builtin auto-edit allowlist via .xcoding/command-allowlist. Shells and destructive commands are rejected.";
+export function commandAllowlistHelpText(locale: Locale = "en"): string {
+  return t(locale, "help.allowlist");
 }
 
 export function parseCommandAllowlistText(text: string): string[] {
@@ -27,8 +26,8 @@ export function formatCommandAllowlistText(patterns: string[] | undefined): stri
   return (patterns ?? []).join("\n");
 }
 
-export function commandDenylistHelpText(): string {
-  return "One pattern per line (exe or exe:subcommand). Hard-denies matching commands via .xcoding/command-denylist and overrides the allowlist. Shells may be listed.";
+export function commandDenylistHelpText(locale: Locale = "en"): string {
+  return t(locale, "help.denylist");
 }
 
 export function parseCommandDenylistText(text: string): string[] {
@@ -39,8 +38,8 @@ export function formatCommandDenylistText(patterns: string[] | undefined): strin
   return formatCommandAllowlistText(patterns);
 }
 
-export function formatModeOption(mode: Mode): string {
-  return mode === "auto-edit" ? "Auto edit" : "Ask";
+export function formatModeOption(mode: Mode, locale: Locale = "en"): string {
+  return mode === "auto-edit" ? t(locale, "mode.autoEdit") : t(locale, "mode.ask");
 }
 
 export function isValidMode(value: string): value is Mode {
@@ -53,7 +52,9 @@ export function buildDesktopDoctorChecks(input: {
   mode: Mode;
   model: string;
   provider?: string;
+  locale?: Locale;
 }): DesktopDoctorCheck[] {
+  const locale = input.locale ?? "en";
   const rootPath = input.workspaceRoot.trim();
   const model = input.model.trim();
   const provider = (input.provider ?? "openai").trim() || "openai";
@@ -61,24 +62,24 @@ export function buildDesktopDoctorChecks(input: {
 
   return [
     {
-      name: "workspace",
+      name: t(locale, "doctor.workspace"),
       ok: rootPath.length > 0,
-      detail: rootPath || "Set an absolute workspace path",
+      detail: rootPath || t(locale, "doctor.workspaceEmpty"),
     },
     {
-      name: "provider_auth",
+      name: t(locale, "doctor.provider_auth"),
       ok: Boolean(input.providerStatus?.ready),
-      detail: input.providerStatus?.message || "Checking credentials...",
+      detail: input.providerStatus?.message || t(locale, "doctor.checkingCredentials"),
     },
     {
-      name: "base_url",
+      name: t(locale, "doctor.base_url"),
       ok: baseUrl.length > 0,
-      detail: baseUrl || "Cloud base URL is unavailable",
+      detail: baseUrl || t(locale, "doctor.baseUrlMissing"),
     },
     {
-      name: "defaults",
+      name: t(locale, "doctor.defaults"),
       ok: isValidMode(input.mode) && model.length > 0,
-      detail: `${formatModeOption(input.mode)} · ${provider} · ${model || "(no model)"}`,
+      detail: `${formatModeOption(input.mode, locale)} · ${provider} · ${model || t(locale, "doctor.noModel")}`,
     },
   ];
 }

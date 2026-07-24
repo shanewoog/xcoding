@@ -57,6 +57,14 @@ async function main() {
   const appSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8");
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
   const configSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/config.ts"), "utf8");
+  const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
+  assert.ok(i18nSource.includes("export type Locale"), "i18n.ts missing Locale");
+  assert.ok(i18nSource.includes("zh-CN"), "i18n.ts missing zh-CN");
+  assert.ok(i18nSource.includes("export function t"), "i18n.ts missing t()");
+  assert.ok(i18nSource.includes("export function loadLocale"), "i18n.ts missing loadLocale");
+  assert.ok(i18nSource.includes("export function saveLocale"), "i18n.ts missing saveLocale");
+  assert.ok(i18nSource.includes('"lang.label"'), "i18n.ts missing lang.label");
+  assert.ok(i18nSource.includes("简体中文"), "i18n.ts missing Chinese labels");
   const cliSource = await readFile(resolve(repositoryRoot, "apps/cli/src/index.ts"), "utf8");
 
   for (const needle of [
@@ -90,8 +98,13 @@ async function main() {
     "commandAllowlistHelpText",
     "parseCommandAllowlistText",
     "doctor-panel",
-    "Workspace diagnostics",
-    "mode/model defaults, diagnostics",
+    "aria.diagnostics",
+    "chat.hint.left",
+    'id="ui-locale"',
+    "workspace-missing",
+    "field.workspaceHint",
+    "loadLocale",
+    "saveLocale",
   ]) {
     assert.ok(appSource.includes(needle), "App.tsx missing " + needle);
   }
@@ -103,6 +116,8 @@ async function main() {
     ".workspace-settings select",
     "input[readonly]",
     ".command-allowlist-input",
+    "input.workspace-missing",
+    "#ui-locale",
   ]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }

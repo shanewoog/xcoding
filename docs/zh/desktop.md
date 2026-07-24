@@ -15,11 +15,12 @@ pnpm --filter @xcoding/desktop exec tauri dev
 
 ## 首次使用
 
-1. 在左侧输入工作区绝对路径。
-2. 选择模式和模型默认值，并保存到该工作区。
-3. 在输入区发送仓库任务。
-4. 查看计划、流式回答、工具活动、补丁预览和审批控件。
-5. 选择已保存会话，查看事件、恢复点和任务完成摘要。
+1. 选择界面**语言**（简体中文 / English）；选择会保存在 `localStorage`。
+2. 在左侧输入真实的工作区绝对路径（仅占位示例文字不会启用发送）。
+3. 选择模式和模型默认值，并保存到该工作区。
+4. 在输入区发送仓库任务。
+5. 查看计划、流式回答、工具活动、补丁预览和审批控件。
+6. 选择已保存会话，查看事件、恢复点和任务完成摘要。
 
 Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`；`auto-edit` 会自动应用普通文件补丁与白名单安全命令。高风险写入与非白名单命令仍需审批。左侧默认设置面板可编辑工作区 `.xcoding/command-allowlist` 与 `.xcoding/command-denylist` 模式。
 
@@ -29,6 +30,7 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
 
 | 控件 | 行为 |
 |------|------|
+| 语言 | `简体中文` 或 `English`；持久化到 webview `localStorage` 键 `xcoding.locale` |
 | Mode | `ask`（默认）或 `auto-edit` |
 | Provider | 只读 `openai` |
 | Model | 新会话使用的云模型 id |

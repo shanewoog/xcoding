@@ -85,8 +85,14 @@ async function main() {
     "onComposerKeyDown",
     "conversationRef",
     "showTraceContent",
-    "Ctrl+Enter",
+    "chat.tip",
     'from "./layout"',
+    'from "./i18n"',
+    'id="ui-locale"',
+    "workspace-missing",
+    "loadLocale",
+    "saveLocale",
+    "field.workspaceHint",
   ]) {
     assert.ok(appSource.includes(needle), "App.tsx missing " + needle);
   }
@@ -100,6 +106,8 @@ async function main() {
     "position: sticky",
     ".review-panel",
     "status-need_user",
+    "input.workspace-missing",
+    "#ui-locale",
   ]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }

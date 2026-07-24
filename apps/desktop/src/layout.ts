@@ -1,49 +1,59 @@
 import type { MessageRole, Mode, Session, SessionStatus } from "@xcoding/protocol";
+import { t, type Locale } from "./i18n";
 
-export function formatSessionStatus(status: SessionStatus): string {
+export function formatSessionStatus(status: SessionStatus, locale: Locale = "en"): string {
   switch (status) {
     case "need_user":
-      return "needs review";
-    default:
-      return status.replaceAll("_", " ");
+      return t(locale, "status.need_user");
+    case "running":
+      return t(locale, "status.running");
+    case "done":
+      return t(locale, "status.done");
+    case "cancelled":
+      return t(locale, "status.cancelled");
+    case "failed":
+      return t(locale, "status.failed");
+    case "created":
+      return t(locale, "status.created");
   }
 }
 
-export function formatMessageRole(role: MessageRole): string {
+export function formatMessageRole(role: MessageRole, locale: Locale = "en"): string {
   switch (role) {
     case "user":
-      return "You";
+      return t(locale, "role.user");
     case "assistant":
-      return "Assistant";
+      return t(locale, "role.assistant");
     case "tool":
-      return "Tool";
+      return t(locale, "role.tool");
     case "system":
-      return "System";
+      return t(locale, "role.system");
     default:
       return role;
   }
 }
 
-export function formatModeLabel(mode: Mode): string {
-  return mode === "auto-edit" ? "Auto edit" : "Ask";
+export function formatModeLabel(mode: Mode, locale: Locale = "en"): string {
+  return mode === "auto-edit" ? t(locale, "mode.autoEdit") : t(locale, "mode.ask");
 }
 
-export function formatRelativeTime(iso: string, nowMs: number = Date.now()): string {
+export function formatRelativeTime(iso: string, nowMs: number = Date.now(), locale: Locale = "en"): string {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return "";
   const deltaSec = Math.max(0, Math.floor((nowMs - then) / 1000));
-  if (deltaSec < 45) return "just now";
-  if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m ago`;
-  if (deltaSec < 86400) return `${Math.floor(deltaSec / 3600)}h ago`;
-  if (deltaSec < 86400 * 14) return `${Math.floor(deltaSec / 86400)}d ago`;
-  return new Date(then).toLocaleDateString();
+  if (deltaSec < 45) return t(locale, "relative.justNow");
+  if (deltaSec < 3600) return t(locale, "relative.mAgo", { n: Math.floor(deltaSec / 60) });
+  if (deltaSec < 86400) return t(locale, "relative.hAgo", { n: Math.floor(deltaSec / 3600) });
+  if (deltaSec < 86400 * 14) return t(locale, "relative.dAgo", { n: Math.floor(deltaSec / 86400) });
+  return new Date(then).toLocaleDateString(locale === "zh-CN" ? "zh-CN" : "en-US");
 }
 
 export function sessionMetaLine(
   session: Pick<Session, "mode" | "model" | "updated_at">,
   nowMs: number = Date.now(),
+  locale: Locale = "en",
 ): string {
-  return [formatModeLabel(session.mode), session.model, formatRelativeTime(session.updated_at, nowMs)]
+  return [formatModeLabel(session.mode, locale), session.model, formatRelativeTime(session.updated_at, nowMs, locale)]
     .filter(Boolean)
     .join(" · ");
 }

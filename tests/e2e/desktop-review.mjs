@@ -151,7 +151,7 @@ async function main() {
     "risk-badge",
     "command-preview",
     "git-preview",
-    "Approve high-risk",
+    "action.approveRisk",
     "high-risk",
     "review.riskHint",
     'review.bodyKind === "git"',
