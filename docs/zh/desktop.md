@@ -140,3 +140,14 @@ pnpm desktop:portable
    `%LOCALAPPDATA%\com.shanewoog.xcoding\EBWebView`
 4. 生产前端资源必须是相对路径（`./assets/...`）。仓库 Vite 配置已设 `base: './'`。
 
+### 启动诊断日志
+
+若仍只有进程没有窗口，查看：
+
+`%USERPROFILE%\.xcoding\desktop-boot.log`
+
+WebView 用户数据在：
+
+`%USERPROFILE%\.xcoding\webview-profile`
+
+可结束 XCoding 后删除该目录再启动。

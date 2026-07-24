@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -18,9 +19,16 @@
         "height": 720,
         "minWidth": 720,
         "minHeight": 540,
+        "resizable": true,
+        "fullscreen": false,
         "visible": true,
+        "decorations": true,
+        "alwaysOnTop": false,
         "center": true,
-        "focus": true
+        "focus": true,
+        "skipTaskbar": false,
+        "maximized": false,
+        "transparent": false
       }
     ],
     "security": {
@@ -29,9 +37,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis"
-    ],
+    "targets": ["nsis"],
     "windows": {
       "nsis": {
         "installMode": "currentUser"

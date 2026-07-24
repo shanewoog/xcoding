@@ -138,3 +138,14 @@ Do not package a raw `cargo build --release` for portable use; use `tauri build`
    `%LOCALAPPDATA%\com.shanewoog.xcoding\EBWebView`
 4. Production frontend assets must be relative (`./assets/...`). The repo Vite config sets `base: './'`.
 
+### Startup diagnostics
+
+If you only see a process and no window, check:
+
+`%USERPROFILE%\.xcoding\desktop-boot.log`
+
+WebView profile lives at:
+
+`%USERPROFILE%\.xcoding\webview-profile`
+
+Quit XCoding, delete that folder, then relaunch.

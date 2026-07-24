@@ -1,6 +1,12 @@
-use std::path::PathBuf;
+// Prevent a console window in release Desktop builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{AppHandle, Emitter, Manager};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
 use xcoding_protocol::{
@@ -13,6 +19,19 @@ use xcoding_providers::{
     apply_user_config_to_env, bootstrap_credentials, inspect_auth, load_user_config,
     save_user_config, user_config_dir,
 };
+
+fn boot_log(message: &str) {
+    let dir = user_config_dir();
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join("desktop-boot.log");
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[{ts}] {message}");
+    }
+}
 
 fn database_path() -> Result<PathBuf, String> {
     let data_dir = user_config_dir();
@@ -181,16 +200,69 @@ fn load_portable_dotenv() {
     }
 }
 
+fn prepare_webview_profile() {
+    // Keep WebView2 profile under ~/.xcoding so portable moves/locks are easier to recover from.
+    let profile = user_config_dir().join("webview-profile");
+    if let Err(error) = fs::create_dir_all(&profile) {
+        boot_log(&format!("webview profile dir failed: {error}"));
+        return;
+    }
+    unsafe {
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &profile);
+    }
+    boot_log(&format!("webview profile={}", profile.display()));
+}
+
+fn ensure_main_window(app: &tauri::App) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        boot_log("main window exists from config");
+        let _ = window.center();
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = window.unminimize();
+        return Ok(());
+    }
+
+    boot_log("main window missing; creating explicitly");
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("XCoding")
+        .inner_size(960.0, 720.0)
+        .min_inner_size(720.0, 540.0)
+        .center()
+        .visible(true)
+        .focused(true)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let _ = window.show();
+    let _ = window.set_focus();
+    boot_log("main window created");
+    Ok(())
+}
+
 fn main() {
+    boot_log("main enter");
+    std::panic::set_hook(Box::new(|info| {
+        boot_log(&format!("panic: {info}"));
+    }));
+
     load_portable_dotenv();
+    boot_log("portable dotenv loaded");
     bootstrap_credentials();
-    tauri::Builder::default()
+    boot_log("credentials bootstrapped");
+    prepare_webview_profile();
+    boot_log("starting tauri builder");
+
+    let result = tauri::Builder::default()
         .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.center();
-                let _ = window.show();
-                let _ = window.set_focus();
+            boot_log("setup begin");
+            match ensure_main_window(app) {
+                Ok(()) => boot_log("ensure_main_window ok"),
+                Err(error) => {
+                    boot_log(&format!("ensure_main_window failed: {error}"));
+                    return Err(error.into());
+                }
             }
+            boot_log("setup end");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -208,7 +280,13 @@ fn main() {
             rollback_restore_point,
             cancel_session
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run XCoding Desktop");
-}
+        .run(tauri::generate_context!());
 
+    match result {
+        Ok(()) => boot_log("tauri run returned ok"),
+        Err(error) => {
+            boot_log(&format!("tauri run failed: {error}"));
+            panic!("failed to run XCoding Desktop: {error}");
+        }
+    }
+}
