@@ -8,7 +8,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use xcoding_protocol::{ProviderAuthStatus, UserConfig};
+use xcoding_protocol::{ListModelsResult, ProviderAuthStatus, ProviderModel, UserConfig};
 
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
@@ -100,6 +100,8 @@ pub enum ProviderError {
     MissingApiKey,
     #[error("provider request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("invalid provider response: {0}")]
+    InvalidResponse(String),
     #[error("{}", format_http_status_message(status, body))]
     HttpStatus { status: StatusCode, body: String },
     #[error("invalid UTF-8 in provider stream: {0}")]
@@ -148,6 +150,106 @@ pub struct OpenAiCompatibleProvider {
 
 /// Inspect cloud-provider credentials without making a network request.
 /// Does not return the full API key.
+/// Resolve credentials (optional UI overrides first) and list provider models.
+pub fn list_models_blocking(
+    base_url_override: Option<&str>,
+    api_key_override: Option<&str>,
+) -> Result<ListModelsResult, String> {
+    bootstrap_credentials();
+
+    let api_key = api_key_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_owned())
+        .or_else(|| {
+            env::var("OPENAI_API_KEY")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| ProviderError::MissingApiKey.to_string())?;
+
+    let base_url = base_url_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_owned())
+        .or_else(|| {
+            env::var("XCODING_OPENAI_BASE_URL")
+                .ok()
+                .map(|value| value.trim().trim_end_matches('/').to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "https://ai.v58.dev/v1".to_owned());
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start async runtime for model list: {error}"))?;
+
+    runtime.block_on(async move {
+        OpenAiCompatibleProvider::new(api_key, base_url)
+            .list_models()
+            .await
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn parse_models_response(base_url: &str, body: &str) -> Result<ListModelsResult, ProviderError> {
+    #[derive(Debug, Deserialize)]
+    struct ModelsResponse {
+        #[serde(default)]
+        data: Vec<ModelEntry>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ModelEntry {
+        id: String,
+        #[serde(default)]
+        owned_by: Option<String>,
+    }
+
+    let parsed: ModelsResponse = serde_json::from_str(body).map_err(|error| {
+        ProviderError::InvalidResponse(format!("invalid /models response JSON: {error}"))
+    })?;
+
+    let mut models: Vec<ProviderModel> = parsed
+        .data
+        .into_iter()
+        .filter_map(|entry| {
+            let id = entry.id.trim().to_owned();
+            if id.is_empty() {
+                None
+            } else {
+                Some(ProviderModel {
+                    id,
+                    owned_by: entry
+                        .owned_by
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty()),
+                })
+            }
+        })
+        .collect();
+
+    models.sort_by(|left, right| {
+        left.id
+            .to_ascii_lowercase()
+            .cmp(&right.id.to_ascii_lowercase())
+    });
+    models.dedup_by(|left, right| left.id == right.id);
+
+    if models.is_empty() {
+        return Err(ProviderError::InvalidResponse(
+            "provider returned an empty model list".to_owned(),
+        ));
+    }
+
+    Ok(ListModelsResult {
+        models,
+        base_url: base_url.trim_end_matches('/').to_owned(),
+    })
+}
+
 pub fn inspect_auth() -> ProviderAuthStatus {
     bootstrap_credentials();
     let base_url = env::var("XCODING_OPENAI_BASE_URL")
@@ -210,6 +312,25 @@ impl OpenAiCompatibleProvider {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             client: Client::new(),
         }
+    }
+
+    /// List models from the OpenAI-compatible `GET {base_url}/models` endpoint.
+    pub async fn list_models(&self) -> Result<ListModelsResult, ProviderError> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        let body = response.text().await?;
+        parse_models_response(&self.base_url, &body)
     }
 
     pub async fn stream_chat(
@@ -625,6 +746,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_models_list_response() {
+        let body = r#"{"object":"list","data":[{"id":"gpt-b"},{"id":"gpt-a","owned_by":"openai"},{"id":"gpt-a"}]}"#;
+        let result = parse_models_response("https://ai.v58.dev/v1/", body).expect("parse");
+        assert_eq!(result.base_url, "https://ai.v58.dev/v1");
+        assert_eq!(
+            result
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-a", "gpt-b"]
+        );
+        assert_eq!(result.models[0].owned_by.as_deref(), Some("openai"));
+    }
+
     fn inspect_auth_returns_status_struct() {
         let status = inspect_auth();
         assert!(!status.base_url.is_empty());

@@ -44,6 +44,18 @@ export interface ProviderAuthStatus {
   message: string;
 }
 
+/** One model entry from an OpenAI-compatible /models response. */
+export interface ProviderModel {
+  id: string;
+  owned_by?: string;
+}
+
+/** Result of listing models from the configured cloud provider. */
+export interface ListModelsResult {
+  models: ProviderModel[];
+  base_url: string;
+}
+
 /** User-level preferences stored under ~/.xcoding/config.json */
 export interface UserConfig {
   locale: string;

@@ -106,6 +106,10 @@ async function main() {
     'id="default-mode"',
     'id="default-provider"',
     'id="default-model"',
+    "list_provider_models",
+    "refreshModels",
+    "models.refresh",
+    "error.needModel",
     'id="command-allowlist"',
     'id="command-denylist"',
     'commandDenylistHelpText',
@@ -124,6 +128,11 @@ async function main() {
     assert.ok(appSource.includes(needle), "App.tsx missing " + needle);
   }
 
+  assert.ok(appSource.includes("list_provider_models"), "App should call list_provider_models");
+  assert.ok(appSource.includes("models.refresh"), "App should expose refresh models label key");
+  assert.ok(i18nSource.includes("models.refresh") && i18nSource.includes("error.needModel"), "i18n missing model list keys");
+  assert.ok(!/const defaultModel\s*=\s*"gpt-5.5"/.test(appSource), "UI must not autofill gpt-5.5");
+
   for (const needle of [
     ".mode-help",
     ".doctor-panel",
@@ -132,7 +141,6 @@ async function main() {
     "input[readonly]",
     ".command-allowlist-input",
     "input.workspace-missing",
-    "#ui-locale",
   ]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }

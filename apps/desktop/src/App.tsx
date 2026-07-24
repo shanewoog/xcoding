@@ -21,7 +21,9 @@ import type {
   SessionDetail,
   SessionEvent,
   TaskSummary,
+  ListModelsResult,
   ProviderAuthStatus,
+  ProviderModel,
   UserConfig,
   WorkspaceConfig,
 } from "@xcoding/protocol";
@@ -47,7 +49,6 @@ import {
 } from "./layout";
 import { isLocale, loadLocale, saveLocale, t, type Locale } from "./i18n";
 
-const defaultModel = "gpt-5.5";
 const defaultProvider = "openai";
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 
@@ -164,7 +165,10 @@ export function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<Mode>("ask");
-  const [model, setModel] = useState(defaultModel);
+  const [model, setModel] = useState("");
+  const [availableModels, setAvailableModels] = useState<ProviderModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   const [commandAllowlistText, setCommandAllowlistText] = useState("");
   const [commandDenylistText, setCommandDenylistText] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -212,7 +216,7 @@ export function App() {
         if (cancelled) return;
         if (isLocale(config.locale)) setLocale(config.locale);
         setMode(config.mode);
-        setModel(config.model || defaultModel);
+        setModel((config.model || "").trim());
         setBaseUrl(config.base_url || "https://ai.v58.dev/v1");
         setApiKey(config.api_key || "");
         if (config.last_workspace_root?.trim()) {
@@ -246,6 +250,37 @@ export function App() {
     }
   }, []);
 
+  const refreshModels = useCallback(async () => {
+    if (!isTauriRuntime) {
+      setModelsError(t(locale, "models.tauriOnly"));
+      return;
+    }
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      const result = await invoke<ListModelsResult>("list_provider_models", {
+        baseUrl: baseUrl.trim() || null,
+        apiKey: apiKey.trim() || null,
+      });
+      setAvailableModels(result.models);
+      setModel((current) => {
+        const trimmed = current.trim();
+        if (trimmed && result.models.some((entry) => entry.id === trimmed)) {
+          return trimmed;
+        }
+        if (trimmed) {
+          return trimmed;
+        }
+        return "";
+      });
+    } catch (cause) {
+      setAvailableModels([]);
+      setModelsError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setModelsLoading(false);
+    }
+  }, [apiKey, baseUrl, locale]);
+
   const loadWorkspaceConfig = useCallback(async () => {
     const root = workspaceRoot.trim();
     if (!isTauriRuntime || !root) return;
@@ -273,6 +308,19 @@ export function App() {
   const refreshWorkspace = useCallback(async () => {
     await Promise.all([refreshSessions(), loadWorkspaceConfig(), refreshProviderStatus()]);
   }, [loadWorkspaceConfig, refreshProviderStatus, refreshSessions]);
+
+  useEffect(() => {
+    if (view !== "settings") return;
+    if (!isTauriRuntime) {
+      setModelsError(t(locale, "models.tauriOnly"));
+      return;
+    }
+    if (!userConfigReady) return;
+    // Auto-fetch when credentials exist (form values or already-saved env).
+    if (apiKey.trim() || providerStatus?.has_api_key) {
+      void refreshModels();
+    }
+  }, [view, userConfigReady, apiKey, providerStatus?.has_api_key, refreshModels, locale]);
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
@@ -392,6 +440,10 @@ export function App() {
     }
     if (providerStatus && !providerStatus.ready) {
       setError(t(locale, "error.needProvider"));
+      return;
+    }
+    if (!model.trim()) {
+      setError(t(locale, "error.needModel"));
       return;
     }
     if (!isTauriRuntime) {
@@ -533,6 +585,10 @@ export function App() {
       setError(t(locale, "error.tauriOnly"));
       return;
     }
+    if (!model.trim()) {
+      setError(t(locale, "error.needModel"));
+      return;
+    }
     setError(null);
     setIsSavingConfig(true);
     try {
@@ -542,14 +598,14 @@ export function App() {
           locale,
           mode,
           provider: defaultProvider,
-          model: model.trim() || defaultModel,
+          model: model.trim(),
           base_url: baseUrl.trim() || "https://ai.v58.dev/v1",
           api_key: apiKey.trim() || undefined,
           last_workspace_root: root || undefined,
         } satisfies UserConfig,
       });
       setMode(savedUser.mode);
-      setModel(savedUser.model || defaultModel);
+      setModel((savedUser.model || "").trim());
       setBaseUrl(savedUser.base_url || "https://ai.v58.dev/v1");
       setApiKey(savedUser.api_key || "");
       if (isLocale(savedUser.locale)) setLocale(savedUser.locale);
@@ -559,7 +615,7 @@ export function App() {
             workspace_root: root,
             mode: savedUser.mode,
             provider: defaultProvider,
-            model: savedUser.model || defaultModel,
+            model: savedUser.model,
             command_allowlist: parseCommandAllowlistText(commandAllowlistText),
             command_denylist: parseCommandDenylistText(commandDenylistText),
           },
@@ -597,6 +653,11 @@ export function App() {
   });
   const doctorReady = desktopDoctorReady(doctorChecks);
   const workspaceMissing = !workspaceRoot.trim();
+  const modelMissing = !model.trim();
+  const modelNotInList =
+    !!model.trim() &&
+    availableModels.length > 0 &&
+    !availableModels.some((entry) => entry.id === model.trim());
   const sendBlockReason = isRunning
     ? "running"
     : workspaceMissing
@@ -605,7 +666,9 @@ export function App() {
         ? "prompt"
         : providerStatus && !providerStatus.ready
           ? "provider"
-          : null;
+          : modelMissing
+            ? "model"
+            : null;
   const sendHint =
     sendBlockReason === "workspace"
       ? t(locale, "composer.needWorkspace")
@@ -613,7 +676,9 @@ export function App() {
         ? t(locale, "composer.needPrompt")
         : sendBlockReason === "provider"
           ? t(locale, "composer.needProvider")
-          : null;
+          : sendBlockReason === "model"
+            ? t(locale, "composer.needModel")
+            : null;
   const sendTitle =
     sendBlockReason === "running"
       ? t(locale, "action.working")
@@ -745,13 +810,46 @@ export function App() {
             </select>
             <p className="mode-help">{modeHelpText(mode, locale)}</p>
             <label className="field-label" htmlFor="default-model">{t(locale, "field.model")}</label>
-            <input
-              id="default-model"
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              disabled={isRunning || isSavingConfig}
-              spellCheck={false}
-            />
+            <div className="secret-field">
+              <select
+                id="default-model"
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                disabled={isRunning || isSavingConfig || modelsLoading}
+              >
+                <option value="">
+                  {modelsLoading
+                    ? t(locale, "models.loading")
+                    : availableModels.length === 0
+                      ? t(locale, "models.placeholder")
+                      : t(locale, "models.placeholder")}
+                </option>
+                {modelNotInList ? (
+                  <option value={model}>
+                    {model} ({t(locale, "models.notInList")})
+                  </option>
+                ) : null}
+                {availableModels.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.owned_by ? `${entry.id} · ${entry.owned_by}` : entry.id}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={() => void refreshModels()}
+                disabled={isRunning || isSavingConfig || modelsLoading}
+              >
+                {modelsLoading ? t(locale, "models.loading") : t(locale, "models.refresh")}
+              </button>
+            </div>
+            <p className="mode-help">{t(locale, "models.help")}</p>
+            {modelsError ? <p className="mode-help" role="alert">{modelsError}</p> : null}
+            {modelNotInList ? <p className="mode-help" role="status">{t(locale, "models.notInList")}</p> : null}
+            {availableModels.length === 0 && !modelsLoading && !modelsError ? (
+              <p className="mode-help">{t(locale, "models.empty")}</p>
+            ) : null}
             <label className="field-label" htmlFor="command-allowlist">{t(locale, "field.allowlist")}</label>
             <textarea
               id="command-allowlist"

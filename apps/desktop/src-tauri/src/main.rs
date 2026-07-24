@@ -10,14 +10,14 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
 use xcoding_protocol::{
-    CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, PingResult,
+    CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, ListModelsResult, PingResult,
     ProviderAuthStatus, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams,
     RollbackRestorePointResult, ReplaySessionResult, Session, SessionDetail, SetConfigParams,
     UserConfig, WorkspaceConfig,
 };
 use xcoding_providers::{
-    apply_user_config_to_env, bootstrap_credentials, inspect_auth, load_user_config,
-    save_user_config, user_config_dir,
+    apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models_blocking,
+    load_user_config, save_user_config, user_config_dir,
 };
 
 fn boot_log(message: &str) {
@@ -46,6 +46,14 @@ fn open_core(_app: &AppHandle) -> Result<CoreService, String> {
 #[tauri::command]
 fn provider_status() -> Result<ProviderAuthStatus, String> {
     Ok(inspect_auth())
+}
+
+#[tauri::command]
+fn list_provider_models(
+    base_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<ListModelsResult, String> {
+    list_models_blocking(base_url.as_deref(), api_key.as_deref())
 }
 
 #[tauri::command]
@@ -269,6 +277,7 @@ fn main() {
             ping,
             provider_status,
             get_user_config,
+            list_provider_models,
             set_user_config,
             list_sessions,
             workspace_config,

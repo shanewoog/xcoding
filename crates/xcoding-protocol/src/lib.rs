@@ -380,6 +380,21 @@ pub struct ProviderAuthStatus {
     pub message: String,
 }
 
+/// One model entry from an OpenAI-compatible `/models` response.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProviderModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+}
+
+/// Result of listing models from the configured cloud provider.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ListModelsResult {
+    pub models: Vec<ProviderModel>,
+    pub base_url: String,
+}
+
 /// User-level Desktop/CLI preferences stored under `~/.xcoding/config.json`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct UserConfig {
