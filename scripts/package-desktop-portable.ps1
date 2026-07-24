@@ -26,17 +26,33 @@ Ensure-PathPrefix "C:\Program Files\nodejs"
 
 $pnpm = if (Test-Path "D:\WORK\Npm\pnpm.cmd") { "D:\WORK\Npm\pnpm.cmd" } else { "pnpm" }
 $outDir = Join-Path $Root "dist\portable\XCoding"
+$frontendIndex = Join-Path $Root "apps\desktop\dist\index.html"
 $releaseCandidates = @(
   (Join-Path $Root "apps\desktop\src-tauri\target\release\xcoding-desktop.exe"),
   (Join-Path $Root "apps\desktop\src-tauri\target\release\XCoding.exe")
 )
 
+# Stop a running portable/desktop process so the release binary can be overwritten.
+Get-Process XCoding, xcoding-desktop -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
 if (-not $SkipBuild) {
   Write-Host "Building frontend + Tauri production binary (custom-protocol, no installer)..."
   # IMPORTANT: use tauri CLI so production enables feature `custom-protocol`.
-  # Plain `cargo build --release` stays in dev mode and loads http://localhost:1420.
+  # Plain `cargo build --release` without custom-protocol loads http://localhost:1420.
   & $pnpm --filter @xcoding/desktop exec tauri build --no-bundle
   if ($LASTEXITCODE -ne 0) { throw "tauri build failed with exit $LASTEXITCODE" }
+}
+
+if (-not (Test-Path $frontendIndex)) {
+  throw "Frontend dist missing: $frontendIndex"
+}
+
+$indexHtml = Get-Content -LiteralPath $frontendIndex -Raw
+if ($indexHtml -match 'src="/assets/' -or $indexHtml -match 'href="/assets/') {
+  throw "Frontend assets still use absolute /assets paths. Set Vite base to './' and rebuild."
+}
+if ($indexHtml -notmatch 'src="\./assets/' -and $indexHtml -notmatch "src='\./assets/") {
+  throw "Frontend assets are not relative (expected ./assets/...). Portable UI would be blank."
 }
 
 $exe = $releaseCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -51,6 +67,8 @@ New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
 $destExe = Join-Path $outDir "XCoding.exe"
 Copy-Item -LiteralPath $exe -Destination $destExe -Force
+# Keep original name for debugging if needed.
+Copy-Item -LiteralPath $exe -Destination (Join-Path $outDir "xcoding-desktop.exe") -Force
 
 $envExample = @"
 # Put this file next to XCoding.exe and rename to .env
@@ -67,8 +85,8 @@ $readme = @"
 ## Run
 
 1. Copy this folder anywhere (USB / local disk).
-2. Copy `.env.example` to `.env` and fill in your API key.
-3. Double-click `XCoding.exe`.
+2. Double-click XCoding.exe.
+3. Open Settings and set Base URL + API key (or copy .env.example to .env).
 
 No installer is required. Do NOT need a local Vite/dev server.
 
@@ -77,9 +95,18 @@ No installer is required. Do NOT need a local Vite/dev server.
 - Windows 10/11 with WebView2 Runtime (usually preinstalled)
 - Network access to your cloud model endpoint
 
+## If the window is blank / no UI
+
+1. Confirm you are using this package (built by pnpm desktop:portable), not a raw cargo binary.
+2. Install/repair WebView2 Runtime.
+3. Close all XCoding processes, then delete:
+   %LOCALAPPDATA%\com.shanewoog.xcoding\EBWebView
+4. Reopen XCoding.exe.
+
 ## Notes
 
-- Session database is stored under the OS app data directory, not inside this folder.
+- User config and session DB are under %USERPROFILE%\.xcoding\
+- Packaging recreates this folder; local .env next to the exe may be wiped on rebuild.
 - Do not commit real API keys.
 - Prefer ask mode for first runs.
 "@
@@ -90,4 +117,3 @@ Write-Host "Portable package ready:"
 Write-Host "  $outDir"
 Write-Host "  $destExe"
 Get-Item $destExe | Format-List Name, Length, FullName
-

@@ -128,3 +128,13 @@ pnpm desktop:portable
 ```
 
 Do not package a raw `cargo build --release` for portable use; use `tauri build` so `custom-protocol` embeds the UI.
+
+
+### If the window is blank / no UI
+
+1. Use the package from `pnpm desktop:portable` (`dist/portable/XCoding/XCoding.exe`), not a raw `cargo build --release` binary.
+2. Install or repair [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+3. Kill all `XCoding` processes, then delete the WebView profile and reopen:
+   `%LOCALAPPDATA%\com.shanewoog.xcoding\EBWebView`
+4. Production frontend assets must be relative (`./assets/...`). The repo Vite config sets `base: './'`.
+

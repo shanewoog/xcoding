@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
 use xcoding_protocol::{
@@ -185,6 +185,14 @@ fn main() {
     load_portable_dotenv();
     bootstrap_credentials();
     tauri::Builder::default()
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.center();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ping,
             provider_status,
@@ -203,3 +211,4 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run XCoding Desktop");
 }
+

@@ -130,3 +130,13 @@ pnpm desktop:portable
 ```
 
 不要用纯 `cargo build --release` 打包绿色版；必须走 `tauri build`（会启用 `custom-protocol` 内嵌前端）。
+
+
+### 如果打开后没界面 / 白屏
+
+1. 确认使用 `pnpm desktop:portable` 打出来的包（`dist/portable/XCoding/XCoding.exe`），不要用裸 `cargo build --release`。
+2. 安装或修复 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。
+3. 结束所有 `XCoding` 进程后，删除 WebView 用户目录再重开：
+   `%LOCALAPPDATA%\com.shanewoog.xcoding\EBWebView`
+4. 生产前端资源必须是相对路径（`./assets/...`）。仓库 Vite 配置已设 `base: './'`。
+

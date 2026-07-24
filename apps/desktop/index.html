@@ -4,9 +4,43 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>XCoding</title>
+    <style>
+      html, body, #root {
+        margin: 0;
+        min-height: 100%;
+        background: #0f1419;
+        color: #e7ecf3;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      .boot {
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        padding: 24px;
+        text-align: center;
+        opacity: 0.9;
+      }
+      .boot strong { display: block; font-size: 18px; margin-bottom: 8px; }
+      .boot span { font-size: 13px; color: #9aa7b8; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot">
+        <div>
+          <strong>XCoding</strong>
+          <span>Loading desktop UI...</span>
+        </div>
+      </div>
+    </div>
+    <noscript>
+      <div class="boot">
+        <div>
+          <strong>XCoding needs JavaScript</strong>
+          <span>Enable script execution for the embedded WebView and reopen the app.</span>
+        </div>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

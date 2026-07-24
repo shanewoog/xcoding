@@ -18,7 +18,8 @@ xcoding-protocol = { path = "../../../crates/xcoding-protocol" }
 xcoding-providers = { path = "../../../crates/xcoding-providers" }
 
 [features]
+# Prefer production embedding by default. `tauri dev` disables this and uses devUrl.
+default = ["custom-protocol"]
 # Production / portable builds must enable this so the UI loads embedded assets
 # instead of http://localhost:1420 (dev server).
-# `tauri build` enables it; `tauri dev` leaves it off.
 custom-protocol = ["tauri/custom-protocol"]
