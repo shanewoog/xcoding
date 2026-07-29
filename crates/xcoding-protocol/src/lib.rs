@@ -6,6 +6,36 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub const JSON_RPC_VERSION: &str = "2.0";
+pub const DEFAULT_MAX_PROVIDER_RETRIES: u32 = 6;
+pub const MIN_MAX_PROVIDER_RETRIES: u32 = 0;
+pub const MAX_MAX_PROVIDER_RETRIES: u32 = 10;
+pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 16;
+pub const MIN_MAX_TOOL_ROUNDS: u32 = 1;
+pub const MAX_MAX_TOOL_ROUNDS: u32 = 64;
+pub const DEFAULT_CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
+pub const MIN_CIRCUIT_FAILURE_THRESHOLD: u32 = 1;
+pub const MAX_CIRCUIT_FAILURE_THRESHOLD: u32 = 10;
+pub const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
+pub const MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS: u64 = 1;
+pub const MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 180;
+pub const MIN_STREAM_IDLE_TIMEOUT_SECS: u64 = 60;
+pub const MAX_STREAM_IDLE_TIMEOUT_SECS: u64 = 600;
+pub const DEFAULT_NON_STREAM_TIMEOUT_SECS: u64 = 600;
+pub const MIN_NON_STREAM_TIMEOUT_SECS: u64 = 60;
+pub const MAX_NON_STREAM_TIMEOUT_SECS: u64 = 1_200;
+pub const DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 2;
+pub const MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 1;
+pub const MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 20;
+pub const DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 60;
+pub const MIN_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 30;
+pub const MAX_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 120;
+pub const DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT: u32 = 60;
+pub const MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT: u32 = 1;
+pub const MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT: u32 = 100;
+pub const DEFAULT_CIRCUIT_MIN_REQUEST_COUNT: u32 = 10;
+pub const MIN_CIRCUIT_MIN_REQUEST_COUNT: u32 = 1;
+pub const MAX_CIRCUIT_MIN_REQUEST_COUNT: u32 = 100;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct JsonRpcRequest {
@@ -370,6 +400,18 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
+/// Persisted compact summary of an early session-message prefix.
+///
+/// The original messages remain in the `messages` table for replay. This record
+/// only controls which history is sent to the provider on later turns.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ContextCompaction {
+    pub session_id: Uuid,
+    pub summary: String,
+    pub compacted_message_count: usize,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ProviderAuthStatus {
     pub ready: bool,
@@ -395,6 +437,19 @@ pub struct ListModelsResult {
     pub base_url: String,
 }
 
+/// One OpenAI-compatible cloud provider endpoint in Desktop settings.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CloudProviderConfig {
+    pub id: String,
+    /// Display name shown in the Desktop provider manager.
+    pub name: String,
+    /// OpenAI-compatible API host without a trailing `/v1` suffix.
+    pub base_url: String,
+    /// Full API key when configured. Never log this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
 /// User-level Desktop/CLI preferences stored under `~/.xcoding/config.json`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct UserConfig {
@@ -403,33 +458,136 @@ pub struct UserConfig {
     pub locale: String,
     #[serde(default)]
     pub mode: Mode,
+    /// Technical provider id used by sessions (currently always openai-compatible).
     #[serde(default = "default_provider")]
     pub provider: String,
     #[serde(default = "default_model")]
     pub model: String,
-    /// OpenAI-compatible API base URL.
+    /// Reasoning effort for compatible models: none | low | medium | high.
+    #[serde(default = "default_reasoning_effort")]
+    pub reasoning_effort: String,
+    /// Retries after the initial failed request for one provider before trying a backup provider.
+    #[serde(default = "default_max_provider_retries")]
+    pub max_provider_retries: u32,
+    /// Maximum model↔tool interaction rounds for one user turn before the agent stops.
+    #[serde(default = "default_max_tool_rounds")]
+    pub max_tool_rounds: u32,
+    /// Consecutive failed turns that open a provider circuit.
+    #[serde(default = "default_circuit_failure_threshold")]
+    pub circuit_failure_threshold: u32,
+    /// Maximum wait for the first stream event, including the initial response setup.
+    #[serde(default = "default_stream_first_event_timeout_secs")]
+    pub stream_first_event_timeout_secs: u64,
+    /// Maximum gap between stream events after the first event is received.
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64,
+    /// Reserved for future non-streaming provider calls; streaming chat does not use this yet.
+    #[serde(default = "default_non_stream_timeout_secs")]
+    pub non_stream_timeout_secs: u64,
+    /// Successful half-open turns required before a provider circuit closes.
+    #[serde(default = "default_circuit_recovery_success_threshold")]
+    pub circuit_recovery_success_threshold: u32,
+    /// Seconds a tripped provider circuit remains open before a half-open probe.
+    #[serde(default = "default_circuit_recovery_wait_secs")]
+    pub circuit_recovery_wait_secs: u64,
+    /// Failure rate percentage that can open a circuit once enough requests were sampled.
+    #[serde(default = "default_circuit_error_rate_threshold_percent")]
+    pub circuit_error_rate_threshold_percent: u32,
+    /// Minimum number of completed provider turns used for failure-rate circuit evaluation.
+    #[serde(default = "default_circuit_min_request_count")]
+    pub circuit_min_request_count: u32,
+    /// Active OpenAI-compatible API host without a trailing `/v1` suffix.
     #[serde(default = "default_base_url")]
     pub base_url: String,
-    /// Full API key when configured. Never log this value.
+    /// Active API key when configured. Never log this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// Last workspace path opened in Desktop.
+    /// Managed cloud providers. At most one is active via `active_provider_id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<CloudProviderConfig>,
+    /// Id of the currently enabled cloud provider in `providers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_provider_id: Option<String>,
+    /// Last project path opened in Desktop (agent workspace root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_workspace_root: Option<String>,
+    /// Parent directory where Desktop creates new projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_home: Option<String>,
+    /// Project paths removed from the Desktop project area (folders are kept on disk).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_project_paths: Vec<String>,
+    /// Whether tightly constrained PowerShell requests to loopback HTTP APIs may run without a high-risk prompt.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_local_api_confirmation: bool,
 }
 
 impl Default for UserConfig {
     fn default() -> Self {
+        let provider = CloudProviderConfig {
+            id: "default".to_owned(),
+            name: "openai".to_owned(),
+            base_url: default_base_url(),
+            api_key: None,
+        };
         Self {
             locale: default_locale(),
             mode: Mode::default(),
             provider: default_provider(),
             model: default_model(),
-            base_url: default_base_url(),
+            reasoning_effort: default_reasoning_effort(),
+            max_provider_retries: default_max_provider_retries(),
+            max_tool_rounds: default_max_tool_rounds(),
+            circuit_failure_threshold: default_circuit_failure_threshold(),
+            stream_first_event_timeout_secs: default_stream_first_event_timeout_secs(),
+            stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
+            non_stream_timeout_secs: default_non_stream_timeout_secs(),
+            circuit_recovery_success_threshold: default_circuit_recovery_success_threshold(),
+            circuit_recovery_wait_secs: default_circuit_recovery_wait_secs(),
+            circuit_error_rate_threshold_percent: default_circuit_error_rate_threshold_percent(),
+            circuit_min_request_count: default_circuit_min_request_count(),
+            base_url: provider.base_url.clone(),
             api_key: None,
+            providers: vec![provider.clone()],
+            active_provider_id: Some(provider.id),
             last_workspace_root: None,
+            workspace_home: None,
+            hidden_project_paths: Vec::new(),
+            skip_local_api_confirmation: false,
         }
     }
+}
+
+/// On-disk project under the workspace home.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProjectDir {
+    pub path: String,
+    pub dir_name: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CreateProjectParams {
+    pub workspace_home: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CreateProjectResult {
+    pub project: ProjectDir,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ImportProjectParams {
+    pub workspace_home: String,
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ImportProjectResult {
+    pub project: ProjectDir,
+    pub already_existed: bool,
+    pub copied: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -498,7 +656,6 @@ pub struct ReplaySessionResult {
     pub events: Vec<PersistedSessionEvent>,
     pub steps: Vec<ReplayStep>,
 }
-
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct GetConfigParams {
@@ -582,6 +739,9 @@ pub struct RollbackRestorePointResult {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CancelSessionParams {
     pub session_id: Uuid,
+    /// Optional assistant text already shown in the UI; persisted on cancel/steer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_assistant: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -651,6 +811,30 @@ pub enum SessionEvent {
         session_id: Uuid,
         summary: TaskSummary,
     },
+    /// A retryable cloud-provider interruption occurred before output was received.
+    Retrying {
+        session_id: Uuid,
+        attempt: u32,
+        max_attempts: u32,
+        message: String,
+    },
+    /// Sanitized audit record for one model HTTP request. It deliberately excludes
+    /// credentials, request messages, and generated text.
+    ModelCall {
+        session_id: Uuid,
+        provider: String,
+        model: String,
+        endpoint: String,
+        purpose: String,
+        round: u32,
+        attempt: u32,
+        max_attempts: u32,
+        success: bool,
+        output_chars: usize,
+        tool_calls: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     Error {
         session_id: Uuid,
         message: String,
@@ -665,12 +849,60 @@ fn default_model() -> String {
     "gpt-5.5".to_owned()
 }
 
+fn default_reasoning_effort() -> String {
+    "high".to_owned()
+}
+
+fn default_max_provider_retries() -> u32 {
+    DEFAULT_MAX_PROVIDER_RETRIES
+}
+
+fn default_max_tool_rounds() -> u32 {
+    DEFAULT_MAX_TOOL_ROUNDS
+}
+
+fn default_circuit_failure_threshold() -> u32 {
+    DEFAULT_CIRCUIT_FAILURE_THRESHOLD
+}
+
+fn default_stream_first_event_timeout_secs() -> u64 {
+    DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS
+}
+
+fn default_stream_idle_timeout_secs() -> u64 {
+    DEFAULT_STREAM_IDLE_TIMEOUT_SECS
+}
+
+fn default_non_stream_timeout_secs() -> u64 {
+    DEFAULT_NON_STREAM_TIMEOUT_SECS
+}
+
+fn default_circuit_recovery_success_threshold() -> u32 {
+    DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD
+}
+
+fn default_circuit_recovery_wait_secs() -> u64 {
+    DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS
+}
+
+fn default_circuit_error_rate_threshold_percent() -> u32 {
+    DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT
+}
+
+fn default_circuit_min_request_count() -> u32 {
+    DEFAULT_CIRCUIT_MIN_REQUEST_COUNT
+}
+
 fn default_base_url() -> String {
-    "https://ai.v58.dev/v1".to_owned()
+    "https://ai.v58.dev".to_owned()
 }
 
 fn default_locale() -> String {
     "en".to_owned()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]
@@ -686,6 +918,80 @@ mod tests {
 
         assert_eq!(decoded, request);
         assert!(decoded.is_valid_version());
+    }
+
+    #[test]
+    fn defaults_user_config_reasoning_effort() {
+        let config: UserConfig = serde_json::from_value(json!({
+            "locale": "en",
+            "mode": "ask",
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "base_url": "https://example.test/v1"
+        }))
+        .expect("user config parses");
+        assert_eq!(config.reasoning_effort, "high");
+        assert_eq!(
+            config.stream_idle_timeout_secs,
+            DEFAULT_STREAM_IDLE_TIMEOUT_SECS
+        );
+        assert_eq!(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES);
+        assert_eq!(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS);
+        assert_eq!(
+            config.circuit_failure_threshold,
+            DEFAULT_CIRCUIT_FAILURE_THRESHOLD
+        );
+        assert_eq!(
+            config.stream_first_event_timeout_secs,
+            DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.non_stream_timeout_secs,
+            DEFAULT_NON_STREAM_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.circuit_recovery_success_threshold,
+            DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD
+        );
+        assert_eq!(
+            config.circuit_recovery_wait_secs,
+            DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS
+        );
+        assert_eq!(
+            config.circuit_error_rate_threshold_percent,
+            DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT
+        );
+        assert_eq!(
+            config.circuit_min_request_count,
+            DEFAULT_CIRCUIT_MIN_REQUEST_COUNT
+        );
+        assert!(config.providers.is_empty());
+        assert_eq!(config.active_provider_id, None);
+        assert!(!config.skip_local_api_confirmation);
+    }
+
+    #[test]
+    fn serializes_local_api_confirmation_only_when_enabled() {
+        let default_config = UserConfig::default();
+        let default_json =
+            serde_json::to_value(&default_config).expect("default config serializes");
+        assert!(default_json.get("skip_local_api_confirmation").is_none());
+
+        let enabled = UserConfig {
+            skip_local_api_confirmation: true,
+            ..default_config
+        };
+        let enabled_json = serde_json::to_value(&enabled).expect("enabled config serializes");
+        assert_eq!(enabled_json["skip_local_api_confirmation"], true);
+    }
+
+    #[test]
+    fn defaults_user_config_includes_provider_slot() {
+        let config = UserConfig::default();
+        assert_eq!(config.base_url, "https://ai.v58.dev");
+        assert_eq!(config.providers.len(), 1);
+        assert_eq!(config.providers[0].base_url, "https://ai.v58.dev");
+        assert_eq!(config.active_provider_id.as_deref(), Some("default"));
     }
 
     #[test]
@@ -752,4 +1058,3 @@ mod tests {
         );
     }
 }
-

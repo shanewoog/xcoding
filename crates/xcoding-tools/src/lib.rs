@@ -10,14 +10,17 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_policy::{
-    PermissionDecision, PermissionKind, assess_command_with_lists, evaluate_detailed,
-    parse_command_allowlist, parse_command_denylist, COMMAND_ALLOWLIST_RELATIVE_PATH,
-    COMMAND_DENYLIST_RELATIVE_PATH,
+    COMMAND_ALLOWLIST_RELATIVE_PATH, COMMAND_DENYLIST_RELATIVE_PATH, PermissionDecision,
+    PermissionKind, assess_command_with_lists, evaluate_detailed, parse_command_allowlist,
+    parse_command_denylist,
 };
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
 
@@ -35,6 +38,218 @@ const MAX_SKILL_DESCRIPTION_CHARS: usize = 240;
 const MAX_SEARCH_CANDIDATES: usize = 500;
 const DEFAULT_GIT_LOG_COUNT: usize = 20;
 const MAX_GIT_LOG_COUNT: usize = 50;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Creates Git processes without a visible console on Windows.
+/// Git is invoked by the task-summary worker as well as user-requested Git tools.
+fn git_command() -> Command {
+    workspace_command("git")
+}
+
+/// Creates workspace child processes without a visible console on Windows.
+/// This keeps PowerShell and other command-line tools from flashing a console when
+/// an approved tool call is executed from the Desktop app.
+fn workspace_command(executable: &str) -> Command {
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+/// Returns true only for a tightly constrained PowerShell HTTP request to a loopback API.
+/// This is intentionally conservative because it gates the remembered high-risk approval.
+pub fn is_local_api_request(tool_call: &ToolCall) -> bool {
+    if tool_call.name != ToolName::RunCommand {
+        return false;
+    }
+    let Ok(args) = parse_arguments::<RunCommandArgs>(&tool_call.arguments) else {
+        return false;
+    };
+    is_local_api_command(&args)
+}
+
+fn is_local_api_command(args: &RunCommandArgs) -> bool {
+    let executable = args
+        .executable
+        .rsplit(|character| character == '\\' || character == '/')
+        .next()
+        .unwrap_or(args.executable.as_str())
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        executable.as_str(),
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+    ) {
+        return false;
+    }
+
+    let Some(command_index) = args.args.iter().position(|argument| {
+        argument.eq_ignore_ascii_case("-command") || argument.eq_ignore_ascii_case("-c")
+    }) else {
+        return false;
+    };
+    if command_index + 2 != args.args.len() {
+        return false;
+    }
+
+    is_safe_local_api_script(&args.args[command_index + 1])
+}
+
+fn is_safe_local_api_script(script: &str) -> bool {
+    let normalized = script.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if lower.contains("$(")
+        || lower.contains('|')
+        || lower.contains('&')
+        || lower.contains(char::from(96))
+    {
+        return false;
+    }
+
+    const FORBIDDEN_COMMANDS: &[&str] = &[
+        "remove-item",
+        "move-item",
+        "copy-item",
+        "new-item",
+        "set-content",
+        "add-content",
+        "clear-content",
+        "out-file",
+        "set-itemproperty",
+        "invoke-expression",
+        "start-process",
+        "stop-process",
+        "restart-computer",
+        "set-executionpolicy",
+    ];
+    if FORBIDDEN_COMMANDS
+        .iter()
+        .any(|command| lower.contains(command))
+    {
+        return false;
+    }
+
+    let urls = extract_http_urls(normalized);
+    if urls.is_empty() || urls.iter().any(|url| !is_loopback_http_url(url)) {
+        return false;
+    }
+
+    let mut invoke_count = 0;
+    for statement in split_powershell_statements(normalized) {
+        let statement = statement.trim();
+        if statement.is_empty() {
+            continue;
+        }
+        let statement_lower = statement.to_ascii_lowercase();
+        if statement_lower == "try" || statement_lower == "catch" {
+            continue;
+        }
+        if is_local_api_invoke(&statement_lower) {
+            invoke_count += 1;
+            continue;
+        }
+        if let Some((_, expression)) = statement_lower.split_once('=') {
+            if is_local_api_invoke(expression.trim()) {
+                invoke_count += 1;
+                continue;
+            }
+        }
+        if is_local_api_output_reference(&statement_lower) {
+            continue;
+        }
+        return false;
+    }
+
+    invoke_count == 1
+}
+
+fn is_local_api_invoke(expression: &str) -> bool {
+    expression.starts_with("invoke-webrequest") || expression.starts_with("invoke-restmethod")
+}
+
+fn is_local_api_output_reference(statement: &str) -> bool {
+    statement.starts_with('$')
+        && statement.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '$' | '_' | '.')
+        })
+}
+
+fn split_powershell_statements(script: &str) -> Vec<&str> {
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    for (index, character) in script.char_indices() {
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {}
+            None if character == char::from(39) || character == '"' => quote = Some(character),
+            None if matches!(character, ';' | '{' | '}' | '\n' | '\r') => {
+                statements.push(&script[start..index]);
+                start = index + character.len_utf8();
+            }
+            None => {}
+        }
+    }
+    statements.push(&script[start..]);
+    statements
+}
+
+fn extract_http_urls(script: &str) -> Vec<&str> {
+    let lower = script.to_ascii_lowercase();
+    let mut urls = Vec::new();
+    let mut search_start = 0;
+    while search_start < lower.len() {
+        let http = lower[search_start..]
+            .find("http://")
+            .map(|offset| search_start + offset);
+        let https = lower[search_start..]
+            .find("https://")
+            .map(|offset| search_start + offset);
+        let Some(start) = [http, https].into_iter().flatten().min() else {
+            break;
+        };
+        let rest = &script[start..];
+        let end = rest
+            .find(|character: char| {
+                character.is_whitespace()
+                    || character == char::from(39)
+                    || character == '"'
+                    || character == char::from(96)
+            })
+            .unwrap_or(rest.len());
+        urls.push(&rest[..end]);
+        search_start = start + end.max(1);
+    }
+    urls
+}
+
+fn is_loopback_http_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let Some(authority) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+        .map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(rest))
+    else {
+        return false;
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        return host == "::1" && (suffix.is_empty() || suffix.starts_with(':'));
+    }
+
+    let host = authority.split(':').next().unwrap_or_default();
+    matches!(host, "127.0.0.1" | "localhost")
+}
 
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -398,7 +613,10 @@ impl ToolRegistry {
         }
 
         let limit = bounded(args.max_results, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
-        let context_lines = args.context_lines.unwrap_or(0).min(MAX_SEARCH_CONTEXT_LINES);
+        let context_lines = args
+            .context_lines
+            .unwrap_or(0)
+            .min(MAX_SEARCH_CONTEXT_LINES);
         let glob = args
             .glob
             .as_deref()
@@ -560,7 +778,7 @@ impl ToolRegistry {
         // Never inherit the server RPC stdin pipe: some tools (notably git on
         // Windows) can hang when stdin is an open parent pipe still owned by the
         // JSON-RPC loop.
-        let mut child = Command::new(&args.executable)
+        let mut child = workspace_command(&args.executable)
             .args(&args.args)
             .current_dir(&self.workspace_root)
             .stdin(Stdio::null())
@@ -626,7 +844,8 @@ impl ToolRegistry {
         let name = args.name.trim();
         if !is_valid_skill_name(name) {
             return Err(ToolError::InvalidArguments(
-                "skill name must be 1-64 chars of [A-Za-z0-9._-] starting with alphanumeric".to_owned(),
+                "skill name must be 1-64 chars of [A-Za-z0-9._-] starting with alphanumeric"
+                    .to_owned(),
             ));
         }
         let relative = format!(".xcoding/skills/{name}/SKILL.md");
@@ -663,12 +882,15 @@ impl ToolRegistry {
     }
 
     fn git_status(&self, args: GitStatusArgs) -> Result<ToolExecution, ToolError> {
-        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        let pathspec = args
+            .path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
         if let Some(path) = pathspec {
             let _ = checked_relative_path(path)?;
         }
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command
             .arg("status")
             .arg("--porcelain=v1")
@@ -687,7 +909,10 @@ impl ToolRegistry {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if !output.status.success() {
             return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
-                format!("git status failed with exit code {:?}", output.status.code())
+                format!(
+                    "git status failed with exit code {:?}",
+                    output.status.code()
+                )
             } else {
                 truncate_output(&stderr)
             }));
@@ -705,20 +930,20 @@ impl ToolRegistry {
                 "entries": entries,
                 "raw": truncate_output(&stdout),
             }),
-            summary: format!(
-                "Git status for {}",
-                pathspec.unwrap_or(".")
-            ),
+            summary: format!("Git status for {}", pathspec.unwrap_or(".")),
         })
     }
 
     fn git_diff(&self, args: GitDiffArgs) -> Result<ToolExecution, ToolError> {
-        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        let pathspec = args
+            .path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
         if let Some(path) = pathspec {
             let _ = checked_relative_path(path)?;
         }
 
-        let mut staged = Command::new("git");
+        let mut staged = git_command();
         staged
             .arg("diff")
             .arg("--cached")
@@ -732,7 +957,7 @@ impl ToolRegistry {
             staged.arg("--").arg(path);
         }
 
-        let mut unstaged = Command::new("git");
+        let mut unstaged = git_command();
         unstaged
             .arg("diff")
             .arg("--no-ext-diff")
@@ -773,13 +998,16 @@ impl ToolRegistry {
     }
 
     fn git_log(&self, args: GitLogArgs) -> Result<ToolExecution, ToolError> {
-        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        let pathspec = args
+            .path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
         if let Some(path) = pathspec {
             let _ = checked_relative_path(path)?;
         }
         let max_count = bounded(args.max_count, DEFAULT_GIT_LOG_COUNT, MAX_GIT_LOG_COUNT);
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command
             .arg("log")
             .arg(format!("--max-count={max_count}"))
@@ -835,12 +1063,15 @@ impl ToolRegistry {
                 "revision must not start with '-'".to_owned(),
             ));
         }
-        let pathspec = args.path.as_deref().filter(|value| !value.trim().is_empty());
+        let pathspec = args
+            .path
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
         if let Some(path) = pathspec {
             let _ = checked_relative_path(path)?;
         }
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command
             .arg("show")
             .arg("--no-color")
@@ -887,7 +1118,9 @@ impl ToolRegistry {
             summary: format!(
                 "Git show {}{}",
                 revision,
-                pathspec.map(|path| format!(" -- {path}")).unwrap_or_default()
+                pathspec
+                    .map(|path| format!(" -- {path}"))
+                    .unwrap_or_default()
             ),
         })
     }
@@ -916,7 +1149,7 @@ impl ToolRegistry {
             normalized.push(relative.display().to_string());
         }
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command
             .arg("add")
             .arg("--")
@@ -964,7 +1197,7 @@ impl ToolRegistry {
         }
         let allow_empty = args.allow_empty.unwrap_or(false);
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command.arg("commit").arg("-m").arg(message);
         if allow_empty {
             command.arg("--allow-empty");
@@ -983,7 +1216,10 @@ impl ToolRegistry {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if !output.status.success() {
             return Err(ToolError::InvalidCommand(if stderr.trim().is_empty() {
-                format!("git commit failed with exit code {:?}", output.status.code())
+                format!(
+                    "git commit failed with exit code {:?}",
+                    output.status.code()
+                )
             } else {
                 truncate_output(&stderr)
             }));
@@ -1010,7 +1246,6 @@ impl ToolRegistry {
         })
     }
 
-
     fn git_push(&self, args: GitPushArgs) -> Result<ToolExecution, ToolError> {
         let remote = args
             .remote
@@ -1021,14 +1256,19 @@ impl ToolRegistry {
         validate_git_name("remote", remote)?;
 
         let set_upstream = args.set_upstream.unwrap_or(false);
-        let branch = if let Some(branch) = args.branch.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        let branch = if let Some(branch) = args
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             validate_git_name("branch", branch)?;
             branch.to_owned()
         } else {
             current_branch_name(&self.workspace_root)?
         };
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command.arg("push");
         if set_upstream {
             command.arg("--set-upstream");
@@ -1078,7 +1318,6 @@ impl ToolRegistry {
         })
     }
 
-
     fn git_fetch(&self, args: GitFetchArgs) -> Result<ToolExecution, ToolError> {
         let remote = args
             .remote
@@ -1099,7 +1338,7 @@ impl ToolRegistry {
             })
             .transpose()?;
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command.arg("fetch");
         command.arg(remote);
         if let Some(branch) = branch.as_deref() {
@@ -1153,14 +1392,19 @@ impl ToolRegistry {
         validate_git_name("remote", remote)?;
 
         let ff_only = args.ff_only.unwrap_or(true);
-        let branch = if let Some(branch) = args.branch.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        let branch = if let Some(branch) = args
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             validate_git_name("branch", branch)?;
             branch.to_owned()
         } else {
             current_branch_name(&self.workspace_root)?
         };
 
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command.arg("pull");
         if ff_only {
             command.arg("--ff-only");
@@ -1208,7 +1452,11 @@ impl ToolRegistry {
                 "Pulled {} from {}{}",
                 branch,
                 remote,
-                if ff_only { " (ff-only)" } else { " (no-rebase)" }
+                if ff_only {
+                    " (ff-only)"
+                } else {
+                    " (no-rebase)"
+                }
             ),
         })
     }
@@ -1334,7 +1582,6 @@ struct SearchCodeArgs {
 struct LoadSkillArgs {
     name: String,
 }
-
 
 #[derive(Deserialize)]
 struct GitStatusArgs {
@@ -1558,7 +1805,6 @@ fn parse_git_show_output(stdout: &str) -> (serde_json::Map<String, Value>, Strin
     }
 }
 
-
 fn load_command_allowlist(workspace_root: &Path) -> Vec<String> {
     let path = workspace_root.join(COMMAND_ALLOWLIST_RELATIVE_PATH);
     match fs::read_to_string(path) {
@@ -1620,16 +1866,10 @@ fn parse_skill_file(folder_name: &str, raw: &str) -> ParsedSkillFile {
                 body,
             )
         } else {
-            (
-                skill_fallback_description(&normalized),
-                normalized.clone(),
-            )
+            (skill_fallback_description(&normalized), normalized.clone())
         }
     } else {
-        (
-            skill_fallback_description(&normalized),
-            normalized.clone(),
-        )
+        (skill_fallback_description(&normalized), normalized.clone())
     };
     let description = if description.chars().count() > MAX_SKILL_DESCRIPTION_CHARS {
         description
@@ -1662,7 +1902,6 @@ fn is_high_risk_path(path: &str) -> bool {
         .any(|part| part == ".git" || part == ".xcoding")
 }
 
-
 fn validate_git_name(kind: &str, value: &str) -> Result<(), ToolError> {
     if value.is_empty() {
         return Err(ToolError::InvalidArguments(format!(
@@ -1689,7 +1928,7 @@ fn validate_git_name(kind: &str, value: &str) -> Result<(), ToolError> {
 }
 
 fn current_branch_name(workspace_root: &Path) -> Result<String, ToolError> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("rev-parse")
         .arg("--abbrev-ref")
         .arg("HEAD")
@@ -1720,7 +1959,7 @@ fn current_branch_name(workspace_root: &Path) -> Result<String, ToolError> {
 }
 
 fn git_rev_parse_head(workspace_root: &Path) -> Result<String, ToolError> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("rev-parse")
         .arg("HEAD")
         .current_dir(workspace_root)
@@ -1803,8 +2042,8 @@ fn path_rank_score(relative_path: &str) -> i32 {
         score += 10;
     }
     const SOURCE_EXTS: &[&str] = &[
-        ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".go", ".py",
-        ".java", ".kt", ".cs", ".cpp", ".c", ".h", ".hpp", ".md", ".toml", ".json",
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".go", ".py", ".java", ".kt",
+        ".cs", ".cpp", ".c", ".h", ".hpp", ".md", ".toml", ".json",
     ];
     if SOURCE_EXTS.iter().any(|ext| lower.ends_with(ext)) {
         score += 10;
@@ -1879,6 +2118,48 @@ mod tests {
         root
     }
 
+    fn local_api_tool_call(script: &str) -> ToolCall {
+        ToolCall {
+            id: "local-api".to_owned(),
+            name: ToolName::RunCommand,
+            arguments: json!({
+                "executable": "powershell",
+                "args": ["-Command", script]
+            }),
+        }
+    }
+
+    #[test]
+    fn identifies_only_tightly_scoped_loopback_powershell_api_requests() {
+        let sample = r#"try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8787/api/analyze' -Method POST -Body '{"code":"513310","skip_llm":true}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 30; $r.Content } catch { $_.Exception.Message }"#;
+        assert!(is_local_api_request(&local_api_tool_call(sample)));
+        assert!(is_local_api_request(&local_api_tool_call(
+            "Invoke-RestMethod -Uri 'https://localhost:8787/api/analyze' -Method GET"
+        )));
+        assert!(is_local_api_request(&local_api_tool_call(
+            "Invoke-WebRequest -Uri 'http://[::1]:8787/api/analyze' -Method GET"
+        )));
+
+        assert!(!is_local_api_request(&local_api_tool_call(
+            "Invoke-WebRequest -Uri 'https://example.test/api/analyze' -Method POST"
+        )));
+        assert!(!is_local_api_request(&local_api_tool_call(
+            "Invoke-WebRequest -Uri 'http://127.0.0.1:8787/api/analyze' -Method POST; Remove-Item .\\important.txt"
+        )));
+        assert!(!is_local_api_request(&local_api_tool_call("Get-ChildItem")));
+        assert!(!is_local_api_request(&ToolCall {
+            id: "extra-argument".to_owned(),
+            name: ToolName::RunCommand,
+            arguments: json!({
+                "executable": "powershell",
+                "args": ["-Command", "Invoke-WebRequest -Uri 'http://127.0.0.1:8787/api/analyze'", "-NoProfile"]
+            }),
+        }));
+        assert!(!is_local_api_request(&local_api_tool_call(
+            "Invoke-WebRequest -Uri 'http://127.0.0.1:8787/api/analyze'; $x = Get-ChildItem"
+        )));
+    }
+
     #[test]
     fn loads_workspace_skill_as_read_only_tool() {
         let root = workspace();
@@ -1903,7 +2184,12 @@ mod tests {
             .expect("skill loads");
         assert_eq!(loaded.output["name"], "demo-skill");
         assert_eq!(loaded.output["description"], "Demo skill for tests");
-        assert!(loaded.output["content"].as_str().unwrap().contains("Use this skill."));
+        assert!(
+            loaded.output["content"]
+                .as_str()
+                .unwrap()
+                .contains("Use this skill.")
+        );
         assert_eq!(loaded.summary, "Loaded skill demo-skill");
 
         let missing = tools.execute(
@@ -1997,7 +2283,10 @@ mod tests {
             .expect("case search");
         assert_eq!(case_search.output["results"].as_array().unwrap().len(), 1);
         assert_eq!(case_search.output["results"][0]["path"], "src/lib.rs");
-        assert_eq!(case_search.output["results"][0]["text"], "pub fn find_me() {}");
+        assert_eq!(
+            case_search.output["results"][0]["text"],
+            "pub fn find_me() {}"
+        );
         assert_eq!(case_search.output["results"][0]["before"][0], "// preamble");
         assert_eq!(case_search.output["results"][0]["after"][0], "// trailer");
 
@@ -2022,8 +2311,11 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("src creates");
         // dist is ignored as a directory now; use a non-ignored generated-looking path.
         fs::create_dir_all(root.join("generated")).expect("generated creates");
-        fs::write(root.join("src/auth.ts"), "export const token = 'secret-marker';\n")
-            .expect("src writes");
+        fs::write(
+            root.join("src/auth.ts"),
+            "export const token = 'secret-marker';\n",
+        )
+        .expect("src writes");
         fs::write(
             root.join("generated/bundle.min.js"),
             "var token='secret-marker';\n",
@@ -2070,7 +2362,7 @@ mod tests {
     fn reports_git_status_and_diff_for_workspace_changes() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("registry starts");
-        let init = Command::new("git")
+        let init = git_command()
             .args(["init"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2078,22 +2370,22 @@ mod tests {
             .status()
             .expect("git init runs");
         assert!(init.success());
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.email", "xcoding@example.com"])
             .current_dir(&root)
             .status();
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.name", "XCoding"])
             .current_dir(&root)
             .status();
         fs::write(root.join("hello.txt"), "hello\n").expect("file writes");
-        let add = Command::new("git")
+        let add = git_command()
             .args(["add", "hello.txt"])
             .current_dir(&root)
             .status()
             .expect("git add runs");
         assert!(add.success());
-        let commit = Command::new("git")
+        let commit = git_command()
             .args(["commit", "-m", "init"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2138,7 +2430,7 @@ mod tests {
     fn reports_git_log_and_show_for_workspace_history() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("registry starts");
-        let init = Command::new("git")
+        let init = git_command()
             .args(["init"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2146,22 +2438,22 @@ mod tests {
             .status()
             .expect("git init runs");
         assert!(init.success());
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.email", "xcoding@example.com"])
             .current_dir(&root)
             .status();
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.name", "XCoding"])
             .current_dir(&root)
             .status();
         fs::write(root.join("hello.txt"), "hello\n").expect("file writes");
-        let add = Command::new("git")
+        let add = git_command()
             .args(["add", "hello.txt"])
             .current_dir(&root)
             .status()
             .expect("git add runs");
         assert!(add.success());
-        let commit = Command::new("git")
+        let commit = git_command()
             .args(["commit", "-m", "init commit"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2170,13 +2462,13 @@ mod tests {
             .expect("git commit runs");
         assert!(commit.success());
         fs::write(root.join("hello.txt"), "hello world\n").expect("file mutates");
-        let add2 = Command::new("git")
+        let add2 = git_command()
             .args(["add", "hello.txt"])
             .current_dir(&root)
             .status()
             .expect("git add runs");
         assert!(add2.success());
-        let commit2 = Command::new("git")
+        let commit2 = git_command()
             .args(["commit", "-m", "second commit"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2236,6 +2528,49 @@ mod tests {
             )
             .expect_err("bad revision fails");
         assert!(matches!(missing, ToolError::InvalidCommand(_)));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn ask_mode_auto_applies_ordinary_workspace_patches() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let applied = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "ask_write".to_owned(),
+                    name: ToolName::ApplyPatch,
+                    arguments: json!({
+                        "path": "notes/hello.txt",
+                        "old_text": "",
+                        "new_text": "hello workspace\n"
+                    }),
+                },
+            )
+            .expect("ask mode allows ordinary workspace writes");
+        assert_eq!(applied.output["path"], "notes/hello.txt");
+        assert_eq!(
+            fs::read_to_string(root.join("notes/hello.txt")).expect("file written"),
+            "hello workspace\n"
+        );
+
+        let denied = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "ask_high_risk".to_owned(),
+                    name: ToolName::ApplyPatch,
+                    arguments: json!({
+                        "path": ".xcoding/secret.txt",
+                        "old_text": "",
+                        "new_text": "nope\n"
+                    }),
+                },
+            )
+            .expect_err("high-risk workspace paths still need approval");
+        assert!(matches!(denied, ToolError::PermissionDenied));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -2358,7 +2693,7 @@ mod tests {
     fn stages_and_commits_with_authorized_git_write_tools() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("registry starts");
-        let init = Command::new("git")
+        let init = git_command()
             .args(["init"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2366,23 +2701,27 @@ mod tests {
             .status()
             .expect("git init runs");
         assert!(init.success());
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.email", "xcoding@example.com"])
             .current_dir(&root)
             .status();
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.name", "XCoding"])
             .current_dir(&root)
             .status();
-        fs::write(root.join("hello.txt"), "hello
-").expect("file writes");
-        let bootstrap_add = Command::new("git")
+        fs::write(
+            root.join("hello.txt"),
+            "hello
+",
+        )
+        .expect("file writes");
+        let bootstrap_add = git_command()
             .args(["add", "hello.txt"])
             .current_dir(&root)
             .status()
             .expect("bootstrap add");
         assert!(bootstrap_add.success());
-        let bootstrap_commit = Command::new("git")
+        let bootstrap_commit = git_command()
             .args(["commit", "-m", "init"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2391,8 +2730,12 @@ mod tests {
             .expect("bootstrap commit");
         assert!(bootstrap_commit.success());
 
-        fs::write(root.join("hello.txt"), "hello staged
-").expect("mutate");
+        fs::write(
+            root.join("hello.txt"),
+            "hello staged
+",
+        )
+        .expect("mutate");
         let empty_paths = tools
             .execute_authorized(&ToolCall {
                 id: "add_empty".to_owned(),
@@ -2448,7 +2791,7 @@ mod tests {
             "stage and commit via tools"
         );
 
-        let subject = Command::new("git")
+        let subject = git_command()
             .args(["log", "-1", "--pretty=%s"])
             .current_dir(&root)
             .output()
@@ -2462,7 +2805,6 @@ mod tests {
         fs::remove_dir_all(root).expect("workspace removes");
     }
 
-
     #[test]
     fn pushes_with_authorized_git_push_tool() {
         let root = workspace();
@@ -2471,7 +2813,7 @@ mod tests {
             "{}_remote.git",
             root.file_name().unwrap().to_string_lossy()
         ));
-        let init = Command::new("git")
+        let init = git_command()
             .args(["init", "-b", "main"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2479,7 +2821,7 @@ mod tests {
             .status()
             .expect("git init runs");
         assert!(init.success());
-        let bare_init = Command::new("git")
+        let bare_init = git_command()
             .args(["init", "--bare", "-b", "main"])
             .arg(&bare)
             .stdout(Stdio::null())
@@ -2487,36 +2829,42 @@ mod tests {
             .status()
             .expect("bare init runs");
         assert!(bare_init.success());
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.email", "xcoding@example.com"])
             .current_dir(&root)
             .status();
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["config", "user.name", "XCoding"])
             .current_dir(&root)
             .status();
         fs::write(root.join("hello.txt"), "hello\\n").expect("file writes");
-        assert!(Command::new("git")
-            .args(["add", "hello.txt"])
-            .current_dir(&root)
-            .status()
-            .expect("add")
-            .success());
-        assert!(Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("commit")
-            .success());
-        assert!(Command::new("git")
-            .args(["remote", "add", "origin"])
-            .arg(&bare)
-            .current_dir(&root)
-            .status()
-            .expect("remote add")
-            .success());
+        assert!(
+            git_command()
+                .args(["add", "hello.txt"])
+                .current_dir(&root)
+                .status()
+                .expect("add")
+                .success()
+        );
+        assert!(
+            git_command()
+                .args(["commit", "-m", "init"])
+                .current_dir(&root)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("commit")
+                .success()
+        );
+        assert!(
+            git_command()
+                .args(["remote", "add", "origin"])
+                .arg(&bare)
+                .current_dir(&root)
+                .status()
+                .expect("remote add")
+                .success()
+        );
 
         let bad_remote = tools
             .execute_authorized(&ToolCall {
@@ -2557,14 +2905,16 @@ mod tests {
             pushed.summary
         );
 
-        let remote_head = Command::new("git")
+        let remote_head = git_command()
             .args(["--git-dir"])
             .arg(&bare)
             .args(["rev-parse", "main"])
             .output()
             .expect("remote rev-parse");
         assert!(remote_head.status.success());
-        let remote_hash = String::from_utf8_lossy(&remote_head.stdout).trim().to_owned();
+        let remote_hash = String::from_utf8_lossy(&remote_head.stdout)
+            .trim()
+            .to_owned();
         let local_hash = git_rev_parse_head(&root).expect("local head");
         assert_eq!(remote_hash, local_hash);
 
@@ -2584,7 +2934,7 @@ mod tests {
             "{}_peer",
             root.file_name().unwrap().to_string_lossy()
         ));
-        let init = Command::new("git")
+        let init = git_command()
             .args(["init", "-b", "main"])
             .current_dir(&root)
             .stdout(Stdio::null())
@@ -2592,7 +2942,7 @@ mod tests {
             .status()
             .expect("git init runs");
         assert!(init.success());
-        let bare_init = Command::new("git")
+        let bare_init = git_command()
             .args(["init", "--bare", "-b", "main"])
             .arg(&bare)
             .stdout(Stdio::null())
@@ -2604,84 +2954,100 @@ mod tests {
             ("user.email", "xcoding@example.com"),
             ("user.name", "XCoding"),
         ] {
-            let _ = Command::new("git")
+            let _ = git_command()
                 .args(["config", key, value])
                 .current_dir(&root)
                 .status();
         }
         fs::write(root.join("hello.txt"), "hello\n").expect("file writes");
-        assert!(Command::new("git")
-            .args(["add", "hello.txt"])
-            .current_dir(&root)
-            .status()
-            .expect("add")
-            .success());
-        assert!(Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("commit")
-            .success());
-        assert!(Command::new("git")
-            .args(["remote", "add", "origin"])
-            .arg(&bare)
-            .current_dir(&root)
-            .status()
-            .expect("remote add")
-            .success());
-        assert!(Command::new("git")
-            .args(["push", "--set-upstream", "origin", "main"])
-            .current_dir(&root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("initial push")
-            .success());
+        assert!(
+            git_command()
+                .args(["add", "hello.txt"])
+                .current_dir(&root)
+                .status()
+                .expect("add")
+                .success()
+        );
+        assert!(
+            git_command()
+                .args(["commit", "-m", "init"])
+                .current_dir(&root)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("commit")
+                .success()
+        );
+        assert!(
+            git_command()
+                .args(["remote", "add", "origin"])
+                .arg(&bare)
+                .current_dir(&root)
+                .status()
+                .expect("remote add")
+                .success()
+        );
+        assert!(
+            git_command()
+                .args(["push", "--set-upstream", "origin", "main"])
+                .current_dir(&root)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("initial push")
+                .success()
+        );
 
         // Peer clone advances remote.
-        assert!(Command::new("git")
-            .args(["clone"])
-            .arg(&bare)
-            .arg(&peer)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("clone peer")
-            .success());
+        assert!(
+            git_command()
+                .args(["clone"])
+                .arg(&bare)
+                .arg(&peer)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("clone peer")
+                .success()
+        );
         for (key, value) in [
             ("user.email", "xcoding@example.com"),
             ("user.name", "XCoding"),
         ] {
-            let _ = Command::new("git")
+            let _ = git_command()
                 .args(["config", key, value])
                 .current_dir(&peer)
                 .status();
         }
         fs::write(peer.join("hello.txt"), "hello from peer\n").expect("peer writes");
-        assert!(Command::new("git")
-            .args(["add", "hello.txt"])
-            .current_dir(&peer)
-            .status()
-            .expect("peer add")
-            .success());
-        assert!(Command::new("git")
-            .args(["commit", "-m", "peer advance"])
-            .current_dir(&peer)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("peer commit")
-            .success());
-        assert!(Command::new("git")
-            .args(["push", "origin", "main"])
-            .current_dir(&peer)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("peer push")
-            .success());
+        assert!(
+            git_command()
+                .args(["add", "hello.txt"])
+                .current_dir(&peer)
+                .status()
+                .expect("peer add")
+                .success()
+        );
+        assert!(
+            git_command()
+                .args(["commit", "-m", "peer advance"])
+                .current_dir(&peer)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("peer commit")
+                .success()
+        );
+        assert!(
+            git_command()
+                .args(["push", "origin", "main"])
+                .current_dir(&peer)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("peer push")
+                .success()
+        );
         let peer_head = git_rev_parse_head(&peer).expect("peer head");
 
         let bad_remote = tools
@@ -2738,16 +3104,12 @@ mod tests {
             pulled.summary
         );
         let local_content = fs::read_to_string(root.join("hello.txt")).expect("read local");
-        assert_eq!(
-            local_content.replace("\r\n", "\n"),
-            "hello from peer\n"
-        );
+        assert_eq!(local_content.replace("\r\n", "\n"), "hello from peer\n");
 
         let _ = fs::remove_dir_all(&peer);
         let _ = fs::remove_dir_all(&bare);
         fs::remove_dir_all(root).expect("workspace removes");
     }
-
 
     #[test]
     fn rolls_back_patches_only_when_the_applied_text_is_unchanged() {
@@ -2812,9 +3174,7 @@ mod tests {
         assert_eq!(error.code(), Some("patch_conflict"));
         assert_eq!(error.path(), Some("notes.txt"));
         assert!(
-            error
-                .to_string()
-                .contains("patch conflict on notes.txt"),
+            error.to_string().contains("patch conflict on notes.txt"),
             "error={}",
             error
         );
@@ -2954,11 +3314,7 @@ mod tests {
         assert_eq!(kind, PermissionKind::Exec);
         assert!(!high_risk);
         assert!(allowlisted);
-        fs::write(
-            root.join(".xcoding/command-allowlist"),
-            "powershell\ncmd\n",
-        )
-        .expect("rewrite");
+        fs::write(root.join(".xcoding/command-allowlist"), "powershell\ncmd\n").expect("rewrite");
         let tools = ToolRegistry::new(&root).expect("reload");
         assert!(tools.command_allowlist().is_empty());
     }
@@ -3036,6 +3392,4 @@ mod tests {
         assert!(!preview.file_existed);
         assert_eq!(preview.new_text, "created\n");
     }
-
 }
-

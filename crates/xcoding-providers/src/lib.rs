@@ -1,6 +1,6 @@
 //! Cloud-model adapters for OpenAI-compatible streaming chat completions.
 
-use std::{collections::BTreeMap, env, fs, path::PathBuf, pin::Pin};
+use std::{collections::BTreeMap, env, fs, path::PathBuf, pin::Pin, time::Duration};
 
 use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
@@ -8,7 +8,18 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
-use xcoding_protocol::{ListModelsResult, ProviderAuthStatus, ProviderModel, UserConfig};
+use xcoding_protocol::{
+    CloudProviderConfig, ListModelsResult, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
+    MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
+    MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
+    MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS, MAX_NON_STREAM_TIMEOUT_SECS,
+    MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS,
+    MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_FAILURE_THRESHOLD,
+    MIN_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
+    MIN_CIRCUIT_RECOVERY_WAIT_SECS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
+    MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS,
+    ProviderAuthStatus, ProviderModel, UserConfig,
+};
 
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
@@ -64,10 +75,7 @@ impl ChatMessage {
         Self::text("assistant", content)
     }
 
-    pub fn user_with_images(
-        text: impl Into<String>,
-        images: &[(String, String)],
-    ) -> Self {
+    pub fn user_with_images(text: impl Into<String>, images: &[(String, String)]) -> Self {
         let text = text.into();
         if images.is_empty() {
             return Self::user(text);
@@ -157,12 +165,94 @@ pub enum ProviderError {
     InvalidResponse(String),
     #[error("{}", format_http_status_message(status, body))]
     HttpStatus { status: StatusCode, body: String },
+    #[error("{}", format_empty_stream_message(status, body))]
+    EmptyStream { status: StatusCode, body: String },
     #[error("invalid UTF-8 in provider stream: {0}")]
     Utf8(#[from] std::str::Utf8Error),
     #[error("invalid OpenAI-compatible stream event: {0}")]
     StreamJson(#[from] serde_json::Error),
     #[error("invalid tool call from provider: {0}")]
     InvalidToolCall(String),
+    #[error("stream disconnected before completion: {0}")]
+    StreamDisconnected(String),
+}
+
+impl ProviderError {
+    /// Transient transport / upstream failures worth retrying before failing the turn.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(error) => {
+                // Retry network/timeouts and incomplete requests; skip pure decode bugs.
+                error.is_timeout()
+                    || error.is_connect()
+                    || error.is_request()
+                    || error.is_body()
+                    || (!error.is_decode() && error.status().is_none())
+            }
+            Self::HttpStatus { status, .. } => {
+                matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504)
+            }
+            Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
+            Self::MissingApiKey
+            | Self::InvalidResponse(_)
+            | Self::Utf8(_)
+            | Self::StreamJson(_)
+            | Self::InvalidToolCall(_) => false,
+        }
+    }
+}
+
+/// Initial attempt + this many retries (Codex-style: retry up to 5 times).
+pub const MAX_PROVIDER_RETRIES: u32 = 5;
+const EMPTY_STREAM_RESPONSE_BODY_LIMIT: usize = 4 * 1024;
+
+pub fn provider_retry_delay(retry_number: u32) -> Duration {
+    // retry_number is 1..=MAX_PROVIDER_RETRIES after the first failure.
+    let shift = retry_number.saturating_sub(1).min(4);
+    Duration::from_millis(250u64.saturating_mul(1u64 << shift))
+}
+
+fn build_http_client() -> Client {
+    Client::builder()
+        // Avoid hanging forever on dead endpoints; do not set a total body timeout so
+        // long-lived SSE chat streams are not cut mid-turn.
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
+fn format_empty_stream_message(status: &StatusCode, body: &str) -> String {
+    format!(
+        "model returned an empty response; please retry. HTTP {}; response body: {}",
+        status.as_u16(),
+        body
+    )
+}
+
+fn append_stream_body_sample(sample: &mut Vec<u8>, truncated: &mut bool, chunk: &[u8]) {
+    let remaining = EMPTY_STREAM_RESPONSE_BODY_LIMIT.saturating_sub(sample.len());
+    if remaining == 0 {
+        *truncated = true;
+        return;
+    }
+    if chunk.len() > remaining {
+        sample.extend_from_slice(&chunk[..remaining]);
+        *truncated = true;
+    } else {
+        sample.extend_from_slice(chunk);
+    }
+}
+
+fn format_stream_body_sample(sample: &[u8], truncated: bool) -> String {
+    let mut body = String::from_utf8_lossy(sample).into_owned();
+    if truncated {
+        body.push_str("\n...[response body truncated after 4096 bytes]");
+    }
+    if body.trim().is_empty() {
+        "(empty body)".to_owned()
+    } else {
+        body
+    }
 }
 
 fn format_http_status_message(status: &StatusCode, body: &str) -> String {
@@ -200,9 +290,201 @@ pub struct OpenAiCompatibleProvider {
     client: Client,
 }
 
-
 /// Inspect cloud-provider credentials without making a network request.
 /// Does not return the full API key.
+/// Strip trailing slashes and optional `/v1` so stored hosts stay path-free.
+pub fn normalize_base_url(input: &str) -> String {
+    let mut value = input.trim().to_owned();
+    loop {
+        let without_slash = value.trim_end_matches('/').to_owned();
+        if without_slash != value {
+            value = without_slash;
+            continue;
+        }
+        if value.len() >= 3 {
+            let lower = value.to_ascii_lowercase();
+            if lower.ends_with("/v1") {
+                value.truncate(value.len() - 3);
+                continue;
+            }
+        }
+        break;
+    }
+    value
+}
+
+/// Build the OpenAI-compatible API root used for HTTP calls (`{host}/v1`).
+pub fn api_root_url(input: &str) -> String {
+    let normalized = normalize_base_url(input);
+    if normalized.is_empty() {
+        return "https://ai.v58.dev/v1".to_owned();
+    }
+    format!("{normalized}/v1")
+}
+
+/// Ensure `providers` / `active_provider_id` exist and mirror the active slot onto legacy fields.
+pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
+    config.provider = if config.provider.trim().is_empty() {
+        "openai".to_owned()
+    } else {
+        config.provider.trim().to_owned()
+    };
+    config.model = config.model.trim().to_owned();
+    config.locale = config.locale.trim().to_owned();
+    if config.locale.is_empty() {
+        config.locale = "en".to_owned();
+    }
+    config.max_provider_retries = config
+        .max_provider_retries
+        .clamp(MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES);
+    config.max_tool_rounds = config
+        .max_tool_rounds
+        .clamp(MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS);
+    config.circuit_failure_threshold = config
+        .circuit_failure_threshold
+        .clamp(MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD);
+    config.stream_first_event_timeout_secs = config.stream_first_event_timeout_secs.clamp(
+        MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+        MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+    );
+    config.stream_idle_timeout_secs = config
+        .stream_idle_timeout_secs
+        .clamp(MIN_STREAM_IDLE_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS);
+    config.non_stream_timeout_secs = config
+        .non_stream_timeout_secs
+        .clamp(MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS);
+    config.circuit_recovery_success_threshold = config.circuit_recovery_success_threshold.clamp(
+        MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
+        MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
+    );
+    config.circuit_recovery_wait_secs = config.circuit_recovery_wait_secs.clamp(
+        MIN_CIRCUIT_RECOVERY_WAIT_SECS,
+        MAX_CIRCUIT_RECOVERY_WAIT_SECS,
+    );
+    config.circuit_error_rate_threshold_percent =
+        config.circuit_error_rate_threshold_percent.clamp(
+            MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
+            MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
+        );
+    config.circuit_min_request_count = config
+        .circuit_min_request_count
+        .clamp(MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT);
+    if let Some(key) = config.api_key.as_mut() {
+        let trimmed = key.trim().to_owned();
+        if trimmed.is_empty() {
+            config.api_key = None;
+        } else {
+            *key = trimmed;
+        }
+    }
+    if let Some(root) = config.last_workspace_root.as_mut() {
+        let trimmed = root.trim().to_owned();
+        if trimmed.is_empty() {
+            config.last_workspace_root = None;
+        } else {
+            *root = trimmed;
+        }
+    }
+    if let Some(home) = config.workspace_home.as_mut() {
+        let trimmed = home.trim().to_owned();
+        if trimmed.is_empty() {
+            config.workspace_home = None;
+        } else {
+            *home = trimmed;
+        }
+    }
+
+    if config.providers.is_empty() {
+        let id = "default".to_owned();
+        let name = if config.provider.trim().is_empty() {
+            "openai".to_owned()
+        } else {
+            config.provider.trim().to_owned()
+        };
+        let base = normalize_base_url(&config.base_url);
+        config.providers.push(CloudProviderConfig {
+            id: id.clone(),
+            name,
+            base_url: if base.is_empty() {
+                "https://ai.v58.dev".to_owned()
+            } else {
+                base
+            },
+            api_key: config.api_key.clone(),
+        });
+        config.active_provider_id = Some(id);
+    }
+
+    for provider in &mut config.providers {
+        provider.id = provider.id.trim().to_owned();
+        if provider.id.is_empty() {
+            provider.id = format!("provider-{}", uuid_like());
+        }
+        provider.name = provider.name.trim().to_owned();
+        if provider.name.is_empty() {
+            provider.name = "openai".to_owned();
+        }
+        provider.base_url = {
+            let base = normalize_base_url(&provider.base_url);
+            if base.is_empty() {
+                "https://ai.v58.dev".to_owned()
+            } else {
+                base
+            }
+        };
+        if let Some(key) = provider.api_key.as_mut() {
+            let trimmed = key.trim().to_owned();
+            if trimmed.is_empty() {
+                provider.api_key = None;
+            } else {
+                *key = trimmed;
+            }
+        }
+    }
+
+    let active_id = config
+        .active_provider_id
+        .as_ref()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .filter(|value| {
+            config
+                .providers
+                .iter()
+                .any(|provider| provider.id == *value)
+        })
+        .unwrap_or_else(|| config.providers[0].id.clone());
+    config.active_provider_id = Some(active_id.clone());
+
+    if let Some(active) = config
+        .providers
+        .iter()
+        .find(|provider| provider.id == active_id)
+        .cloned()
+    {
+        // Sessions still require the technical openai provider id.
+        config.provider = "openai".to_owned();
+        config.base_url = active.base_url;
+        config.api_key = active.api_key;
+    } else {
+        config.base_url = normalize_base_url(&config.base_url);
+        if config.base_url.is_empty() {
+            config.base_url = "https://ai.v58.dev".to_owned();
+        }
+    }
+
+    config
+}
+
+fn uuid_like() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0);
+    format!("{millis:x}")
+}
+
 fn resolve_provider_credentials(
     base_url_override: Option<&str>,
     api_key_override: Option<&str>,
@@ -221,17 +503,19 @@ fn resolve_provider_credentials(
         })
         .ok_or_else(|| ProviderError::MissingApiKey.to_string())?;
 
-    let base_url = base_url_override
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.trim_end_matches('/').to_owned())
-        .or_else(|| {
-            env::var("XCODING_OPENAI_BASE_URL")
-                .ok()
-                .map(|value| value.trim().trim_end_matches('/').to_owned())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "https://ai.v58.dev/v1".to_owned());
+    let base_url = api_root_url(
+        &base_url_override
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_owned())
+            .or_else(|| {
+                env::var("XCODING_OPENAI_BASE_URL")
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "https://ai.v58.dev".to_owned()),
+    );
 
     Ok((api_key, base_url))
 }
@@ -325,10 +609,9 @@ fn parse_models_response(base_url: &str, body: &str) -> Result<ListModelsResult,
 
 pub fn inspect_auth() -> ProviderAuthStatus {
     bootstrap_credentials();
-    let base_url = env::var("XCODING_OPENAI_BASE_URL")
-        .unwrap_or_else(|_| "https://ai.v58.dev/v1".to_owned())
-        .trim_end_matches('/')
-        .to_owned();
+    let base_url = api_root_url(
+        &env::var("XCODING_OPENAI_BASE_URL").unwrap_or_else(|_| "https://ai.v58.dev".to_owned()),
+    );
     match env::var("OPENAI_API_KEY") {
         Ok(key) if !key.trim().is_empty() => {
             let trimmed = key.trim();
@@ -374,17 +657,23 @@ impl OpenAiCompatibleProvider {
                     Ok(trimmed)
                 }
             })?;
-        let base_url = env::var("XCODING_OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://ai.v58.dev/v1".to_owned());
+        let base_url =
+            env::var("XCODING_OPENAI_BASE_URL").unwrap_or_else(|_| "https://ai.v58.dev".to_owned());
         Ok(Self::new(api_key, base_url))
     }
 
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
-            client: Client::new(),
+            base_url: api_root_url(&base_url.into()),
+            client: build_http_client(),
         }
+    }
+
+    /// Return the exact chat endpoint used for OpenAI-compatible requests.
+    /// This intentionally exposes no credential material.
+    pub fn chat_completions_url(&self) -> String {
+        format!("{}/chat/completions", self.base_url)
     }
 
     /// List models from the OpenAI-compatible `GET {base_url}/models` endpoint.
@@ -411,12 +700,19 @@ impl OpenAiCompatibleProvider {
         model: &str,
         messages: Vec<ChatMessage>,
         tools: &[ToolDefinition],
+        reasoning_effort: Option<&str>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let mut body = json!({
             "model": model,
             "messages": messages,
             "stream": true
         });
+        if let Some(effort) = reasoning_effort
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            body["reasoning_effort"] = json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = Value::Array(
                 tools
@@ -431,27 +727,23 @@ impl OpenAiCompatibleProvider {
             );
         }
 
-        let response = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::HttpStatus { status, body });
-        }
+        // The agent owns retry scheduling so it can report each reconnect attempt to
+        // the UI. This provider opens one SSE response per call.
+        let response = self.open_chat_completion(&body).await?;
+        let response_status = response.status();
 
         let stream = try_stream! {
             let mut bytes = response.bytes_stream();
             let mut buffer = Vec::new();
             let mut tool_calls = BTreeMap::new();
+            let mut body_sample = Vec::new();
+            let mut body_sample_truncated = false;
+            let mut emitted_event = false;
 
             while let Some(chunk) = bytes.next().await {
-                buffer.extend_from_slice(&chunk?);
+                let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                append_stream_body_sample(&mut body_sample, &mut body_sample_truncated, &chunk);
+                buffer.extend_from_slice(&chunk);
 
                 while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
                     let line: Vec<u8> = buffer.drain(..=newline).collect();
@@ -462,14 +754,22 @@ impl OpenAiCompatibleProvider {
                     let data = data.trim();
 
                     if data == "[DONE]" {
-                        for tool_call in completed_tool_calls(std::mem::take(&mut tool_calls))? {
+                        let completed_calls = completed_tool_calls(std::mem::take(&mut tool_calls))?;
+                        if !emitted_event && completed_calls.is_empty() {
+                            Err::<(), ProviderError>(ProviderError::EmptyStream {
+                                status: response_status,
+                                body: format_stream_body_sample(&body_sample, body_sample_truncated),
+                            })?;
+                        }
+                        for tool_call in completed_calls {
                             yield ProviderEvent::ToolCall(tool_call);
                         }
                         return;
                     }
 
                     let parsed = parse_chunk(data)?;
-                    if let Some(content) = parsed.content {
+                    if let Some(content) = parsed.content.filter(|content| !content.trim().is_empty()) {
+                        emitted_event = true;
                         yield ProviderEvent::TextDelta(content);
                     }
                     for delta in parsed.tool_calls {
@@ -481,12 +781,30 @@ impl OpenAiCompatibleProvider {
                 }
             }
 
-            for tool_call in completed_tool_calls(tool_calls)? {
-                yield ProviderEvent::ToolCall(tool_call);
-            }
+            Err::<(), ProviderError>(ProviderError::StreamDisconnected(
+                "connection closed before [DONE]".to_owned(),
+            ))?;
         };
 
         Ok(Box::pin(stream))
+    }
+
+    async fn open_chat_completion(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
+        let response = self
+            .client
+            .post(self.chat_completions_url())
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::HttpStatus { status, body });
+        }
+
+        Ok(response)
     }
 }
 
@@ -559,6 +877,11 @@ impl ToolCallAccumulator {
     }
 
     fn finish(self) -> Result<ProviderToolCall, ProviderError> {
+        let arguments = if self.arguments.trim().is_empty() {
+            "{}".to_owned()
+        } else {
+            self.arguments
+        };
         Ok(ProviderToolCall {
             id: self
                 .id
@@ -568,7 +891,7 @@ impl ToolCallAccumulator {
                 name: self.name.ok_or_else(|| {
                     ProviderError::InvalidToolCall("missing function name".to_owned())
                 })?,
-                arguments: self.arguments,
+                arguments,
             },
         })
     }
@@ -601,18 +924,20 @@ pub fn user_config_path() -> PathBuf {
 /// Load user preferences from `~/.xcoding/config.json`, or defaults when missing/invalid.
 pub fn load_user_config() -> UserConfig {
     let path = user_config_path();
-    match fs::read_to_string(&path) {
+    let loaded = match fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
         Err(_) => UserConfig::default(),
-    }
+    };
+    normalize_user_config(loaded)
 }
 
 /// Persist user preferences to `~/.xcoding/config.json`.
 pub fn save_user_config(config: &UserConfig) -> Result<(), String> {
+    let normalized = normalize_user_config(config.clone());
     let dir = user_config_dir();
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join("config.json");
-    let body = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    let body = serde_json::to_string_pretty(&normalized).map_err(|error| error.to_string())?;
     fs::write(&path, format!("{body}\n")).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -632,9 +957,9 @@ pub fn apply_user_config_to_env(config: &UserConfig) {
     }
     let base = config.base_url.trim();
     if !base.is_empty() {
-        let normalized = base.trim_end_matches('/').to_owned();
+        let api_root = api_root_url(base);
         unsafe {
-            env::set_var("XCODING_OPENAI_BASE_URL", normalized);
+            env::set_var("XCODING_OPENAI_BASE_URL", api_root);
         }
     }
 }
@@ -665,9 +990,9 @@ pub fn fill_env_from_user_config() {
     if !has_base {
         let base = config.base_url.trim();
         if !base.is_empty() {
-            let normalized = base.trim_end_matches('/').to_owned();
+            let api_root = api_root_url(base);
             unsafe {
-                env::set_var("XCODING_OPENAI_BASE_URL", normalized);
+                env::set_var("XCODING_OPENAI_BASE_URL", api_root);
             }
         }
     }
@@ -776,6 +1101,79 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_empty_tool_arguments_to_empty_object() {
+        let parsed = parse_chunk(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"git_status","arguments":""}}]}}]}"#)
+            .expect("tool event parses");
+        let mut accumulator = ToolCallAccumulator::default();
+        accumulator.merge(parsed.tool_calls.into_iter().next().expect("tool call"));
+
+        assert_eq!(
+            accumulator
+                .finish()
+                .expect("tool call completes")
+                .function
+                .arguments,
+            "{}"
+        );
+    }
+
+    #[test]
+    fn retryable_status_codes() {
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: "slow down".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::BAD_GATEWAY,
+                body: "bad gateway".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: "unavailable".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ProviderError::HttpStatus {
+                status: StatusCode::UNAUTHORIZED,
+                body: "nope".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ProviderError::HttpStatus {
+                status: StatusCode::BAD_REQUEST,
+                body: "bad".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            ProviderError::EmptyStream {
+                status: StatusCode::OK,
+                body: "data: [DONE]".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(!ProviderError::MissingApiKey.is_retryable());
+        assert!(!ProviderError::InvalidResponse("x".to_owned()).is_retryable());
+    }
+
+    #[test]
+    fn provider_retry_delay_grows() {
+        assert_eq!(provider_retry_delay(1), Duration::from_millis(250));
+        assert_eq!(provider_retry_delay(2), Duration::from_millis(500));
+        assert_eq!(provider_retry_delay(3), Duration::from_millis(1000));
+        assert!(provider_retry_delay(5) >= provider_retry_delay(4));
+    }
+
+    #[test]
     fn missing_api_key_message_is_actionable() {
         let message = ProviderError::MissingApiKey.to_string();
         assert!(message.contains("OPENAI_API_KEY is not set"));
@@ -819,6 +1217,23 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_base_url_variants() {
+        assert_eq!(
+            normalize_base_url("https://ai.v58.dev/v1/"),
+            "https://ai.v58.dev"
+        );
+        assert_eq!(
+            normalize_base_url("https://ai.v58.dev/"),
+            "https://ai.v58.dev"
+        );
+        assert_eq!(api_root_url("https://ai.v58.dev"), "https://ai.v58.dev/v1");
+        assert_eq!(
+            api_root_url("https://ai.v58.dev/v1/"),
+            "https://ai.v58.dev/v1"
+        );
+    }
+
+    #[test]
     fn parses_models_list_response() {
         let body = r#"{"object":"list","data":[{"id":"gpt-b"},{"id":"gpt-a","owned_by":"openai"},{"id":"gpt-a"}]}"#;
         let result = parse_models_response("https://ai.v58.dev/v1/", body).expect("parse");
@@ -840,6 +1255,74 @@ mod tests {
         assert!(!status.message.is_empty());
         assert_eq!(status.ready, status.has_api_key);
     }
+
+    #[test]
+    fn normalizes_stream_idle_timeout_within_safe_bounds() {
+        let too_short = normalize_user_config(UserConfig {
+            stream_idle_timeout_secs: 1,
+            ..UserConfig::default()
+        });
+        assert_eq!(
+            too_short.stream_idle_timeout_secs,
+            MIN_STREAM_IDLE_TIMEOUT_SECS
+        );
+
+        let too_long = normalize_user_config(UserConfig {
+            stream_idle_timeout_secs: MAX_STREAM_IDLE_TIMEOUT_SECS + 1,
+            ..UserConfig::default()
+        });
+        assert_eq!(
+            too_long.stream_idle_timeout_secs,
+            MAX_STREAM_IDLE_TIMEOUT_SECS
+        );
+    }
+    #[test]
+    fn normalizes_resilience_settings_within_safe_bounds() {
+        let normalized = normalize_user_config(UserConfig {
+            max_provider_retries: MAX_MAX_PROVIDER_RETRIES + 1,
+            max_tool_rounds: MAX_MAX_TOOL_ROUNDS + 1,
+            circuit_failure_threshold: 0,
+            stream_first_event_timeout_secs: MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS + 1,
+            non_stream_timeout_secs: 1,
+            circuit_recovery_success_threshold: 0,
+            circuit_recovery_wait_secs: MAX_CIRCUIT_RECOVERY_WAIT_SECS + 1,
+            circuit_error_rate_threshold_percent: 0,
+            circuit_min_request_count: MAX_CIRCUIT_MIN_REQUEST_COUNT + 1,
+            ..UserConfig::default()
+        });
+
+        assert_eq!(normalized.max_provider_retries, MAX_MAX_PROVIDER_RETRIES);
+        assert_eq!(normalized.max_tool_rounds, MAX_MAX_TOOL_ROUNDS);
+        assert_eq!(
+            normalized.circuit_failure_threshold,
+            MIN_CIRCUIT_FAILURE_THRESHOLD
+        );
+        assert_eq!(
+            normalized.stream_first_event_timeout_secs,
+            MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            normalized.non_stream_timeout_secs,
+            MIN_NON_STREAM_TIMEOUT_SECS
+        );
+        assert_eq!(
+            normalized.circuit_recovery_success_threshold,
+            MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD
+        );
+        assert_eq!(
+            normalized.circuit_recovery_wait_secs,
+            MAX_CIRCUIT_RECOVERY_WAIT_SECS
+        );
+        assert_eq!(
+            normalized.circuit_error_rate_threshold_percent,
+            MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT
+        );
+        assert_eq!(
+            normalized.circuit_min_request_count,
+            MAX_CIRCUIT_MIN_REQUEST_COUNT
+        );
+    }
+
     #[test]
     fn user_config_roundtrip_under_temp_home() {
         let temp = std::env::temp_dir().join(format!("xcoding-user-config-{}", std::process::id()));
@@ -852,6 +1335,9 @@ mod tests {
             env::set_var("HOME", &temp);
         }
         let mut config = UserConfig::default();
+        // Simulate a legacy configuration which only has the top-level provider fields.
+        config.providers.clear();
+        config.active_provider_id = None;
         config.locale = "zh-CN".to_owned();
         config.model = "gpt-test".to_owned();
         config.base_url = "https://example.test/v1".to_owned();
@@ -861,9 +1347,18 @@ mod tests {
         let loaded = load_user_config();
         assert_eq!(loaded.locale, "zh-CN");
         assert_eq!(loaded.model, "gpt-test");
-        assert_eq!(loaded.base_url, "https://example.test/v1");
+        assert_eq!(loaded.reasoning_effort, "high");
+        assert_eq!(loaded.stream_first_event_timeout_secs, 120);
+        assert_eq!(loaded.stream_idle_timeout_secs, 180);
+        assert_eq!(loaded.base_url, "https://example.test");
+        assert_eq!(loaded.providers.len(), 1);
+        assert_eq!(loaded.providers[0].base_url, "https://example.test");
+        assert_eq!(loaded.active_provider_id.as_deref(), Some("default"));
         assert_eq!(loaded.api_key.as_deref(), Some("sk-test-key-1234"));
-        assert_eq!(loaded.last_workspace_root.as_deref(), Some("D:\\work\\demo"));
+        assert_eq!(
+            loaded.last_workspace_root.as_deref(),
+            Some("D:\\work\\demo")
+        );
         unsafe {
             match previous_userprofile {
                 Some(value) => env::set_var("USERPROFILE", value),
@@ -876,5 +1371,4 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&temp);
     }
-
 }

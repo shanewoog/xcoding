@@ -1,10 +1,6 @@
 //! Project-rule loading and prompt context for the coding-agent loop.
 
-use std::{
-    collections::VecDeque,
-    fs,
-    path::Path,
-};
+use std::{collections::VecDeque, fs, path::Path};
 
 /// Workspace-root rule files, in load order.
 const RULE_FILES: [&str; 3] = ["AGENTS.md", "XCoding.md", ".xcoding/rules.md"];
@@ -84,10 +80,7 @@ When a workspace skill matches the task, call load_skill with its name before fo
                 "\n\nWorkspace skills (catalog only; call load_skill to load full instructions):\n",
             );
             for skill in &self.skills {
-                prompt.push_str(&format!(
-                    "- {}: {}\n",
-                    skill.name, skill.description
-                ));
+                prompt.push_str(&format!("- {}: {}\n", skill.name, skill.description));
             }
         }
 
@@ -357,8 +350,7 @@ mod tests {
     fn loads_dot_xcoding_rules_file() {
         let root = temp_workspace("dot-rules");
         fs::create_dir_all(root.join(".xcoding")).expect("dir creates");
-        fs::write(root.join(".xcoding/rules.md"), "Prefer ASCII comments.")
-            .expect("rule writes");
+        fs::write(root.join(".xcoding/rules.md"), "Prefer ASCII comments.").expect("rule writes");
 
         let context = ContextSnapshot::load(&root);
         assert_eq!(context.project_rules.len(), 1);
@@ -386,10 +378,7 @@ mod tests {
             .iter()
             .map(|rule| rule.path.as_str())
             .collect();
-        assert_eq!(
-            paths,
-            vec!["AGENTS.md", "XCoding.md", ".xcoding/rules.md"]
-        );
+        assert_eq!(paths, vec!["AGENTS.md", "XCoding.md", ".xcoding/rules.md"]);
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -402,7 +391,11 @@ mod tests {
 
         let context = ContextSnapshot::load(&root);
         assert_eq!(context.project_rules.len(), 1);
-        assert!(context.project_rules[0].content.contains("[truncated project rule]"));
+        assert!(
+            context.project_rules[0]
+                .content
+                .contains("[truncated project rule]")
+        );
         assert!(context.project_rules[0].content.chars().count() < oversized.chars().count());
 
         fs::remove_dir_all(root).expect("workspace removes");
@@ -420,13 +413,43 @@ mod tests {
         fs::write(root.join("node_modules/pkg/index.js"), "export {}\n").expect("nm writes");
 
         let context = ContextSnapshot::load(&root);
-        assert!(context.relevant_paths.iter().any(|path| path == "package.json"));
+        assert!(
+            context
+                .relevant_paths
+                .iter()
+                .any(|path| path == "package.json")
+        );
         assert!(context.relevant_paths.iter().any(|path| path == "src/"));
-        assert!(context.relevant_paths.iter().any(|path| path == "src/main.rs"));
-        assert!(context.relevant_paths.iter().any(|path| path == "src/nested/"));
-        assert!(context.relevant_paths.iter().any(|path| path == "src/nested/mod.rs"));
-        assert!(!context.relevant_paths.iter().any(|path| path.contains("node_modules")));
-        assert!(!context.relevant_paths.iter().any(|path| path.contains("target")));
+        assert!(
+            context
+                .relevant_paths
+                .iter()
+                .any(|path| path == "src/main.rs")
+        );
+        assert!(
+            context
+                .relevant_paths
+                .iter()
+                .any(|path| path == "src/nested/")
+        );
+        assert!(
+            context
+                .relevant_paths
+                .iter()
+                .any(|path| path == "src/nested/mod.rs")
+        );
+        assert!(
+            !context
+                .relevant_paths
+                .iter()
+                .any(|path| path.contains("node_modules"))
+        );
+        assert!(
+            !context
+                .relevant_paths
+                .iter()
+                .any(|path| path.contains("target"))
+        );
 
         let prompt = context.system_prompt("ask");
         assert!(prompt.contains("Workspace sketch"));

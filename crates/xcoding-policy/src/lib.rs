@@ -90,6 +90,10 @@ pub fn evaluate(mode: &Mode, kind: PermissionKind, high_risk: bool) -> Permissio
 
 /// Mode-aware permission evaluation.
 ///
+/// Ordinary workspace file writes (`PermissionKind::Write`, `high_risk=false`) are
+/// always allowed in both modes so agents fully operate on files inside the
+/// workspace root. Paths outside the workspace remain rejected by the tools layer.
+/// High-risk writes (git mutations, `.git` / `.xcoding` paths) still need approval.
 /// `command_allowlisted` only affects `PermissionKind::Exec` under `auto-edit`.
 pub fn evaluate_detailed(
     mode: &Mode,
@@ -101,8 +105,7 @@ pub fn evaluate_detailed(
         PermissionKind::Read => PermissionDecision::Allow,
         PermissionKind::Network => PermissionDecision::Deny,
         PermissionKind::Write if high_risk => PermissionDecision::AskUser,
-        PermissionKind::Write if matches!(mode, Mode::AutoEdit) => PermissionDecision::Allow,
-        PermissionKind::Write => PermissionDecision::AskUser,
+        PermissionKind::Write => PermissionDecision::Allow,
         PermissionKind::Exec if high_risk => PermissionDecision::AskUser,
         PermissionKind::Exec if command_allowlisted && matches!(mode, Mode::AutoEdit) => {
             PermissionDecision::Allow
@@ -138,7 +141,10 @@ pub fn assess_command_with_lists(
 ) -> CommandAssessment {
     let executable = executable.trim();
     if executable.is_empty() {
-        return denied(CommandPolicyCode::EmptyExecutable, "executable must not be empty");
+        return denied(
+            CommandPolicyCode::EmptyExecutable,
+            "executable must not be empty",
+        );
     }
 
     if looks_absolute(executable) {
@@ -260,15 +266,7 @@ pub fn assess_command_with_lists(
     // High-risk helpers still require approval.
     if matches!(
         exe.as_str(),
-        "curl"
-            | "wget"
-            | "ssh"
-            | "scp"
-            | "sftp"
-            | "ftp"
-            | "nc"
-            | "ncat"
-            | "netcat"
+        "curl" | "wget" | "ssh" | "scp" | "sftp" | "ftp" | "nc" | "ncat" | "netcat"
     ) {
         return high_risk(
             CommandPolicyCode::HighRiskNetwork,
@@ -512,9 +510,7 @@ fn normalize_command_pattern(pattern: &str, kind: &str) -> Result<String, String
             return Err(format!("{kind} subcommand after ':' must not be empty"));
         }
         if sub.contains(':') {
-            return Err(format!(
-                "{kind} patterns support at most one ':' separator"
-            ));
+            return Err(format!("{kind} patterns support at most one ':' separator"));
         }
     }
 
@@ -728,14 +724,7 @@ fn targets_filesystem_root(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "/" | "\\"
-                | "/*"
-                | "\\*"
-                | "c:\\"
-                | "c:/"
-                | "c:\\*"
-                | "c:/*"
-                | "c:"
+            "/" | "\\" | "/*" | "\\*" | "c:\\" | "c:/" | "c:\\*" | "c:/*" | "c:"
         ) || arg.eq_ignore_ascii_case("c:\\")
             || arg.eq_ignore_ascii_case("c:/")
             || arg.eq_ignore_ascii_case("c:\\*")
@@ -798,9 +787,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_edit_allows_normal_writes_but_not_non_allowlisted_commands() {
+    fn workspace_file_writes_are_allowed_in_both_modes() {
         assert_eq!(
             evaluate(&Mode::AutoEdit, PermissionKind::Write, false),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            evaluate(&Mode::Ask, PermissionKind::Write, false),
             PermissionDecision::Allow
         );
         assert_eq!(
@@ -809,10 +802,6 @@ mod tests {
         );
         assert_eq!(
             evaluate_detailed(&Mode::AutoEdit, PermissionKind::Exec, false, false),
-            PermissionDecision::AskUser
-        );
-        assert_eq!(
-            evaluate(&Mode::Ask, PermissionKind::Write, false),
             PermissionDecision::AskUser
         );
         assert_eq!(
@@ -840,9 +829,11 @@ mod tests {
             &[]
         ));
         assert!(matches!(normalize_allowlist_pattern("powershell"), Err(_)));
-        assert!(matches!(normalize_allowlist_pattern("git:--version"), Ok(_)));
-        let assessment =
-            assess_command_with_extra("git", &["--version".to_owned()], &extra);
+        assert!(matches!(
+            normalize_allowlist_pattern("git:--version"),
+            Ok(_)
+        ));
+        let assessment = assess_command_with_extra("git", &["--version".to_owned()], &extra);
         assert!(assessment.allowlisted);
         assert_eq!(assessment.decision, PermissionDecision::Allow);
         assert_eq!(assessment.code, CommandPolicyCode::Allowlisted);
@@ -858,8 +849,7 @@ mod tests {
     fn workspace_denylist_overrides_allowlist() {
         let allow = vec!["rg".to_owned()];
         let deny = vec!["rg".to_owned()];
-        let assessment =
-            assess_command_with_lists("rg", &["TODO".to_owned()], &allow, &deny);
+        let assessment = assess_command_with_lists("rg", &["TODO".to_owned()], &allow, &deny);
         assert_eq!(assessment.decision, PermissionDecision::Deny);
         assert_eq!(assessment.code, CommandPolicyCode::DeniedWorkspaceDenylist);
         assert!(!assessment.allowlisted);
@@ -868,10 +858,7 @@ mod tests {
     #[test]
     fn parse_command_denylist_accepts_shells() {
         let parsed = parse_command_denylist("# x\npowershell\ngit:push\n");
-        assert_eq!(
-            parsed,
-            vec!["powershell".to_owned(), "git:push".to_owned()]
-        );
+        assert_eq!(parsed, vec!["powershell".to_owned(), "git:push".to_owned()]);
         assert!(normalize_denylist_pattern("bash").is_ok());
     }
 
@@ -956,7 +943,11 @@ mod tests {
     fn denies_git_push_mirror() {
         let assessment = assess_command(
             "git",
-            &["push".to_owned(), "--mirror".to_owned(), "origin".to_owned()],
+            &[
+                "push".to_owned(),
+                "--mirror".to_owned(),
+                "origin".to_owned(),
+            ],
         );
         assert_eq!(assessment.decision, PermissionDecision::Deny);
         assert_eq!(assessment.code, CommandPolicyCode::DeniedGitMirrorPush);
@@ -964,10 +955,8 @@ mod tests {
 
     #[test]
     fn denies_raw_disk_dd() {
-        let assessment = assess_command(
-            "dd",
-            &["if=/dev/zero".to_owned(), "of=/dev/sda".to_owned()],
-        );
+        let assessment =
+            assess_command("dd", &["if=/dev/zero".to_owned(), "of=/dev/sda".to_owned()]);
         assert_eq!(assessment.decision, PermissionDecision::Deny);
         assert_eq!(assessment.code, CommandPolicyCode::DeniedDestructiveDisk);
     }

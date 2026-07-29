@@ -75,3 +75,38 @@ export function hasTraceContent(input: {
       input.taskSummary,
   );
 }
+
+
+const RIGHT_PANEL_WIDTH_KEY = "xcoding.rightPanelWidth";
+export const DEFAULT_RIGHT_PANEL_WIDTH = 420;
+export const MIN_RIGHT_PANEL_WIDTH = 280;
+const MIN_CHAT_WIDTH = 360;
+const MIN_SIDEBAR_WIDTH = 230;
+
+export function clampRightPanelWidth(
+  width: number,
+  viewportWidth: number = typeof window !== "undefined" ? window.innerWidth : 1280,
+): number {
+  // The browser can grow until the sidebar and chat reach their protected minimum widths.
+  const max = Math.max(MIN_RIGHT_PANEL_WIDTH, viewportWidth - MIN_SIDEBAR_WIDTH - MIN_CHAT_WIDTH);
+  if (!Number.isFinite(width)) return DEFAULT_RIGHT_PANEL_WIDTH;
+  return Math.round(Math.min(max, Math.max(MIN_RIGHT_PANEL_WIDTH, width)));
+}
+
+export function loadRightPanelWidth(): number {
+  try {
+    const raw = localStorage.getItem(RIGHT_PANEL_WIDTH_KEY);
+    if (raw == null) return DEFAULT_RIGHT_PANEL_WIDTH;
+    return clampRightPanelWidth(Number(raw));
+  } catch {
+    return DEFAULT_RIGHT_PANEL_WIDTH;
+  }
+}
+
+export function saveRightPanelWidth(width: number): void {
+  try {
+    localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(clampRightPanelWidth(width)));
+  } catch {
+    // ignore storage failures
+  }
+}

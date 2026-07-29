@@ -26,7 +26,7 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1"
 
 1. 打开 **设置**，选择 **语言**（简体中文或 English）。
 2. 配置 **云供应商**：Base URL（默认 `https://ai.v58.dev/v1`）与 API Key，然后 **保存设置**。
-3. 设置工作区路径、模式与模型（白/黑名单需要先有工作区路径）。
+3. 设置工作区路径与模式（白/黑名单需要先有工作区路径）；模型与推理强度在输入区选择。
 4. 返回工作台，必要时确认绝对路径，发送任务。
 5. 查看计划、流式回答、工具活动、补丁预览与审批控件。
 6. 选择已保存会话，查看事件、恢复点与任务完成摘要。
@@ -41,7 +41,7 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
 |------|----------|
 | 语言 | UI 语言；写入 `~/.xcoding/config.json`，并镜像到 `localStorage`（`xcoding.locale`） |
 | 云供应商 | Provider（`openai` 只读）、Base URL、API Key → `~/.xcoding/config.json` |
-| 默认设置 | 工作区路径（上次使用）、模式、模型；白/黑名单 → 工作区 `.xcoding/command-allowlist` / `command-denylist` |
+| 默认设置 | 工作区路径（上次使用）、模式；白/黑名单 → 工作区 `.xcoding/command-allowlist` / `command-denylist`。模型与推理强度在输入区选择并写入 `~/.xcoding/config.json` |
 | 诊断 | 客户端清单：工作区、鉴权、Base URL、默认值 |
 
 模式说明：
@@ -61,6 +61,7 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
   "mode": "ask",
   "provider": "openai",
   "model": "gpt-5.5",
+  "reasoning_effort": "high",
   "base_url": "https://ai.v58.dev/v1",
   "api_key": "sk-...",
   "last_workspace_root": "D:\\WORK\\BittyData\\XCoding"
@@ -85,8 +86,8 @@ v0.1 为便于使用，API Key 以明文保存在用户目录。请勿提交该�
 
 | 区域 | 内容 |
 |------|------|
-| 左侧 | 工作区路径、鉴权状态、模式/模型默认值、诊断，以及可滚动的会话历史（含状态徽标） |
-| 中间 | 对话记录（自动滚动到底部）、空状态三栏说明、输入区 |
+| 左侧 | 工作区路径、鉴权状态、模式默认值、诊断，以及可滚动的会话历史（含状态徽标） |
+| 中间 | 对话记录（自动滚动到底部）、空状态三栏说明、输入区（底部可选模型与推理强度） |
 | 右侧 | 有待审批时顶部固定审批面板、任务摘要、活动，以及可折叠的计划 / 恢复点 / 回放 |
 
 会话历史会显示状态、模式、模型，以及相对更新时间。消息角色显示为 You / Assistant / Tool / System。

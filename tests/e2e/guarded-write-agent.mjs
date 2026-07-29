@@ -35,26 +35,25 @@ async function main() {
     assert.equal(configured.config.mode, "auto-edit");
     assert.equal(configured.config.model, "fixture-model");
 
+    // High-risk path still requires approval under ask (and can be rejected).
     const rejected = await startPatchSession(rpc, workspace, "Prepare a rejected marker.", "ask");
     const rejectedApproval = approvalFor(rpc, rejected.session.id);
+    assert.equal(rejectedApproval.action.tool_call.name, "apply_patch");
+    assert.match(String(rejectedApproval.action.tool_call.arguments.path), /\.xcoding[/\\]rejected\.txt/);
     const { detail: rejectedDetail } = await rpc.request("session.detail", { session_id: rejected.session.id });
     assert.equal(rejectedDetail.messages.length, 1);
     assert.equal(rejectedDetail.pending_actions.length, 1);
     assert.ok(rejectedDetail.events.some((item) => item.event.type === "approval_requested"));
     await rpc.request("session.resolve", { session_id: rejected.session.id, action_id: rejectedApproval.action.id, approved: false });
-    await assert.rejects(readFile(resolve(workspace, "rejected.txt"), "utf8"));
+    await assert.rejects(readFile(resolve(workspace, ".xcoding/rejected.txt"), "utf8"));
 
-    const approved = await startPatchSession(rpc, workspace, "Add a health marker file.", "ask");
-    const approvedAction = approvalFor(rpc, approved.session.id);
-    const completed = await rpc.request("session.resolve", {
-      session_id: approved.session.id,
-      action_id: approvedAction.action.id,
-      approved: true,
-    });
+    // Ordinary workspace files auto-apply even in ask mode.
+    const completed = await startPatchSession(rpc, workspace, "Add a health marker file.", "ask");
     assert.equal(completed.session.status, "done");
     assert.match(completed.message?.content ?? "", /ready/i);
     assert.equal(await readFile(resolve(workspace, "health.txt"), "utf8"), "healthy\n");
-    const { detail: completedDetail } = await rpc.request("session.detail", { session_id: approved.session.id });
+    assert.ok(!eventsFor(rpc, completed.session.id).some((event) => event.type === "approval_requested"));
+    const { detail: completedDetail } = await rpc.request("session.detail", { session_id: completed.session.id });
     assert.equal(completedDetail.restore_points.length, 1);
     assert.equal(completedDetail.restore_points[0].applied_text, "healthy\n");
     assert.ok(completedDetail.events.some((item) => item.event.type === "tool_end"));
@@ -65,12 +64,12 @@ async function main() {
     assert.equal(taskCompleted?.event.summary.commands_failed, 0);
 
     const rollback = await rpc.request("session.rollback", {
-      session_id: approved.session.id,
+      session_id: completed.session.id,
       restore_point_id: completedDetail.restore_points[0].id,
     });
     assert.equal(rollback.restore_point.path, "health.txt");
     await assert.rejects(readFile(resolve(workspace, "health.txt"), "utf8"));
-    const { detail: rolledBackDetail } = await rpc.request("session.detail", { session_id: approved.session.id });
+    const { detail: rolledBackDetail } = await rpc.request("session.detail", { session_id: completed.session.id });
     assert.ok(rolledBackDetail.events.some((item) => item.event.type === "restore_point_rolled_back"));
 
     const autoEdit = await rpc.request("session.chat", {
@@ -88,7 +87,7 @@ async function main() {
     const cancellationApproval = approvalFor(rpc, pendingCancel.session.id);
     const cancelled = await rpc.request("session.cancel", { session_id: pendingCancel.session.id });
     assert.equal(cancelled.session.status, "cancelled");
-    await assert.rejects(readFile(resolve(workspace, "cancel.txt"), "utf8"));
+    await assert.rejects(readFile(resolve(workspace, ".xcoding/cancel.txt"), "utf8"));
     await assert.rejects(rpc.request("session.resolve", {
       session_id: pendingCancel.session.id,
       action_id: cancellationApproval.action.id,
@@ -211,9 +210,9 @@ async function startMockProvider() {
 }
 
 function patchFor(message) {
-  if (message.includes("rejected")) return { path: "rejected.txt", text: "rejected\n" };
+  if (message.includes("rejected")) return { path: ".xcoding/rejected.txt", text: "rejected\n" };
   if (message.includes("auto")) return { path: "auto.txt", text: "automatic\n" };
-  if (message.includes("cancellation")) return { path: "cancel.txt", text: "cancelled\n" };
+  if (message.includes("cancellation")) return { path: ".xcoding/cancel.txt", text: "cancelled\n" };
   return { path: "health.txt", text: "healthy\n" };
 }
 

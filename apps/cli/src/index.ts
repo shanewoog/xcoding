@@ -686,8 +686,8 @@ Dotenv:
   Loads repository-root .env if present. Existing process env wins.
 
 Mode policy:
-  ask         Propose patches and commands; both need approval
-  auto-edit   Apply ordinary patches and allowlisted safe commands automatically; high-risk and other commands need approval
+  ask         Auto-apply ordinary workspace file patches; commands and high-risk writes need approval
+  auto-edit   Auto-apply ordinary workspace file patches and allowlisted safe commands; high-risk and other commands need approval
 
 Command allowlist:
   Workspace file .xcoding/command-allowlist extends the builtin auto-edit command allowlist.

@@ -1,6 +1,11 @@
 // Prevent a console window in release Desktop builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser;
+mod gitnexus;
+mod projects;
+mod workspace_tools;
+
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -10,14 +15,15 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
 use xcoding_protocol::{
-    CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, ListModelsResult, PingResult,
-    ProviderAuthStatus, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams,
-    RollbackRestorePointResult, ReplaySessionResult, Session, SessionDetail, SetConfigParams,
-    UserConfig, WorkspaceConfig,
+    CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
+    CreateProjectResult, ImportProjectParams, ImportProjectResult, ListModelsResult, PingResult,
+    ProjectDir, ProviderAuthStatus,
+    ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult,
+    ReplaySessionResult, Session, SessionDetail, SetConfigParams, UserConfig, WorkspaceConfig,
 };
 use xcoding_providers::{
     apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models, load_user_config,
-    save_user_config, user_config_dir,
+    normalize_user_config, save_user_config, user_config_dir,
 };
 
 fn boot_log(message: &str) {
@@ -90,40 +96,38 @@ fn get_user_config() -> Result<UserConfig, String> {
 
 #[tauri::command]
 fn set_user_config(config: UserConfig) -> Result<UserConfig, String> {
-    let mut next = config;
-    next.provider = if next.provider.trim().is_empty() {
-        "openai".to_owned()
-    } else {
-        next.provider.trim().to_owned()
-    };
-    next.model = next.model.trim().to_owned();
-    next.base_url = next.base_url.trim().trim_end_matches('/').to_owned();
-    if next.base_url.is_empty() {
-        next.base_url = "https://ai.v58.dev/v1".to_owned();
-    }
-    next.locale = next.locale.trim().to_owned();
-    if next.locale.is_empty() {
-        next.locale = "en".to_owned();
-    }
-    if let Some(key) = next.api_key.as_mut() {
-        let trimmed = key.trim().to_owned();
-        if trimmed.is_empty() {
-            next.api_key = None;
-        } else {
-            *key = trimmed;
-        }
-    }
-    if let Some(root) = next.last_workspace_root.as_mut() {
-        let trimmed = root.trim().to_owned();
-        if trimmed.is_empty() {
-            next.last_workspace_root = None;
-        } else {
-            *root = trimmed;
-        }
-    }
+    let next = normalize_user_config(config);
     save_user_config(&next)?;
     apply_user_config_to_env(&next);
     Ok(next)
+}
+
+
+#[tauri::command]
+fn list_projects(workspace_home: String) -> Result<Vec<ProjectDir>, String> {
+    projects::list_projects(&workspace_home)
+}
+
+#[tauri::command]
+fn create_project(params: CreateProjectParams) -> Result<CreateProjectResult, String> {
+    projects::create_project(params)
+}
+
+#[tauri::command]
+async fn import_project(params: ImportProjectParams) -> Result<ImportProjectResult, String> {
+    tauri::async_runtime::spawn_blocking(move || projects::import_project(params))
+        .await
+        .map_err(|error| format!("project import task failed: {error}"))?
+}
+
+#[tauri::command]
+fn pick_directory(title: Option<String>) -> Result<Option<String>, String> {
+    projects::pick_directory(title)
+}
+
+#[tauri::command]
+fn ensure_chat_workspace(workspace_home: Option<String>) -> Result<String, String> {
+    projects::ensure_chat_workspace(workspace_home.as_deref())
 }
 
 #[tauri::command]
@@ -143,6 +147,14 @@ fn delete_session(app: AppHandle, session_id: String) -> Result<(), String> {
     let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
     open_core(&app)?
         .delete_session(session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rename_session(app: AppHandle, session_id: String, title: String) -> Result<Session, String> {
+    let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
+    open_core(&app)?
+        .rename_session(session_id, title)
         .map_err(|error| error.to_string())
 }
 
@@ -203,7 +215,7 @@ fn cancel_session(
 ) -> Result<CancelSessionResult, String> {
     let core = open_core(&app)?;
     let session = core
-        .cancel_session(params.session_id)
+        .cancel_session(params.session_id, params.partial_assistant.as_deref())
         .map_err(|error| error.to_string())?;
     let event = xcoding_protocol::SessionEvent::SessionCancelled {
         session_id: session.id,
@@ -269,28 +281,35 @@ fn prepare_webview_profile() {
 }
 
 fn ensure_main_window(app: &tauri::App) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        boot_log("main window exists from config");
-        let _ = window.center();
-        let _ = window.show();
-        let _ = window.set_focus();
-        let _ = window.unminimize();
+    if app.get_webview_window("main").is_some() {
+        boot_log("main window exists from config and remains hidden until the UI is ready");
         return Ok(());
     }
 
-    boot_log("main window missing; creating explicitly");
-    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    boot_log("main window missing; creating hidden");
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("XCoding")
-        .inner_size(960.0, 720.0)
+        .inner_size(1510.0, 720.0)
         .min_inner_size(720.0, 540.0)
         .center()
-        .visible(true)
-        .focused(true)
+        .visible(false)
+        .focused(false)
         .build()
         .map_err(|error| error.to_string())?;
-    let _ = window.show();
-    let _ = window.set_focus();
-    boot_log("main window created");
+    boot_log("main window created hidden");
+    Ok(())
+}
+
+/// Reveal the main window only after React has rendered its first frame.
+/// This prevents Windows' empty WebView background from flashing at startup.
+#[tauri::command]
+fn show_main_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_owned())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    boot_log("main window shown after frontend ready");
     Ok(())
 }
 
@@ -322,12 +341,19 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             ping,
+            show_main_window,
             provider_status,
             get_user_config,
             list_provider_models,
             set_user_config,
+            list_projects,
+            create_project,
+            import_project,
+            pick_directory,
+            ensure_chat_workspace,
             list_sessions,
             delete_session,
+            rename_session,
             workspace_config,
             set_workspace_config,
             session_detail,
@@ -335,7 +361,35 @@ fn main() {
             chat,
             resolve_action,
             rollback_restore_point,
-            cancel_session
+            cancel_session,
+            workspace_tools::git_environment,
+            workspace_tools::list_workspace_entries,
+            workspace_tools::run_terminal_command,
+            workspace_tools::open_path,
+            workspace_tools::open_external_url,
+            gitnexus::gitnexus_status,
+            gitnexus::gitnexus_analyze,
+            gitnexus::gitnexus_query,
+            gitnexus::gitnexus_context,
+            gitnexus::gitnexus_impact,
+            browser::browser_ensure,
+            browser::browser_set_bounds,
+            browser::browser_navigate,
+            browser::browser_reload,
+            browser::browser_back,
+            browser::browser_forward,
+            browser::browser_show,
+            browser::browser_hide,
+            browser::browser_close,
+            browser::browser_set_user_agent,
+            browser::browser_set_zoom,
+            browser::browser_print,
+            browser::browser_clear_data,
+            browser::browser_current_url,
+            browser::browser_eval,
+            browser::browser_find,
+            browser::browser_download_dir,
+            browser::browser_screenshot
         ])
         .run(tauri::generate_context!());
 

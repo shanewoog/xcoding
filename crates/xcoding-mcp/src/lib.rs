@@ -313,13 +313,14 @@ impl McpSession {
                 }
             }),
         )?;
-        if result.get("protocolVersion").and_then(Value::as_str).is_none() {
+        if result
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .is_none()
+        {
             // Some servers still return success without echoing the version; accept either shape.
         }
-        self.notify(
-            "notifications/initialized",
-            json!({}),
-        )?;
+        self.notify("notifications/initialized", json!({}))?;
         Ok(())
     }
 
@@ -372,10 +373,7 @@ impl McpSession {
             .get("isError")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let content = result
-            .get("content")
-            .cloned()
-            .unwrap_or_else(|| json!([]));
+        let content = result.get("content").cloned().unwrap_or_else(|| json!([]));
         let structured_content = result.get("structuredContent").cloned();
         Ok(McpCallResult {
             server: self.name.clone(),
@@ -446,12 +444,11 @@ impl McpSession {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    let message: Value = serde_json::from_str(trimmed).map_err(|error| {
-                        McpError::Protocol {
+                    let message: Value =
+                        serde_json::from_str(trimmed).map_err(|error| McpError::Protocol {
                             server: self.name.clone(),
                             message: format!("invalid JSON from server: {error}"),
-                        }
-                    })?;
+                        })?;
                     // Notifications / unrelated messages: skip unless id matches.
                     if let Some(id) = message.get("id") {
                         let matches = match id {
@@ -459,7 +456,8 @@ impl McpSession {
                                 .as_u64()
                                 .map(|value| value == expected_id)
                                 .unwrap_or(false),
-                            Value::String(text) => text.parse::<u64>()
+                            Value::String(text) => text
+                                .parse::<u64>()
                                 .map(|value| value == expected_id)
                                 .unwrap_or(false),
                             _ => false,
@@ -575,10 +573,9 @@ mod tests {
 
     #[test]
     fn rejects_invalid_server_names() {
-        let err = parse_mcp_config_text(
-            r#"{ "mcpServers": { "bad name": { "command": "node" } } }"#,
-        )
-        .unwrap_err();
+        let err =
+            parse_mcp_config_text(r#"{ "mcpServers": { "bad name": { "command": "node" } } }"#)
+                .unwrap_err();
         assert!(err.to_string().contains("invalid server name"));
     }
 }

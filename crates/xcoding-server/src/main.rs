@@ -295,7 +295,7 @@ async fn handle_cancel(
             ));
         }
     };
-    match core.cancel_session(params.session_id) {
+    match core.cancel_session(params.session_id, params.partial_assistant.as_deref()) {
         Ok(session) => {
             let event = SessionEvent::SessionCancelled {
                 session_id: session.id,
@@ -311,7 +311,6 @@ async fn handle_cancel(
         Err(error) => Ok(JsonRpcResponse::failure(id, rpc_error_for_core(error))),
     }
 }
-
 
 fn handle_provider_status(request: JsonRpcRequest) -> JsonRpcResponse {
     let id = request.id.clone();
@@ -335,7 +334,11 @@ fn rpc_error_for_agent(error: AgentError) -> RpcError {
         AgentError::Tool(error) => RpcError::invalid_params(error.to_string()),
         AgentError::Provider(error) => RpcError::provider_error(error.to_string()),
         AgentError::InvalidProviderToolCall(message) => RpcError::provider_error(message),
-        AgentError::ToolCallLimit => RpcError::provider_error(error.to_string()),
+        AgentError::ToolCallLimit
+        | AgentError::EmptyProviderResponse
+        | AgentError::ProviderStreamFirstEventTimeout(_)
+        | AgentError::ProviderStreamIdleTimeout(_)
+        | AgentError::ProviderFallbackExhausted(_) => RpcError::provider_error(error.to_string()),
         AgentError::Cancelled => RpcError::invalid_params("session cancelled".to_owned()),
         AgentError::Mcp(error) => RpcError::invalid_params(error.to_string()),
     }

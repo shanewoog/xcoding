@@ -9,11 +9,13 @@ use chrono::Utc;
 use serde_json::Value;
 use thiserror::Error;
 use xcoding_protocol::{
-    CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateSessionParams,
-    CreateSessionResult, GetConfigParams, GetConfigResult, GetSessionDetailParams, GetSessionDetailResult, ReplaySessionParams, ReplaySessionResult, ReplayStep, JsonRpcRequest, JsonRpcResponse, ListSessionsParams,
-    ListSessionsResult, Message, MessageRole, PendingAction, PendingActionStatus,
-    PersistedSessionEvent, PingResult, RestorePoint, RpcError, Session, SessionDetail,
-    SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, FileChangeKind, FileChangeSummary, TaskSummary, ToolCall, ToolName,
+    CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, ContextCompaction,
+    CreateSessionParams, CreateSessionResult, FileChangeKind, FileChangeSummary, GetConfigParams,
+    GetConfigResult, GetSessionDetailParams, GetSessionDetailResult, JsonRpcRequest,
+    JsonRpcResponse, ListSessionsParams, ListSessionsResult, Message, MessageRole, PendingAction,
+    PendingActionStatus, PersistedSessionEvent, PingResult, ReplaySessionParams,
+    ReplaySessionResult, ReplayStep, RestorePoint, RpcError, Session, SessionDetail, SessionEvent,
+    SessionStatus, SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName,
     WorkspaceConfig,
 };
 use xcoding_store::{SessionStore, StoreError};
@@ -109,11 +111,7 @@ impl CoreService {
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
                 let title = title_from_user_message(&params.message);
-                if title.is_empty() {
-                    None
-                } else {
-                    Some(title)
-                }
+                if title.is_empty() { None } else { Some(title) }
             });
         let session = self.store.create_session(CreateSessionParams {
             workspace_root: params.workspace_root,
@@ -167,6 +165,29 @@ impl CoreService {
                 return Err(CoreError::InvalidInput(
                     "session is already running".to_owned(),
                 ));
+            }
+        }
+
+        // Composer/CLI can switch model (and mode) between turns of the same session.
+        if let Some(model) = params
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if model != session.model {
+                self.store
+                    .set_session_model(session_id, model)
+                    .map_err(CoreError::from)?
+                    .ok_or_else(|| CoreError::InvalidInput("session not found".to_owned()))?;
+            }
+        }
+        if let Some(mode) = params.mode {
+            if mode != session.mode {
+                self.store
+                    .set_session_mode(session_id, mode)
+                    .map_err(CoreError::from)?
+                    .ok_or_else(|| CoreError::InvalidInput("session not found".to_owned()))?;
             }
         }
 
@@ -314,9 +335,51 @@ impl CoreService {
         Ok(())
     }
 
+    pub fn rename_session(
+        &self,
+        session_id: uuid::Uuid,
+        title: impl Into<String>,
+    ) -> Result<Session, CoreError> {
+        let title = title.into();
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "session title must not be empty".to_owned(),
+            ));
+        }
+        self.store
+            .set_session_title(session_id, title)
+            .map_err(CoreError::from)?
+            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))
+    }
+
     pub fn messages(&self, session_id: uuid::Uuid) -> Result<Vec<Message>, CoreError> {
         self.store
             .list_messages(session_id)
+            .map_err(CoreError::from)
+    }
+    pub fn context_compaction(
+        &self,
+        session_id: uuid::Uuid,
+    ) -> Result<Option<ContextCompaction>, CoreError> {
+        self.store
+            .get_context_compaction(session_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn save_context_compaction(
+        &self,
+        session_id: uuid::Uuid,
+        summary: impl Into<String>,
+        compacted_message_count: usize,
+    ) -> Result<ContextCompaction, CoreError> {
+        self.store
+            .save_context_compaction(ContextCompaction {
+                session_id,
+                summary: summary.into(),
+                compacted_message_count,
+                updated_at: Utc::now(),
+            })
             .map_err(CoreError::from)
     }
 
@@ -375,7 +438,11 @@ impl CoreService {
         Ok(self.session(session_id)?.status == SessionStatus::Cancelled)
     }
 
-    pub fn cancel_session(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
+    pub fn cancel_session(
+        &self,
+        session_id: uuid::Uuid,
+        partial_assistant: Option<&str>,
+    ) -> Result<Session, CoreError> {
         let session = self.session(session_id)?;
         if !matches!(
             session.status,
@@ -384,6 +451,19 @@ impl CoreService {
             return Err(CoreError::InvalidInput(
                 "only active sessions can be cancelled".to_owned(),
             ));
+        }
+        if let Some(content) = partial_assistant
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let messages = self.messages(session_id)?;
+            let already = messages
+                .last()
+                .map(|message| message.role == MessageRole::Assistant && message.content == content)
+                .unwrap_or(false);
+            if !already {
+                let _ = self.record_assistant_message(session_id, content);
+            }
         }
         self.store.reject_pending_actions(session_id)?;
         self.cancel_probe.mark(session_id);
@@ -467,6 +547,16 @@ impl CoreService {
             .store
             .append_message(session_id, MessageRole::Tool, content)?)
     }
+    pub fn record_assistant_message(
+        &self,
+        session_id: uuid::Uuid,
+        content: impl Into<String>,
+    ) -> Result<Message, CoreError> {
+        Ok(self
+            .store
+            .append_message(session_id, MessageRole::Assistant, content)?)
+    }
+
     pub fn complete_chat(
         &self,
         session_id: uuid::Uuid,
@@ -616,7 +706,7 @@ impl CoreService {
             RpcError::invalid_params(format!("invalid session.cancel params: {error}"))
         })?;
         let session = self
-            .cancel_session(params.session_id)
+            .cancel_session(params.session_id, params.partial_assistant.as_deref())
             .map_err(|error| match error {
                 CoreError::InvalidInput(message) => RpcError::invalid_params(message),
                 other => RpcError::internal(other.to_string()),
@@ -630,7 +720,9 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
     let mut steps = Vec::new();
     for item in events {
         match &item.event {
-            SessionEvent::Plan { steps: plan_steps, .. } => {
+            SessionEvent::Plan {
+                steps: plan_steps, ..
+            } => {
                 for plan in plan_steps {
                     steps.push(ReplayStep {
                         kind: "plan".to_owned(),
@@ -640,7 +732,9 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     });
                 }
             }
-            SessionEvent::ToolStart { tool_call, summary, .. } => {
+            SessionEvent::ToolStart {
+                tool_call, summary, ..
+            } => {
                 steps.push(ReplayStep {
                     kind: "tool_start".to_owned(),
                     summary: summary.clone(),
@@ -648,7 +742,12 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     success: None,
                 });
             }
-            SessionEvent::ToolEnd { tool_call, success, summary, .. } => {
+            SessionEvent::ToolEnd {
+                tool_call,
+                success,
+                summary,
+                ..
+            } => {
                 steps.push(ReplayStep {
                     kind: "tool_end".to_owned(),
                     summary: summary.clone(),
@@ -712,6 +811,7 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     });
                 }
             }
+            SessionEvent::Retrying { .. } | SessionEvent::ModelCall { .. } => {}
             SessionEvent::Error { message, .. } => {
                 steps.push(ReplayStep {
                     kind: "error".to_owned(),
@@ -749,18 +849,12 @@ fn write_command_allowlist(
     let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_ALLOWLIST_RELATIVE_PATH);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
-            CoreError::InvalidInput(format!(
-                "failed to create {}: {error}",
-                parent.display()
-            ))
+            CoreError::InvalidInput(format!("failed to create {}: {error}", parent.display()))
         })?;
     }
     let body = xcoding_policy::render_command_allowlist_file(&normalized);
     std::fs::write(&path, body).map_err(|error| {
-        CoreError::InvalidInput(format!(
-            "failed to write {}: {error}",
-            path.display()
-        ))
+        CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
     })?;
     Ok(normalized)
 }
@@ -779,8 +873,8 @@ fn write_command_denylist(
 ) -> Result<Vec<String>, CoreError> {
     let mut normalized = Vec::new();
     for pattern in patterns {
-        let value = xcoding_policy::normalize_denylist_pattern(pattern)
-            .map_err(CoreError::InvalidInput)?;
+        let value =
+            xcoding_policy::normalize_denylist_pattern(pattern).map_err(CoreError::InvalidInput)?;
         if !normalized.iter().any(|existing| existing == &value) {
             normalized.push(value);
         }
@@ -788,18 +882,12 @@ fn write_command_denylist(
     let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_DENYLIST_RELATIVE_PATH);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
-            CoreError::InvalidInput(format!(
-                "failed to create {}: {error}",
-                parent.display()
-            ))
+            CoreError::InvalidInput(format!("failed to create {}: {error}", parent.display()))
         })?;
     }
     let body = xcoding_policy::render_command_denylist_file(&normalized);
     std::fs::write(&path, body).map_err(|error| {
-        CoreError::InvalidInput(format!(
-            "failed to write {}: {error}",
-            path.display()
-        ))
+        CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
     })?;
     Ok(normalized)
 }
@@ -859,7 +947,11 @@ fn title_from_user_message(message: &str) -> String {
         .filter(|line| !line.contains("xcoding-images"))
         .collect::<Vec<_>>()
         .join("\n");
-    let source = if cleaned.trim().is_empty() { "Image" } else { cleaned.as_str() };
+    let source = if cleaned.trim().is_empty() {
+        "Image"
+    } else {
+        cleaned.as_str()
+    };
     let line = source
         .lines()
         .map(str::trim)
@@ -870,7 +962,10 @@ fn title_from_user_message(message: &str) -> String {
     if collapsed.chars().count() <= MAX_CHARS {
         return collapsed;
     }
-    let mut out: String = collapsed.chars().take(MAX_CHARS.saturating_sub(1)).collect();
+    let mut out: String = collapsed
+        .chars()
+        .take(MAX_CHARS.saturating_sub(1))
+        .collect();
     out.push('…');
     out
 }
@@ -893,6 +988,40 @@ mod tests {
             JsonRpcResponse::Success { result, .. } => assert_eq!(result["ok"], true),
             JsonRpcResponse::Failure { error, .. } => panic!("unexpected error: {error:?}"),
         }
+    }
+
+    #[test]
+    fn renames_session_and_persists_title() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Original task".to_owned(),
+                mode: None,
+                provider: None,
+                model: None,
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("chat starts");
+
+        let renamed = core
+            .rename_session(session.id, "  Renamed task  ")
+            .expect("session renames");
+
+        assert_eq!(renamed.title.as_deref(), Some("Renamed task"));
+        assert_eq!(
+            core.session(session.id)
+                .expect("session loads")
+                .title
+                .as_deref(),
+            Some("Renamed task")
+        );
+        assert!(matches!(
+            core.rename_session(session.id, "   "),
+            Err(CoreError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -1128,12 +1257,13 @@ mod tests {
         assert_eq!(detail.events.len(), 1);
 
         let cancelled = core
-            .cancel_session(session.id)
+            .cancel_session(session.id, None)
             .expect("paused session cancels");
         assert_eq!(cancelled.status, SessionStatus::Cancelled);
-        assert!(core
-            .is_session_cancelled(session.id)
-            .expect("cancelled flag loads"));
+        assert!(
+            core.is_session_cancelled(session.id)
+                .expect("cancelled flag loads")
+        );
         assert_eq!(
             core.session_detail(session.id)
                 .expect("cancelled session detail loads")
@@ -1146,7 +1276,7 @@ mod tests {
             Err(CoreError::InvalidInput(_))
         ));
         assert!(matches!(
-            core.cancel_session(session.id),
+            core.cancel_session(session.id, None),
             Err(CoreError::InvalidInput(_))
         ));
     }
@@ -1211,7 +1341,12 @@ mod tests {
         assert!(replay.steps.iter().any(|step| step.kind == "plan"));
         assert!(replay.steps.iter().any(|step| step.kind == "tool_start"));
         assert!(replay.steps.iter().any(|step| step.kind == "tool_end"));
-        assert!(replay.steps.iter().any(|step| step.kind == "assistant_message"));
+        assert!(
+            replay
+                .steps
+                .iter()
+                .any(|step| step.kind == "assistant_message")
+        );
     }
 
     #[test]
@@ -1230,16 +1365,12 @@ mod tests {
                 images: None,
             })
             .expect("chat starts");
-        assert!(!core
-            .is_session_cancelled(session.id)
-            .expect("status loads"));
+        assert!(!core.is_session_cancelled(session.id).expect("status loads"));
         let cancelled = core
-            .cancel_session(session.id)
+            .cancel_session(session.id, None)
             .expect("running session cancels");
         assert_eq!(cancelled.status, SessionStatus::Cancelled);
-        assert!(core
-            .is_session_cancelled(session.id)
-            .expect("status loads"));
+        assert!(core.is_session_cancelled(session.id).expect("status loads"));
         let completed = core
             .complete_chat(session.id, "should not land")
             .expect("complete becomes no-op after cancel");
@@ -1298,7 +1429,7 @@ mod tests {
             model: None,
             title: None,
             session_id: Some(session.id),
-                images: None,
+            images: None,
         });
         assert!(blocked.is_err(), "running session cannot continue again");
 
@@ -1312,9 +1443,76 @@ mod tests {
             model: None,
             title: None,
             session_id: Some(session.id),
-                images: None,
+            images: None,
         });
         assert!(wrong_workspace.is_err(), "workspace mismatch rejected");
+    }
+
+    #[test]
+    fn records_partial_assistant_output_while_cancelled() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Hello".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("chat starts");
+        core.cancel_session(session.id, Some("Partial answer before cancel"))
+            .expect("cancel");
+        let messages = core.messages(session.id).expect("messages");
+        assert!(
+            messages.iter().any(|message| {
+                message.role == MessageRole::Assistant
+                    && message.content == "Partial answer before cancel"
+            }),
+            "partial assistant text must remain in transcript"
+        );
+        assert_eq!(
+            core.session(session.id).expect("session").status,
+            SessionStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn continues_finished_session_can_switch_model() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Explain this project".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("chat starts");
+        core.complete_chat(session.id, "First answer.")
+            .expect("first turn completes");
+
+        let continued = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Use a different model".to_owned(),
+                mode: None,
+                provider: None,
+                model: Some("grok-4.5".to_owned()),
+                title: None,
+                session_id: Some(session.id),
+                images: None,
+            })
+            .expect("follow-up continues");
+
+        assert_eq!(continued.id, session.id);
+        assert_eq!(continued.model, "grok-4.5");
+        assert_eq!(core.session(session.id).expect("session").model, "grok-4.5");
     }
 
     #[test]
@@ -1332,7 +1530,7 @@ mod tests {
                 images: None,
             })
             .expect("chat starts");
-        core.cancel_session(session.id).expect("interrupt");
+        core.cancel_session(session.id, None).expect("interrupt");
         assert!(
             core.is_session_cancelled(session.id).expect("flag"),
             "cancel probe marked"

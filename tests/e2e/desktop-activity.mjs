@@ -97,28 +97,43 @@ async function main() {
     assert.ok(activitySource.includes(needle), "activity.ts missing " + needle);
   }
 
+  // Activity is still derived from session events, but the former activity panel
+  // was intentionally removed from the desktop chat surface.
   for (const needle of [
     'from "./activity"',
-    "activityPolicyBadge",
+    "buildActivity",
+    "eventActivity",
     "mergeActivity",
-    "activity-badge",
-    "activity-header",
-    "policy-${item.policy}",
   ]) {
     assert.ok(appSource.includes(needle), "App.tsx missing " + needle);
   }
+  assert.ok(!appSource.includes("activity-badge"), "the removed activity badge must not be rendered");
+  assert.ok(appSource.includes("run-plan-list"), "the compact run status should expose task steps when expanded");
+  assert.ok(appSource.includes("currentRunPlanStep(plan, activity)"), "run status should derive the current task step");
+  assert.ok(cssSource.includes("position: sticky"), "run status should stay visible while the conversation scrolls");
 
-  for (const needle of [
-    ".activity-badge",
-    ".activity-header",
-    ".activity-badge.policy-auto-apply",
-    ".activity-badge.policy-auto-run",
-    ".activity-badge.policy-awaiting",
-    ".activity-badge.policy-high-risk",
-    ".activity-badge.policy-conflict",
-  ]) {
-    assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
-  }
+  // A new task is collapsed by default, but incoming stream updates must not
+  // override a user opening the live thinking/status details panel.
+  assert.ok(appSource.includes("const [runStatusExpanded, setRunStatusExpanded] = useState(false)"), "run status should default to collapsed");
+  assert.ok(appSource.includes("open={runStatusExpanded}"), "run status details should remain controlled");
+  assert.ok(
+    appSource.includes("onToggle={(event) => setRunStatusExpanded(event.currentTarget.open)}"),
+    "toggling run status details should preserve the user's selection",
+  );
+  const patchRunStatusSource = appSource.match(/const patchRunStatus =[\s\S]*?const patchStream/)?.[0] ?? "";
+  assert.ok(patchRunStatusSource, "App.tsx should define patchRunStatus before patchStream");
+  assert.ok(
+    !patchRunStatusSource.includes("setRunStatusExpanded(false)"),
+    "streamed run-status updates must not collapse details opened by the user",
+  );
+  assert.ok(!appSource.includes("activity-header"), "the removed activity panel header must not be rendered");
+  assert.ok(!cssSource.includes(".activity-header"), "styles must not retain the removed activity panel header");
+  assert.ok(appSource.includes("const [conversationAtBottom, setConversationAtBottom] = useState(true)"), "conversation should track whether the user is reading the latest content");
+  assert.ok(appSource.includes("!node || !conversationAtBottomRef.current"), "stream updates must not pull a user back to the bottom");
+  assert.ok(appSource.includes("onScroll={(event) => updateConversationBottomState(event.currentTarget)}"), "conversation scrolling should update the pinned state");
+  assert.ok(appSource.includes('className="scroll-to-bottom-button"'), "a jump-to-latest control should be rendered above the composer");
+  assert.ok(cssSource.includes(".scroll-to-bottom-button"), "jump-to-latest control should be styled");
+  assert.ok(i18nSource.includes('"run.scrollBottom"'), "jump-to-latest control should be localized");
 
   assert.ok(
     i18nSource.includes("allowlisted safe commands") || configSource.includes("allowlisted safe commands"),

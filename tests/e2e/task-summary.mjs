@@ -33,16 +33,16 @@ assert.match(cli, /case "summary"/);
 assert.match(cli, /session summary <session-id>/);
 assert.match(cli, /\+\$\{added\}\/-\$\{removed\}/);
 
-// Desktop presentation
+// The desktop activity/task-summary panel was intentionally removed. Summary data
+// remains available through the protocol, core, and CLI instead of being rendered here.
 const app = read("apps/desktop/src/App.tsx");
-assert.match(app, /function formatTaskSummaryText/);
-assert.match(app, /Copy summary/);
-assert.match(app, /file-change-list/);
-assert.match(app, /change-kind/);
+assert.doesNotMatch(app, /Copy summary/);
+assert.doesNotMatch(app, /file-change-list/);
+assert.doesNotMatch(app, /change-kind/);
 
 const css = read("apps/desktop/src/styles.css");
-assert.match(css, /\.file-change-list/);
-assert.match(css, /\.change-kind\.created/);
+assert.doesNotMatch(css, /\.file-change-list/);
+assert.doesNotMatch(css, /\.change-kind\.created/);
 
 // Pure format logic mirror (CLI shape)
 function formatTaskSummary(summary) {

@@ -26,7 +26,7 @@ Session database lives at `~/.xcoding/xcoding.db`. Workspace command policy file
 
 1. Open **Settings** and choose **Language** (English or 简体中文).
 2. Configure **Cloud provider**: Base URL (default `https://ai.v58.dev/v1`) and API key, then **Save settings**.
-3. Set workspace path, mode, and model (allow/deny lists need a workspace path).
+3. Set workspace path and mode (allow/deny lists need a workspace path); choose model and reasoning effort in the composer.
 4. Return to the workbench, enter a real absolute workspace path if needed, and send a task.
 5. Review the plan, streamed response, tool activity, patch previews, and approval controls.
 6. Select saved sessions to review events, restore points, and task completion summary.
@@ -41,7 +41,7 @@ All configuration lives on the **Settings** page (button in the left panel and c
 |---------|----------------|
 | Language | UI locale; also written to `~/.xcoding/config.json` and mirrored in `localStorage` (`xcoding.locale`) |
 | Cloud provider | Provider (`openai`, read-only), Base URL, API key → `~/.xcoding/config.json` |
-| Defaults | Workspace path (last-used), mode, model; allowlist/denylist → workspace `.xcoding/command-allowlist` / `command-denylist` |
+| Defaults | Workspace path (last-used), mode; allowlist/denylist → workspace `.xcoding/command-allowlist` / `command-denylist`. Model and reasoning effort are chosen in the composer and saved to `~/.xcoding/config.json` |
 | Diagnostics | Client checklist: workspace, provider auth, base URL, defaults |
 
 Mode help:
@@ -61,6 +61,7 @@ Mode help:
   "mode": "ask",
   "provider": "openai",
   "model": "gpt-5.5",
+  "reasoning_effort": "high",
   "base_url": "https://ai.v58.dev/v1",
   "api_key": "sk-...",
   "last_workspace_root": "D:\\WORK\\BittyData\\XCoding"
@@ -86,7 +87,7 @@ Select a finished session in the left list to review history. Sending another me
 | Pane | Content |
 |------|---------|
 | Left | Workspace path, compact provider status, Settings/Refresh, session history |
-| Center | Conversation transcript (auto-scrolls), empty-state tips, composer; Settings also from the header |
+| Center | Conversation transcript (auto-scrolls), empty-state tips, composer (model + reasoning effort); Settings also from the header |
 | Right | Sticky approval review when needed, task summary, activity, then collapsible plan / restore / replay |
 
 Session history items show status, mode, model, and a relative updated time. Message roles render as You / Assistant / Tool / System.

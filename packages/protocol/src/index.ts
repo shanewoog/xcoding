@@ -56,15 +56,87 @@ export interface ListModelsResult {
   base_url: string;
 }
 
+/** One OpenAI-compatible cloud provider endpoint in Desktop settings. */
+export interface CloudProviderConfig {
+  id: string;
+  /** Display name shown in the Desktop provider manager. */
+  name: string;
+  /** OpenAI-compatible API host without a trailing /v1 suffix. */
+  base_url: string;
+  /** Full API key when configured. Never log this value. */
+  api_key?: string;
+}
+
 /** User-level preferences stored under ~/.xcoding/config.json */
 export interface UserConfig {
   locale: string;
   mode: Mode;
+  /** Technical provider id used by sessions (currently always openai-compatible). */
   provider: string;
   model: string;
+  /** Reasoning effort for compatible models: none | low | medium | high. */
+  reasoning_effort?: string;
+  /** Retries after the initial failed request for one provider before XCoding tries a backup provider. */
+  max_provider_retries?: number;
+  /** Maximum model/tool interaction rounds for one user turn before the agent stops. */
+  max_tool_rounds?: number;
+  /** Consecutive failed turns that open a provider circuit. */
+  circuit_failure_threshold?: number;
+  /** Maximum wait for the first stream event, including initial response setup. */
+  stream_first_event_timeout_secs?: number;
+  /** Maximum gap between stream events after the first event is received. */
+  stream_idle_timeout_secs?: number;
+  /** Reserved for future non-streaming provider calls; streaming chat does not use this yet. */
+  non_stream_timeout_secs?: number;
+  /** Successful half-open turns required before a provider circuit closes. */
+  circuit_recovery_success_threshold?: number;
+  /** Seconds a tripped provider circuit remains open before a half-open probe. */
+  circuit_recovery_wait_secs?: number;
+  /** Failure rate percentage that can open a circuit after enough samples. */
+  circuit_error_rate_threshold_percent?: number;
+  /** Minimum completed provider turns for failure-rate circuit evaluation. */
+  circuit_min_request_count?: number;
+  /** Active OpenAI-compatible API host without a trailing /v1 suffix. */
   base_url: string;
   api_key?: string;
+  /** Managed cloud providers. At most one is active via active_provider_id. */
+  providers?: CloudProviderConfig[];
+  /** Id of the currently enabled cloud provider in providers. */
+  active_provider_id?: string;
+  /** Last opened project path (agent root). */
   last_workspace_root?: string;
+  /** Parent directory where new projects are created. */
+  workspace_home?: string;
+  /** Project paths removed from the Desktop project area (folders stay on disk). */
+  hidden_project_paths?: string[];
+  /** Skip high-risk confirmation only for tightly constrained PowerShell loopback API requests. */
+  skip_local_api_confirmation?: boolean;
+}
+
+export interface ProjectDir {
+  path: string;
+  dir_name: string;
+  title: string;
+}
+
+export interface CreateProjectParams {
+  workspace_home: string;
+  name: string;
+}
+
+export interface CreateProjectResult {
+  project: ProjectDir;
+}
+
+export interface ImportProjectParams {
+  workspace_home: string;
+  source_path: string;
+}
+
+export interface ImportProjectResult {
+  project: ProjectDir;
+  already_existed: boolean;
+  copied: boolean;
 }
 
 export interface CreateSessionParams {
@@ -209,6 +281,8 @@ export interface RollbackRestorePointResult {
 
 export interface CancelSessionParams {
   session_id: string;
+  /** Optional assistant text already shown in the UI; persisted on cancel/steer. */
+  partial_assistant?: string;
 }
 
 export interface CancelSessionResult {
@@ -334,6 +408,28 @@ export type SessionEvent =
       type: "task_completed";
       session_id: string;
       summary: TaskSummary;
+    }
+  | {
+      type: "retrying";
+      session_id: string;
+      attempt: number;
+      max_attempts: number;
+      message: string;
+    }
+  | {
+      type: "model_call";
+      session_id: string;
+      provider: string;
+      model: string;
+      endpoint: string;
+      purpose: string;
+      round: number;
+      attempt: number;
+      max_attempts: number;
+      success: boolean;
+      output_chars: number;
+      tool_calls: number;
+      error?: string;
     }
   | {
       type: "error";

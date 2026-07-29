@@ -7,9 +7,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_protocol::{
-    CreateSessionParams, Message, MessageRole, PendingAction, PendingActionStatus,
-    PersistedSessionEvent, RestorePoint, Session, SessionEvent, SessionStatus, ToolCall,
-    WorkspaceConfig,
+    ContextCompaction, CreateSessionParams, Message, MessageRole, PendingAction,
+    PendingActionStatus, PersistedSessionEvent, RestorePoint, Session, SessionEvent, SessionStatus,
+    ToolCall, WorkspaceConfig,
 };
 
 #[derive(Debug, Error)]
@@ -22,6 +22,8 @@ pub enum StoreError {
     Timestamp(#[from] chrono::ParseError),
     #[error("invalid stored identifier: {0}")]
     Identifier(#[from] uuid::Error),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 pub struct SessionStore {
@@ -39,14 +41,27 @@ fn title_from_message(message: &str) -> String {
     if collapsed.chars().count() <= MAX_CHARS {
         return collapsed;
     }
-    let mut out: String = collapsed.chars().take(MAX_CHARS.saturating_sub(1)).collect();
+    let mut out: String = collapsed
+        .chars()
+        .take(MAX_CHARS.saturating_sub(1))
+        .collect();
     out.push('…');
     out
 }
 
 impl SessionStore {
+    fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
+        // Multi-session desktop runs open one CoreService/connection per agent worker.
+        // WAL + busy_timeout lets concurrent readers/writers cooperate instead of failing.
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "busy_timeout", 5_000i64)?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+        Ok(())
+    }
+
     pub fn in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
+        Self::configure_connection(&connection)?;
         let store = Self { connection };
         store.migrate()?;
         Ok(store)
@@ -54,6 +69,7 @@ impl SessionStore {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let connection = Connection::open(path)?;
+        Self::configure_connection(&connection)?;
         let store = Self { connection };
         store.migrate()?;
         Ok(store)
@@ -171,12 +187,22 @@ impl SessionStore {
         let id = id.to_string();
         self.connection
             .execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
-        self.connection
-            .execute("DELETE FROM pending_actions WHERE session_id = ?1", params![id])?;
-        self.connection
-            .execute("DELETE FROM restore_points WHERE session_id = ?1", params![id])?;
-        self.connection
-            .execute("DELETE FROM session_events WHERE session_id = ?1", params![id])?;
+        self.connection.execute(
+            "DELETE FROM pending_actions WHERE session_id = ?1",
+            params![id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM restore_points WHERE session_id = ?1",
+            params![id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM session_events WHERE session_id = ?1",
+            params![id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM context_compactions WHERE session_id = ?1",
+            params![id],
+        )?;
         let deleted = self
             .connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -220,6 +246,46 @@ impl SessionStore {
         let rows = statement.query_map([session_id.to_string()], Self::row_to_message)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+    pub fn get_context_compaction(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<ContextCompaction>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT session_id, summary, compacted_message_count, updated_at
+                 FROM context_compactions WHERE session_id = ?1",
+                [session_id.to_string()],
+                Self::row_to_context_compaction,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn save_context_compaction(
+        &self,
+        compaction: ContextCompaction,
+    ) -> Result<ContextCompaction, StoreError> {
+        if compaction.summary.trim().is_empty() {
+            return Err(StoreError::InvalidInput(
+                "context compaction summary must not be empty".to_owned(),
+            ));
+        }
+        self.connection.execute(
+            "INSERT INTO context_compactions (session_id, summary, compacted_message_count, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET
+                summary = excluded.summary,
+                compacted_message_count = excluded.compacted_message_count,
+                updated_at = excluded.updated_at",
+            params![
+                compaction.session_id.to_string(),
+                compaction.summary,
+                compaction.compacted_message_count as i64,
+                compaction.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(compaction)
     }
 
     pub fn create_pending_action(
@@ -421,6 +487,48 @@ impl SessionStore {
         self.get_session(id)
     }
 
+    /// Update the model used for subsequent turns of an existing session.
+    pub fn set_session_model(
+        &self,
+        id: Uuid,
+        model: impl Into<String>,
+    ) -> Result<Option<Session>, StoreError> {
+        let model = model.into().trim().to_owned();
+        if model.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "model must not be empty".to_owned(),
+            ));
+        }
+        let changed = self.connection.execute(
+            "UPDATE sessions SET model = ?1, updated_at = ?2 WHERE id = ?3",
+            params![model, Utc::now().to_rfc3339(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_session(id)
+    }
+
+    /// Update the mode used for subsequent turns of an existing session.
+    pub fn set_session_mode(
+        &self,
+        id: Uuid,
+        mode: xcoding_protocol::Mode,
+    ) -> Result<Option<Session>, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE sessions SET mode = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&mode)?,
+                Utc::now().to_rfc3339(),
+                id.to_string()
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_session(id)
+    }
+
     pub fn first_user_message_content(
         &self,
         session_id: Uuid,
@@ -431,7 +539,10 @@ impl SessionStore {
                  WHERE session_id = ?1 AND role = ?2
                  ORDER BY created_at ASC, rowid ASC
                  LIMIT 1",
-                params![session_id.to_string(), serde_json::to_string(&MessageRole::User)?],
+                params![
+                    session_id.to_string(),
+                    serde_json::to_string(&MessageRole::User)?
+                ],
                 |row| row.get(0),
             )
             .optional()
@@ -517,6 +628,14 @@ impl SessionStore {
                 provider TEXT NOT NULL,
                 model TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS context_compactions (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                summary TEXT NOT NULL,
+                compacted_message_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
             );",
         )?;
         self.ensure_column("restore_points", "applied_text", "TEXT")?;
@@ -537,6 +656,32 @@ impl SessionStore {
             ))?;
         }
         Ok(())
+    }
+
+    fn row_to_context_compaction(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextCompaction> {
+        let session_id: String = row.get(0)?;
+        let compacted_message_count: i64 = row.get(2)?;
+        let updated_at: String = row.get(3)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(ContextCompaction {
+            session_id: Uuid::parse_str(&session_id)
+                .map_err(|error| parse(StoreError::Identifier(error)))?,
+            summary: row.get(1)?,
+            compacted_message_count: usize::try_from(compacted_message_count).map_err(|_| {
+                parse(StoreError::InvalidInput(
+                    "stored compacted message count is negative or too large".to_owned(),
+                ))
+            })?,
+            updated_at: DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+        })
     }
 
     fn row_to_workspace_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceConfig> {
@@ -720,6 +865,8 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
         | SessionEvent::RestorePointRolledBack { session_id, .. }
         | SessionEvent::SessionCancelled { session_id, .. }
         | SessionEvent::TaskCompleted { session_id, .. }
+        | SessionEvent::Retrying { session_id, .. }
+        | SessionEvent::ModelCall { session_id, .. }
         | SessionEvent::Error { session_id, .. } => *session_id,
     }
 }
@@ -791,6 +938,77 @@ mod tests {
     }
 
     #[test]
+    fn persists_and_updates_context_compaction_without_replacing_messages() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session saves");
+        let original = store
+            .append_message(session.id, MessageRole::User, "keep original history")
+            .expect("message saves");
+        let first = ContextCompaction {
+            session_id: session.id,
+            summary: "# Goal\nInitial handoff".to_owned(),
+            compacted_message_count: 1,
+            updated_at: Utc::now(),
+        };
+        store
+            .save_context_compaction(first)
+            .expect("first compaction saves");
+        let updated = ContextCompaction {
+            session_id: session.id,
+            summary: "# Goal\nUpdated handoff".to_owned(),
+            compacted_message_count: 3,
+            updated_at: Utc::now(),
+        };
+        store
+            .save_context_compaction(updated.clone())
+            .expect("compaction updates");
+
+        assert_eq!(
+            store
+                .get_context_compaction(session.id)
+                .expect("compaction loads"),
+            Some(updated)
+        );
+        assert_eq!(
+            store.list_messages(session.id).expect("messages load"),
+            vec![original]
+        );
+    }
+    #[test]
+    fn updates_session_model_for_later_turns() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: xcoding_protocol::Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: Some("demo".to_owned()),
+            })
+            .expect("session created");
+        let updated = store
+            .set_session_model(session.id, "grok-4.5")
+            .expect("model update")
+            .expect("session exists");
+        assert_eq!(updated.model, "grok-4.5");
+        let reloaded = store
+            .get_session(session.id)
+            .expect("load")
+            .expect("exists");
+        assert_eq!(reloaded.model, "grok-4.5");
+        let empty = store.set_session_model(session.id, "   ");
+        assert!(empty.is_err(), "empty model rejected");
+    }
+
+    #[test]
     fn deletes_session_and_related_rows() {
         let store = SessionStore::in_memory().expect("in-memory database starts");
         let session = store
@@ -818,6 +1036,14 @@ mod tests {
         store
             .create_restore_point(session.id, "README.md", Some("old"), "new")
             .expect("restore point");
+        store
+            .save_context_compaction(ContextCompaction {
+                session_id: session.id,
+                summary: "# Goal\nDelete me too".to_owned(),
+                compacted_message_count: 1,
+                updated_at: Utc::now(),
+            })
+            .expect("context compaction");
         let assistant = Message {
             id: Uuid::new_v4(),
             session_id: session.id,
@@ -834,10 +1060,31 @@ mod tests {
 
         assert!(store.delete_session(session.id).expect("delete"));
         assert!(store.get_session(session.id).expect("lookup").is_none());
-        assert!(store.list_messages(session.id).expect("messages").is_empty());
-        assert!(store.list_pending_actions(session.id).expect("actions").is_empty());
-        assert!(store.list_restore_points(session.id).expect("restore").is_empty());
+        assert!(
+            store
+                .list_messages(session.id)
+                .expect("messages")
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_pending_actions(session.id)
+                .expect("actions")
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_restore_points(session.id)
+                .expect("restore")
+                .is_empty()
+        );
         assert!(store.list_events(session.id).expect("events").is_empty());
+        assert!(
+            store
+                .get_context_compaction(session.id)
+                .expect("compaction")
+                .is_none()
+        );
         assert!(!store.delete_session(session.id).expect("second delete"));
     }
 }

@@ -11,10 +11,17 @@ const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
 async function main() {
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-provider-status-"));
+  const missingHome = resolve(databaseDirectory, "missing-home");
+  const presentHome = resolve(databaseDirectory, "present-home");
   const missing = startRpcClient({
     databasePath: resolve(databaseDirectory, "missing.db"),
     environment: {
       ...process.env,
+      // Isolate each child from the developer's ~/.xcoding/config.json. An empty
+      // key is deliberately preserved so the missing-key scenario cannot be filled
+      // from the real multi-provider configuration.
+      USERPROFILE: missingHome,
+      HOME: missingHome,
       OPENAI_API_KEY: "",
       XCODING_OPENAI_BASE_URL: "https://example.test/v1",
     },
@@ -23,6 +30,8 @@ async function main() {
     databasePath: resolve(databaseDirectory, "present.db"),
     environment: {
       ...process.env,
+      USERPROFILE: presentHome,
+      HOME: presentHome,
       OPENAI_API_KEY: "sk-test-key-abcdef",
       XCODING_OPENAI_BASE_URL: "https://example.test/v1/",
     },

@@ -83,6 +83,71 @@ function isGitWriteTool(name) {
   return ["git_add", "git_commit", "git_push", "git_fetch", "git_pull"].includes(name);
 }
 
+const localApiForbiddenCommands = [
+  "remove-item",
+  "move-item",
+  "copy-item",
+  "new-item",
+  "set-content",
+  "add-content",
+  "clear-content",
+  "out-file",
+  "set-itemproperty",
+  "invoke-expression",
+  "start-process",
+  "stop-process",
+  "restart-computer",
+  "set-executionpolicy",
+];
+
+function isLoopbackHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && !url.username
+      && !url.password
+      && ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isRememberableLocalApiRequest(action) {
+  if (action.tool_call.name !== "run_command") return false;
+  const executable = asString(action.tool_call.arguments?.executable);
+  const executableName = executable?.split(/[\\/]/).pop()?.trim().toLowerCase();
+  if (!["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(executableName)) return false;
+  const args = asStringArray(action.tool_call.arguments?.args);
+  const commandIndex = args.findIndex((argument) => /^(?:-command|-c)$/i.test(argument));
+  if (commandIndex < 0 || commandIndex + 2 !== args.length) return false;
+
+  const script = args[commandIndex + 1].trim();
+  const lower = script.toLowerCase();
+  if (!script || ["$(", "|", "&", "`"].some((token) => lower.includes(token))) return false;
+  if (localApiForbiddenCommands.some((command) => lower.includes(command))) return false;
+  const urls = [...script.matchAll(/https?:\/\/[^\s'"`]+/gi)].map((match) => match[0]);
+  if (urls.length === 0 || urls.some((url) => !isLoopbackHttpUrl(url))) return false;
+
+  let invokeCount = 0;
+  for (const rawStatement of script.split(/[;{}\r\n]/)) {
+    const statement = rawStatement.trim();
+    if (!statement || statement === "try" || statement === "catch") continue;
+    const lowerStatement = statement.toLowerCase();
+    if (lowerStatement.startsWith("invoke-webrequest") || lowerStatement.startsWith("invoke-restmethod")) {
+      invokeCount += 1;
+      continue;
+    }
+    const assignment = lowerStatement.match(/^[$][a-z_][a-z0-9_]*\s*=\s*(.+)$/);
+    if (assignment && (assignment[1].startsWith("invoke-webrequest") || assignment[1].startsWith("invoke-restmethod"))) {
+      invokeCount += 1;
+      continue;
+    }
+    if (/^[$][A-Za-z0-9_$.]+$/.test(statement)) continue;
+    return false;
+  }
+  return invokeCount === 1;
+}
+
 function buildReviewPresentation(action, summary, hasPatchPreview) {
   const toolName = action.tool_call.name;
   const commandText = formatCommandText(action.tool_call);
@@ -143,6 +208,8 @@ async function main() {
     "formatCommandText",
     "formatGitDetail",
     "gitToolTitle",
+    "isRememberableLocalApiRequest",
+    "LOCAL_API_FORBIDDEN_COMMANDS",
     'bodyKind: "git"',
   ]) {
     assert.ok(reviewSource.includes(needle), "review.ts missing " + needle);
@@ -154,11 +221,14 @@ async function main() {
     "action.approveRisk",
     "high-risk",
     "review.riskHint",
+    "local-api-confirmation",
+    "rememberLocalApiApproval",
+    "skip_local_api_confirmation",
     'review.bodyKind === "git"',
   ]) {
     assert.ok(appSource.includes(needle), "App.tsx missing " + needle);
   }
-  for (const needle of [".risk-badge", ".command-preview", ".review-panel.high-risk", ".approve-risk-button"]) {
+  for (const needle of [".risk-badge", ".command-preview", ".review-panel.high-risk", ".approve-risk-button", ".local-api-confirmation"]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }
   assert.ok(cliSource.includes("WARNING: HIGH-RISK command"), "CLI missing HIGH-RISK command warning");
@@ -167,6 +237,35 @@ async function main() {
     "CLI missing HIGH-RISK git operation warning",
   );
   assert.ok(cliSource.includes("formatGitApprovalDetail"), "CLI missing formatGitApprovalDetail");
+
+  const localRequest = {
+    tool_call: {
+      name: "run_command",
+      arguments: {
+        executable: "powershell",
+        args: ["-Command", "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8787/api/analyze' -Method POST; $r.Content } catch { $_.Exception.Message }"],
+      },
+    },
+  };
+  assert.equal(isRememberableLocalApiRequest(localRequest), true);
+  assert.equal(
+    isRememberableLocalApiRequest({
+      tool_call: {
+        name: "run_command",
+        arguments: { executable: "powershell", args: ["-Command", "Invoke-WebRequest -Uri 'https://example.test/api/analyze'"] },
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isRememberableLocalApiRequest({
+      tool_call: {
+        name: "run_command",
+        arguments: { executable: "powershell", args: ["-Command", "Invoke-WebRequest -Uri 'http://127.0.0.1:8787/api/analyze'; Remove-Item .\\important.txt"] },
+      },
+    }),
+    false,
+  );
 
   const highRisk = buildReviewPresentation(
     {

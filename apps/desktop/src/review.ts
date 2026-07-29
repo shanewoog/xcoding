@@ -121,6 +121,84 @@ export function isGitWriteTool(name: string): boolean {
   return GIT_WRITE_TOOLS.has(name);
 }
 
+const POWERSHELL_EXECUTABLES = new Set(["powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
+const LOCAL_API_FORBIDDEN_COMMANDS = [
+  "remove-item",
+  "move-item",
+  "copy-item",
+  "new-item",
+  "set-content",
+  "add-content",
+  "clear-content",
+  "out-file",
+  "set-itemproperty",
+  "invoke-expression",
+  "start-process",
+  "stop-process",
+  "restart-computer",
+  "set-executionpolicy",
+];
+
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) return false;
+    return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isLocalApiOutputReference(statement: string): boolean {
+  return /^[$][A-Za-z0-9_$.]+$/.test(statement);
+}
+
+function isRememberableLocalApiScript(script: string): boolean {
+  const normalized = script.trim();
+  if (!normalized) return false;
+  const lower = normalized.toLowerCase();
+  if (["$(", "|", "&", "`"].some((token) => lower.includes(token))) return false;
+  if (LOCAL_API_FORBIDDEN_COMMANDS.some((command) => lower.includes(command))) return false;
+
+  const urls = [...normalized.matchAll(/https?:\/\/[^\s'"`]+/gi)].map((match) => match[0]);
+  if (urls.length === 0 || urls.some((url) => !isLoopbackHttpUrl(url))) return false;
+
+  let invokeCount = 0;
+  for (const rawStatement of normalized.split(/[;{}\r\n]/)) {
+    const statement = rawStatement.trim();
+    if (!statement) continue;
+    const statementLower = statement.toLowerCase();
+    if (statementLower === "try" || statementLower === "catch") continue;
+    if (statementLower.startsWith("invoke-webrequest") || statementLower.startsWith("invoke-restmethod")) {
+      invokeCount += 1;
+      continue;
+    }
+    const assignment = statementLower.match(/^[$][a-z_][a-z0-9_]*\s*=\s*(.+)$/);
+    if (assignment && (assignment[1].startsWith("invoke-webrequest") || assignment[1].startsWith("invoke-restmethod"))) {
+      invokeCount += 1;
+      continue;
+    }
+    if (isLocalApiOutputReference(statement)) continue;
+    return false;
+  }
+  return invokeCount === 1;
+}
+
+/**
+ * Controls only whether the Desktop UI offers to remember an approval.
+ * The Rust agent repeats this validation before it bypasses any high-risk prompt.
+ */
+export function isRememberableLocalApiRequest(action: PendingAction): boolean {
+  if (action.tool_call.name !== "run_command") return false;
+  const executable = asString(action.tool_call.arguments?.executable);
+  if (!executable) return false;
+  const executableName = executable.split(/[\\/]/).pop()?.trim().toLowerCase();
+  if (!executableName || !POWERSHELL_EXECUTABLES.has(executableName)) return false;
+  const args = asStringArray(action.tool_call.arguments?.args);
+  const commandIndex = args.findIndex((argument) => /^(?:-command|-c)$/i.test(argument));
+  return commandIndex >= 0 && commandIndex + 2 === args.length && isRememberableLocalApiScript(args[commandIndex + 1]);
+}
+
 export function buildReviewPresentation(
   action: PendingAction,
   summary: string | null,

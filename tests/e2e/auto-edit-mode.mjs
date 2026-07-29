@@ -26,7 +26,7 @@ async function main() {
   });
 
   try {
-    // Task 5: ask mode requires approval for ordinary writes.
+    // Task 5: ask mode auto-applies ordinary workspace file writes.
     mock.scenario = "ask-patch";
     const ask = await rpc.request("session.chat", {
       workspace_root: workspace,
@@ -34,21 +34,18 @@ async function main() {
       model: "fixture-model",
       mode: "ask",
     });
-    assert.equal(ask.session.status, "need_user");
+    assert.equal(ask.session.status, "done");
     assert.equal(ask.session.mode, "ask");
-    const askApproval = eventFor(rpc, ask.session.id, "approval_requested");
-    assert.equal(askApproval.action.tool_call.name, "apply_patch");
-    assert.match(String(askApproval.summary), /approve the proposed patch/i);
-    const askStart = eventFor(rpc, ask.session.id, "tool_start");
-    assert.match(String(askStart.summary), /Awaiting approval for apply_patch/i);
-    await assert.rejects(readFile(resolve(workspace, "ask.txt"), "utf8"));
-    const rejected = await rpc.request("session.resolve", {
-      session_id: ask.session.id,
-      action_id: askApproval.action.id,
-      approved: false,
-    });
-    assert.equal(rejected.session.status, "done");
-    await assert.rejects(readFile(resolve(workspace, "ask.txt"), "utf8"));
+    assert.equal(await readFile(resolve(workspace, "ask.txt"), "utf8"), "ask-me\n");
+    assert.equal(
+      eventsFor(rpc, ask.session.id).some((event) => event.type === "approval_requested"),
+      false,
+    );
+    const askStart = eventsFor(rpc, ask.session.id).find(
+      (event) => event.type === "tool_start" && event.tool_call?.name === "apply_patch",
+    );
+    assert.ok(askStart);
+    assert.match(String(askStart.summary), /Auto-applying apply_patch/i);
 
     // Task 6a: auto-edit applies ordinary patches without approval.
     mock.scenario = "auto-patch";
