@@ -78,7 +78,7 @@ const MIN_MAX_PROVIDER_RETRIES = 0;
 const MAX_MAX_PROVIDER_RETRIES = 10;
 const DEFAULT_MAX_TOOL_ROUNDS = 16;
 const MIN_MAX_TOOL_ROUNDS = 1;
-const MAX_MAX_TOOL_ROUNDS = 64;
+const MAX_MAX_TOOL_ROUNDS = 1024;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3;
 const MIN_CIRCUIT_FAILURE_THRESHOLD = 1;
 const MAX_CIRCUIT_FAILURE_THRESHOLD = 10;
@@ -593,6 +593,28 @@ function formatRunElapsed(startedAt: number, now: number): string {
   return minutes > 0 ? `${minutes}m ${remainder}s` : `${seconds}s`;
 }
 
+function completedRunElapsedByMessageId(messages: Message[]): Record<string, string> {
+  const elapsedByMessageId: Record<string, string> = {};
+  let turnStartedAt: number | null = null;
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      const createdAt = Date.parse(message.created_at);
+      turnStartedAt = Number.isFinite(createdAt) ? createdAt : null;
+      continue;
+    }
+    if (message.role !== "assistant" || turnStartedAt === null) continue;
+
+    const completedAt = Date.parse(message.created_at);
+    if (Number.isFinite(completedAt) && completedAt >= turnStartedAt) {
+      elapsedByMessageId[message.id] = formatRunElapsed(turnStartedAt, completedAt);
+    }
+    turnStartedAt = null;
+  }
+
+  return elapsedByMessageId;
+}
+
 function runPlanStepDescription(step: PlanStep, locale: Locale): string {
   if (step.id === "inspect") return t(locale, "run.plan.inspect");
   if (step.id === "change") return t(locale, "run.plan.change");
@@ -752,6 +774,7 @@ export function App() {
   const conversationRef = useRef<HTMLDivElement | null>(null);
   const conversationAtBottomRef = useRef(true);
   const pendingConversationScrollTopRef = useRef<number | null>(null);
+  const pendingConversationScrollToBottomRef = useRef(false);
   const envButtonRef = useRef<HTMLButtonElement | null>(null);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(false);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
@@ -800,6 +823,10 @@ export function App() {
   const runStatus = activeSessionId
     ? (runStatusBySession[activeSessionId] ?? null)
     : draftRunStatus;
+  const completedRunElapsed = useMemo(
+    () => completedRunElapsedByMessageId(messages),
+    [messages],
+  );
   const currentPlanStepIndex = currentRunPlanStep(plan, activity);
   const latestActivity = activity.length > 0 ? activity[activity.length - 1] : null;
 
@@ -1194,7 +1221,8 @@ export function App() {
 
 
   const refreshWorkspace = useCallback(async () => {
-    await Promise.all([refreshSessions(), refreshDiskProjects(), loadWorkspaceConfig(), refreshProviderStatus()]);
+    await refreshDiskProjects();
+    await Promise.all([refreshSessions(), loadWorkspaceConfig(), refreshProviderStatus()]);
   }, [loadWorkspaceConfig, refreshDiskProjects, refreshProviderStatus, refreshSessions]);
 
   useEffect(() => {
@@ -1313,22 +1341,48 @@ export function App() {
 
   useLayoutEffect(() => {
     if (view !== "workbench") return;
-    const scrollTop = pendingConversationScrollTopRef.current;
-    if (scrollTop === null) return;
     const node = conversationRef.current;
     if (!node) return;
+    if (pendingConversationScrollToBottomRef.current) {
+      node.scrollTop = node.scrollHeight;
+      conversationAtBottomRef.current = true;
+      setConversationAtBottom(true);
+      pendingConversationScrollToBottomRef.current = false;
+      pendingConversationScrollTopRef.current = null;
+      return;
+    }
+    const scrollTop = pendingConversationScrollTopRef.current;
+    if (scrollTop === null) return;
     const maxScrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
     node.scrollTop = Math.min(scrollTop, maxScrollTop);
     updateConversationBottomState(node);
     pendingConversationScrollTopRef.current = null;
+  }, [updateConversationBottomState, view]);
+
+  useEffect(() => {
+    if (view !== "workbench" || typeof ResizeObserver === "undefined") return;
+    const node = conversationRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(() => {
+      if (!conversationAtBottomRef.current) return;
+      node.scrollTop = node.scrollHeight;
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
   }, [view]);
 
   function openSettings(): void {
+    pendingConversationScrollToBottomRef.current = conversationAtBottomRef.current;
     pendingConversationScrollTopRef.current = conversationRef.current?.scrollTop ?? null;
     setView("settings");
   }
 
   function returnToWorkbench(): void {
+    setView("workbench");
+  }
+
+  function returnToConversationFromModelLogs(): void {
+    pendingConversationScrollToBottomRef.current = true;
     setView("workbench");
   }
 
@@ -2465,10 +2519,33 @@ export function App() {
       new Set([...hiddenProjectPaths.map((item) => item.trim()).filter(Boolean), target]),
     );
     const clearingCurrent = normalizeRoot(workspaceRoot) === key;
-    if (clearingCurrent) {
-      setWorkspaceRoot("");
+    const removedSessionIds = new Set(
+      sessionsRef.current
+        .filter((session) => normalizeRoot(session.workspace_root) === key)
+        .map((session) => session.id),
+    );
+
+    setError(null);
+    try {
+      if (isTauriRuntime) {
+        await invoke<number>("delete_workspace_sessions", { workspaceRoot: target });
+      }
+      setSessions((current) =>
+        current.filter((session) => normalizeRoot(session.workspace_root) !== key),
+      );
+      if (activeSessionId && removedSessionIds.has(activeSessionId)) {
+        resetComposerSession();
+      }
+      if (clearingCurrent) {
+        setWorkspaceRoot("");
+      }
+      await persistHiddenProjectPaths(
+        nextHidden,
+        clearingCurrent ? { last_workspace_root: undefined } : {},
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t(locale, "history.deleteFailed"));
     }
-    await persistHiddenProjectPaths(nextHidden, clearingCurrent ? { last_workspace_root: undefined } : {});
   }
 
   function openProjectMenu(event: ReactMouseEvent, root: string): void {
@@ -2786,7 +2863,7 @@ export function App() {
             >
               {modelCallLogsLoading ? t(locale, "logs.loading") : t(locale, "logs.refresh")}
             </button>
-            <button type="button" className="quiet-button" onClick={() => setView("workbench")}>
+            <button type="button" className="quiet-button" onClick={returnToConversationFromModelLogs}>
               {t(locale, "logs.back")}
             </button>
           </div>
@@ -3497,6 +3574,7 @@ export function App() {
             }
 
             const message = entry.message;
+            const elapsed = message.role === "assistant" ? completedRunElapsed[message.id] : null;
             return message.role === "user" ? (
               <article className={`message message-${message.role}`} key={message.id}>
                 <div className="message-bubble">
@@ -3531,6 +3609,7 @@ export function App() {
                 <div className="message-bubble">
                   <div className="message-body">{message.role === "assistant" ? <AssistantMessageBody content={message.content} onOpenLink={openAssistantLink} /> : message.content}</div>
                 </div>
+                {elapsed ? <p className="message-completed-elapsed">{t(locale, "run.processed", { elapsed })}</p> : null}
                 {message.role === "assistant" ? (
                   <div className="message-meta">
                     {formatMessageTime(message.created_at) ? (
@@ -3565,17 +3644,26 @@ export function App() {
                         attempt: runStatus.retryAttempt ?? 1,
                         max: runStatus.retryMaxAttempts ?? 5,
                       })
-                      : t(locale, "run.disconnected")
+                      : t(locale, "activity.agentError")
                 }`}
               >
-                <span className="run-status-dots" aria-hidden="true"><i /><i /><i /></span>
-                {plan.length > 0 && currentPlanStepIndex >= 0 ? (
+                <span
+                  className={`run-status-dots${runStatus.phase === "failed" ? " failed" : ""}`}
+                  aria-hidden="true"
+                >
+                  {runStatus.phase === "failed" ? "!" : <><i /><i /><i /></>}
+                </span>
+                {runStatus.phase !== "failed" && plan.length > 0 && currentPlanStepIndex >= 0 ? (
                   <span>{t(locale, "run.stepProgress", {
                     current: String(currentPlanStepIndex + 1),
                     total: String(plan.length),
                   })}</span>
                 ) : (
-                  <span>{t(locale, "run.elapsed", { elapsed: formatRunElapsed(runStatus.startedAt, runStatusClock) })}</span>
+                  <span>
+                    {runStatus.phase === "failed"
+                      ? t(locale, "activity.agentError")
+                      : t(locale, "run.elapsed", { elapsed: formatRunElapsed(runStatus.startedAt, runStatusClock) })}
+                  </span>
                 )}
               </summary>
               <div className="run-status-popover">

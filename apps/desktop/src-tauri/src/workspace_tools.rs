@@ -231,13 +231,13 @@ pub fn list_workspace_entries(
     relative_path: Option<String>,
 ) -> Result<Vec<DirEntryInfo>, String> {
     let root = normalize_root(&workspace_root)?;
+    let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
     let rel = relative_path.unwrap_or_default();
     let rel = rel.trim().trim_start_matches(['/', '\\']);
     let dir = if rel.is_empty() {
-        root.clone()
+        canonical_root.clone()
     } else {
-        let candidate = root.join(rel);
-        let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
+        let candidate = canonical_root.join(rel);
         let canonical = candidate
             .canonicalize()
             .map_err(|error| format!("cannot open path: {error}"))?;
@@ -261,8 +261,8 @@ pub fn list_workspace_entries(
         let path = item.path();
         let is_dir = path.is_dir();
         let relative = path
-            .strip_prefix(&root)
-            .unwrap_or(&path)
+            .strip_prefix(&canonical_root)
+            .map_err(|_| "path escapes workspace root".to_owned())?
             .to_string_lossy()
             .replace('/', "\\");
         entries.push(DirEntryInfo {
@@ -367,5 +367,41 @@ fn open_with_os(target: &str) -> Result<(), String> {
             .spawn()
             .map_err(|error| format!("failed to open: {error}"))?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn lists_nested_workspace_entries_as_relative_paths() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "xcoding-workspace-entries-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src").join("engine").join("nested"))
+            .expect("create nested workspace");
+
+        let root_text = root.to_string_lossy().to_string();
+        let src_entries = list_workspace_entries(root_text.clone(), Some("src".to_owned()))
+            .expect("list src entries");
+        let engine = src_entries
+            .iter()
+            .find(|entry| entry.name == "engine")
+            .expect("engine entry");
+        assert_eq!(engine.path, "src\\engine");
+
+        let engine_entries =
+            list_workspace_entries(root_text, Some(engine.path.clone())).expect("list engine");
+        assert_eq!(engine_entries.len(), 1);
+        assert_eq!(engine_entries[0].path, "src\\engine\\nested");
+
+        fs::remove_dir_all(root).expect("remove temporary workspace");
     }
 }

@@ -30,6 +30,16 @@ pub struct SessionStore {
     connection: Connection,
 }
 
+fn normalize_workspace_root(value: &str) -> String {
+    value
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches("//?/")
+        .trim_start_matches("//./")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
 fn title_from_message(message: &str) -> String {
     let line = message
         .lines()
@@ -207,6 +217,69 @@ impl SessionStore {
             .connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(deleted > 0)
+    }
+
+    pub fn delete_workspace_sessions(&self, workspace_root: &str) -> Result<usize, StoreError> {
+        let workspace_key = normalize_workspace_root(workspace_root);
+        if workspace_key.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "workspace_root must not be empty".to_owned(),
+            ));
+        }
+
+        let transaction = self.connection.unchecked_transaction()?;
+        let session_ids = {
+            let mut statement = transaction.prepare("SELECT id, workspace_root FROM sessions")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter_map(|(id, stored_root)| {
+                    (normalize_workspace_root(&stored_root) == workspace_key).then_some(id)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for id in &session_ids {
+            transaction.execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
+            transaction.execute(
+                "DELETE FROM pending_actions WHERE session_id = ?1",
+                params![id],
+            )?;
+            transaction.execute(
+                "DELETE FROM restore_points WHERE session_id = ?1",
+                params![id],
+            )?;
+            transaction.execute(
+                "DELETE FROM session_events WHERE session_id = ?1",
+                params![id],
+            )?;
+            transaction.execute(
+                "DELETE FROM context_compactions WHERE session_id = ?1",
+                params![id],
+            )?;
+            transaction.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        }
+
+        let workspace_config_roots = {
+            let mut statement =
+                transaction.prepare("SELECT workspace_root FROM workspace_configs")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|stored_root| normalize_workspace_root(stored_root) == workspace_key)
+                .collect::<Vec<_>>()
+        };
+        for stored_root in workspace_config_roots {
+            transaction.execute(
+                "DELETE FROM workspace_configs WHERE workspace_root = ?1",
+                params![stored_root],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(session_ids.len())
     }
 
     pub fn append_message(
@@ -1006,6 +1079,146 @@ mod tests {
         assert_eq!(reloaded.model, "grok-4.5");
         let empty = store.set_session_model(session.id, "   ");
         assert!(empty.is_err(), "empty model rejected");
+    }
+
+    #[test]
+    fn deletes_all_workspace_sessions_and_preserves_other_projects() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+        let target_a = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/Work/Demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: Some("Target A".to_owned()),
+            })
+            .expect("first target session saves");
+        let target_b = store
+            .create_session(CreateSessionParams {
+                workspace_root: "d:\\work\\demo\\".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: Some("Target B".to_owned()),
+            })
+            .expect("second target session saves");
+        let other = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/Work/Other".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: Some("Keep me".to_owned()),
+            })
+            .expect("other session saves");
+
+        for session in [&target_a, &target_b, &other] {
+            store
+                .append_message(session.id, MessageRole::User, "hello")
+                .expect("message saves");
+        }
+        store
+            .create_pending_action(
+                target_a.id,
+                ToolCall {
+                    id: "workspace-call".to_owned(),
+                    name: ToolName::ListDir,
+                    arguments: serde_json::json!({"path": "."}),
+                },
+            )
+            .expect("pending action");
+        store
+            .create_restore_point(target_a.id, "README.md", Some("old"), "new")
+            .expect("restore point");
+        store
+            .save_context_compaction(ContextCompaction {
+                session_id: target_a.id,
+                summary: "remove workspace context".to_owned(),
+                compacted_message_count: 1,
+                updated_at: Utc::now(),
+            })
+            .expect("context compaction");
+        store
+            .record_event(&SessionEvent::MessageCompleted {
+                session_id: target_a.id,
+                message: Message {
+                    id: Uuid::new_v4(),
+                    session_id: target_a.id,
+                    role: MessageRole::Assistant,
+                    content: "done".to_owned(),
+                    created_at: Utc::now(),
+                },
+            })
+            .expect("event");
+        for root in ["D:/Work/Demo", "D:/Work/Other"] {
+            store
+                .set_workspace_config(WorkspaceConfig {
+                    workspace_root: root.to_owned(),
+                    mode: Mode::Ask,
+                    provider: "openai".to_owned(),
+                    model: "gpt-5.5".to_owned(),
+                    command_allowlist: Vec::new(),
+                    command_denylist: Vec::new(),
+                    updated_at: Utc::now(),
+                })
+                .expect("workspace config saves");
+        }
+
+        assert_eq!(
+            store
+                .delete_workspace_sessions("\\\\?\\d:\\WORK\\demo\\")
+                .expect("workspace delete"),
+            2
+        );
+        let remaining = store.list_sessions(None).expect("remaining sessions");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, other.id);
+        for session in [&target_a, &target_b] {
+            assert!(store.get_session(session.id).expect("lookup").is_none());
+            assert!(
+                store
+                    .list_messages(session.id)
+                    .expect("messages")
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .list_pending_actions(session.id)
+                    .expect("actions")
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .list_restore_points(session.id)
+                    .expect("restore points")
+                    .is_empty()
+            );
+            assert!(store.list_events(session.id).expect("events").is_empty());
+            assert!(
+                store
+                    .get_context_compaction(session.id)
+                    .expect("context compaction")
+                    .is_none()
+            );
+        }
+        assert!(
+            store
+                .get_workspace_config("D:/Work/Demo")
+                .expect("target config lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .get_workspace_config("D:/Work/Other")
+                .expect("other config lookup")
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .delete_workspace_sessions("D:/Work/Demo")
+                .expect("repeated delete"),
+            0
+        );
     }
 
     #[test]

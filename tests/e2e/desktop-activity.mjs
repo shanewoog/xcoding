@@ -126,6 +126,30 @@ async function main() {
     !patchRunStatusSource.includes("setRunStatusExpanded(false)"),
     "streamed run-status updates must not collapse details opened by the user",
   );
+  assert.ok(
+    /runStatus\.phase === "failed"\s*\? t\(locale, "activity\.agentError"\)/.test(appSource),
+    "a failed run must show a compact Agent error summary instead of task progress",
+  );
+  assert.ok(
+    appSource.includes('setRunStatusExpanded(false);') && appSource.includes('if (payload.type === "error")'),
+    "provider errors must collapse the process details by default",
+  );
+  assert.ok(cssSource.includes(".run-status-dots.failed"), "failed run status should use a static error indicator");
+  assert.ok(
+    appSource.includes("function completedRunElapsedByMessageId(messages: Message[]): Record<string, string>"),
+    "completed assistant messages should derive a persistent elapsed time from message timestamps",
+  );
+  assert.ok(
+    appSource.includes("elapsedByMessageId[message.id] = formatRunElapsed(turnStartedAt, completedAt)"),
+    "completed elapsed time should be measured from the preceding user message to its assistant reply",
+  );
+  assert.ok(
+    appSource.includes('t(locale, "run.processed", { elapsed })'),
+    "completed assistant messages should render their elapsed time in the conversation",
+  );
+  assert.ok(cssSource.includes(".message-completed-elapsed"), "completed elapsed time should have a persistent message style");
+  assert.ok(i18nSource.includes('"run.processed": "Processed {elapsed}"'), "completed elapsed time should be localized in English");
+  assert.ok(i18nSource.includes('"run.processed": "已处理 {elapsed}"'), "completed elapsed time should be localized in Chinese");
   assert.ok(!appSource.includes("activity-header"), "the removed activity panel header must not be rendered");
   assert.ok(!cssSource.includes(".activity-header"), "styles must not retain the removed activity panel header");
   assert.ok(appSource.includes("const [conversationAtBottom, setConversationAtBottom] = useState(true)"), "conversation should track whether the user is reading the latest content");

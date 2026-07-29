@@ -335,6 +335,13 @@ impl CoreService {
         Ok(())
     }
 
+    pub fn delete_workspace_sessions(&self, workspace_root: &str) -> Result<usize, CoreError> {
+        validate_workspace_root(workspace_root)?;
+        self.store
+            .delete_workspace_sessions(workspace_root)
+            .map_err(CoreError::from)
+    }
+
     pub fn rename_session(
         &self,
         session_id: uuid::Uuid,

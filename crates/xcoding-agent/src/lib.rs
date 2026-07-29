@@ -235,6 +235,12 @@ fn provider_rejected_selected_model(error: &AgentError) -> bool {
         || body.contains("model does not exist")
 }
 
+/// Stream chunks are delivered to the live client but are not durable replay events.
+/// Persisting every chunk would turn one model response into thousands of SQLite writes.
+fn should_persist_session_event(event: &SessionEvent) -> bool {
+    !matches!(event, SessionEvent::TextDelta { .. })
+}
+
 pub struct AgentService<'a> {
     core: &'a CoreService,
 }
@@ -1231,7 +1237,9 @@ impl<'a> AgentService<'a> {
     where
         F: FnMut(SessionEvent),
     {
-        let _ = self.core.record_event(&event);
+        if should_persist_session_event(&event) {
+            let _ = self.core.record_event(&event);
+        }
         on_event(event);
     }
 
@@ -2229,6 +2237,61 @@ mod tests {
                 "args": ["-Command", script]
             }),
         }
+    }
+
+    #[test]
+    fn text_deltas_are_delivered_but_not_persisted() {
+        let core = CoreService::in_memory().expect("in-memory core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "hello".to_owned(),
+                mode: None,
+                provider: None,
+                model: None,
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("session starts");
+        let agent = AgentService::new(&core);
+        let mut delivered = Vec::new();
+
+        agent.emit(
+            &mut |event| delivered.push(event),
+            SessionEvent::TextDelta {
+                session_id: session.id,
+                delta: "partial response".to_owned(),
+            },
+        );
+
+        assert!(matches!(
+            delivered.as_slice(),
+            [SessionEvent::TextDelta { .. }]
+        ));
+        assert!(
+            core.session_replay(session.id)
+                .expect("replay loads")
+                .events
+                .is_empty(),
+            "stream chunks must not be inserted into session_events"
+        );
+
+        agent.emit(
+            &mut |event| delivered.push(event),
+            SessionEvent::SessionCancelled {
+                session_id: session.id,
+                message: "cancelled".to_owned(),
+            },
+        );
+
+        let events = core
+            .session_replay(session.id)
+            .expect("replay loads")
+            .events;
+        assert!(
+            matches!(events.as_slice(), [event] if matches!(event.event, SessionEvent::SessionCancelled { .. }))
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod gitnexus;
 mod projects;
 mod workspace_tools;
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -17,9 +18,9 @@ use xcoding_core::CoreService;
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
     CreateProjectResult, ImportProjectParams, ImportProjectResult, ListModelsResult, PingResult,
-    ProjectDir, ProviderAuthStatus,
-    ResolveActionParams, ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult,
-    ReplaySessionResult, Session, SessionDetail, SetConfigParams, UserConfig, WorkspaceConfig,
+    ProjectDir, ProviderAuthStatus, ReplaySessionResult, ResolveActionParams, ResolveActionResult,
+    RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionDetail,
+    SetConfigParams, UserConfig, WorkspaceConfig,
 };
 use xcoding_providers::{
     apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models, load_user_config,
@@ -47,6 +48,52 @@ fn database_path() -> Result<PathBuf, String> {
 
 fn open_core(_app: &AppHandle) -> Result<CoreService, String> {
     CoreService::open(database_path()?).map_err(|error| error.to_string())
+}
+
+fn normalize_workspace_path(value: &str) -> String {
+    value
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches("//?/")
+        .trim_start_matches("//./")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn direct_project_root_key(workspace_home: &str, candidate: &str) -> Option<String> {
+    let home_key = normalize_workspace_path(workspace_home);
+    let candidate_key = normalize_workspace_path(candidate);
+    if home_key.is_empty() || candidate_key.is_empty() {
+        return None;
+    }
+    let relative = candidate_key.strip_prefix(&(home_key + "/"))?;
+    if relative.is_empty() || relative.contains('/') || relative.starts_with('.') {
+        return None;
+    }
+    Some(candidate_key)
+}
+
+fn missing_project_session_roots<'a>(
+    workspace_home: &str,
+    projects: &[ProjectDir],
+    session_roots: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let existing = projects
+        .iter()
+        .map(|project| normalize_workspace_path(&project.path))
+        .collect::<HashSet<_>>();
+    let mut missing = HashMap::<String, String>::new();
+    for root in session_roots {
+        let Some(key) = direct_project_root_key(workspace_home, root) else {
+            continue;
+        };
+        if !existing.contains(&key) {
+            missing.entry(key).or_insert_with(|| root.to_owned());
+        }
+    }
+    let mut roots = missing.into_values().collect::<Vec<_>>();
+    roots.sort_by_key(|root| normalize_workspace_path(root));
+    roots
 }
 
 /// CoreService holds a rusqlite Connection (!Send), so agent work cannot live in a
@@ -102,10 +149,24 @@ fn set_user_config(config: UserConfig) -> Result<UserConfig, String> {
     Ok(next)
 }
 
-
 #[tauri::command]
-fn list_projects(workspace_home: String) -> Result<Vec<ProjectDir>, String> {
-    projects::list_projects(&workspace_home)
+fn list_projects(app: AppHandle, workspace_home: String) -> Result<Vec<ProjectDir>, String> {
+    let projects = projects::list_projects(&workspace_home)?;
+    let core = open_core(&app)?;
+    let sessions = core
+        .list_sessions(None)
+        .map_err(|error| error.to_string())?;
+    for root in missing_project_session_roots(
+        &workspace_home,
+        &projects,
+        sessions
+            .iter()
+            .map(|session| session.workspace_root.as_str()),
+    ) {
+        core.delete_workspace_sessions(&root)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(projects)
 }
 
 #[tauri::command]
@@ -151,6 +212,13 @@ fn delete_session(app: AppHandle, session_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn delete_workspace_sessions(app: AppHandle, workspace_root: String) -> Result<usize, String> {
+    open_core(&app)?
+        .delete_workspace_sessions(&workspace_root)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn rename_session(app: AppHandle, session_id: String, title: String) -> Result<Session, String> {
     let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
     open_core(&app)?
@@ -178,16 +246,16 @@ fn set_workspace_config(
 #[tauri::command]
 fn session_detail(app: AppHandle, session_id: String) -> Result<SessionDetail, String> {
     let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
-    open_core(&app)
-        ?.session_detail(session_id)
+    open_core(&app)?
+        .session_detail(session_id)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn session_replay(app: AppHandle, session_id: String) -> Result<ReplaySessionResult, String> {
     let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
-    open_core(&app)
-        ?.session_replay(session_id)
+    open_core(&app)?
+        .session_replay(session_id)
         .map_err(|error| error.to_string())
 }
 
@@ -353,6 +421,7 @@ fn main() {
             ensure_chat_workspace,
             list_sessions,
             delete_session,
+            delete_workspace_sessions,
             rename_session,
             workspace_config,
             set_workspace_config,
@@ -399,5 +468,44 @@ fn main() {
             boot_log(&format!("tauri run failed: {error}"));
             panic!("failed to run XCoding Desktop: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{direct_project_root_key, missing_project_session_roots};
+    use xcoding_protocol::ProjectDir;
+
+    #[test]
+    fn recognizes_only_visible_direct_project_roots() {
+        assert_eq!(
+            direct_project_root_key("D:/WORK/Code", "d:\\work\\code\\Demo\\"),
+            Some("d:/work/code/demo".to_owned())
+        );
+        assert!(direct_project_root_key("D:/WORK/Code", "D:/WORK/Code/.xcoding-chat").is_none());
+        assert!(direct_project_root_key("D:/WORK/Code", "D:/WORK/Code/Demo/src").is_none());
+        assert!(direct_project_root_key("D:/WORK/Code", "D:/WORK/CodeElse/Demo").is_none());
+    }
+
+    #[test]
+    fn finds_deleted_project_sessions_without_touching_existing_or_chat_roots() {
+        let projects = vec![ProjectDir {
+            path: "D:/WORK/Code/Keep".to_owned(),
+            dir_name: "Keep".to_owned(),
+            title: "Keep".to_owned(),
+        }];
+        let roots = [
+            "D:/WORK/Code/Missing",
+            "d:\\work\\code\\missing\\",
+            "D:/WORK/Code/Keep",
+            "D:/WORK/Code/.xcoding-chat",
+            "D:/WORK/Code/Nested/src",
+            "D:/Other/Outside",
+        ];
+
+        assert_eq!(
+            missing_project_session_roots("D:/WORK/Code", &projects, roots),
+            vec!["D:/WORK/Code/Missing".to_owned()]
+        );
     }
 }

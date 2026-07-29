@@ -1278,6 +1278,8 @@ mod tests {
     }
     #[test]
     fn normalizes_resilience_settings_within_safe_bounds() {
+        assert_eq!(MAX_MAX_TOOL_ROUNDS, 1024);
+
         let normalized = normalize_user_config(UserConfig {
             max_provider_retries: MAX_MAX_PROVIDER_RETRIES + 1,
             max_tool_rounds: MAX_MAX_TOOL_ROUNDS + 1,

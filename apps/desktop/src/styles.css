@@ -454,6 +454,11 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 }
 .run-status-dots i:nth-child(2) { animation-delay: 120ms; }
 .run-status-dots i:nth-child(3) { animation-delay: 240ms; }
+.run-status-dots.failed {
+  border-color: #8a3d3d;
+  color: var(--danger);
+  font-weight: 700;
+}
 @keyframes run-status-pulse {
   0%, 70%, 100% { opacity: 0.35; transform: translateY(0); }
   35% { opacity: 1; transform: translateY(-0.12rem); }
@@ -1050,6 +1055,13 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 }
 .message-assistant.streaming {
   opacity: 0.95;
+}
+.message-completed-elapsed {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35rem;
+  margin: 0.1rem 0.15rem 0;
 }
 .message-meta {
   align-items: center;

@@ -59,6 +59,8 @@ async function main() {
   const configSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/config.ts"), "utf8");
   const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
   const appearanceSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/appearance.ts"), "utf8");
+  assert.ok(appSource.includes("const MAX_MAX_TOOL_ROUNDS = 1024;"), "tool-round settings should allow up to 1024 rounds");
+  assert.ok(appSource.includes("max={MAX_MAX_TOOL_ROUNDS}"), "tool-round input should use the configured upper bound");
   assert.ok(i18nSource.includes("export type Locale"), "i18n.ts missing Locale");
   assert.ok(i18nSource.includes("zh-CN"), "i18n.ts missing zh-CN");
   assert.ok(i18nSource.includes("export function t"), "i18n.ts missing t()");
@@ -224,6 +226,10 @@ async function main() {
   assert.ok(appSource.includes('id="composer-model"'), "Composer must retain the model selector");
   assert.ok(appSource.includes("pendingConversationScrollTopRef"), "App should retain the conversation scroll offset while settings are open");
   assert.ok(appSource.includes("function openSettings(): void"), "Settings navigation should capture the conversation scroll offset");
+  assert.ok(
+    appSource.includes("pendingConversationScrollToBottomRef.current = conversationAtBottomRef.current"),
+    "Settings navigation should preserve bottom-follow mode while the conversation is unmounted",
+  );
   assert.ok(appSource.includes("function returnToWorkbench(): void"), "Settings back navigation should restore the workbench view");
   assert.ok(appSource.includes("onClick={openSettings}"), "Sidebar settings entry should capture the conversation scroll offset");
   assert.ok(appSource.includes("node.scrollTop = Math.min(scrollTop, maxScrollTop)"), "Returning from settings should restore the prior conversation scroll offset");
