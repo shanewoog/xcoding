@@ -3214,6 +3214,7 @@ export function App() {
             >
               <option value="ask">{t(locale, "mode.ask")}</option>
               <option value="auto-edit">{t(locale, "mode.autoEdit")}</option>
+              <option value="full-auto">{t(locale, "mode.fullAuto")}</option>
             </select>
             <p className="mode-help">{modeHelpText(mode, locale)}</p>
             <label className="field-label" htmlFor="command-allowlist">{t(locale, "field.allowlist")}</label>
@@ -4000,6 +4001,7 @@ export function App() {
               >
                 <option value="ask">{t(locale, "mode.ask")}</option>
                 <option value="auto-edit">{t(locale, "mode.autoEdit")}</option>
+                <option value="full-auto">{t(locale, "mode.fullAuto")}</option>
               </select>
               <button
                 type="button"

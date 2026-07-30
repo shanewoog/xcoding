@@ -43,12 +43,12 @@ const optionNames = new Set([
   "--command-denylist",
 ]);
 
-type CliMode = "ask" | "auto-edit";
+type CliMode = "ask" | "auto-edit" | "full-auto";
 
 function parseModeOption(value: string | undefined): CliMode | undefined {
   if (value === undefined) return undefined;
-  if (value === "ask" || value === "auto-edit") return value;
-  throw new Error(`invalid mode: ${value} (expected ask or auto-edit)`);
+  if (value === "ask" || value === "auto-edit" || value === "full-auto") return value;
+  throw new Error(`invalid mode: ${value} (expected ask, auto-edit or full-auto)`);
 }
 
 function parseCommandAllowlistOption(value: string): string[] {
@@ -666,8 +666,8 @@ Usage:
   xcoding auth [--workspace <path>] [--server <path>]
   xcoding doctor [--workspace <path>] [--server <path>]
   xcoding config show [--workspace <path>]
-  xcoding config set [--workspace <path>] [--mode ask|auto-edit] [--provider openai] [--model <model>] [--command-allowlist <patterns>] [--command-denylist <patterns>]
-  xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit]
+  xcoding config set [--workspace <path>] [--mode ask|auto-edit|full-auto] [--provider openai] [--model <model>] [--command-allowlist <patterns>] [--command-denylist <patterns>]
+  xcoding session create [--workspace <path>] [--title <text>] [--mode ask|auto-edit|full-auto]
   xcoding session list [--workspace <path>]
   xcoding session show <session-id> [--workspace <path>]
   xcoding session replay <session-id> [--workspace <path>]
@@ -675,7 +675,7 @@ Usage:
   xcoding session reject <session-id> <action-id> [--workspace <path>]
   xcoding session rollback <session-id> <restore-point-id> [--workspace <path>]
   xcoding session cancel <session-id> [--workspace <path>]
-  xcoding chat "<message>" [--workspace <path>] [--session <id>] [--mode ask|auto-edit] [--provider openai] [--model <model>]
+  xcoding chat "<message>" [--workspace <path>] [--session <id>] [--mode ask|auto-edit|full-auto] [--provider openai] [--model <model>]
 
 Environment:
   OPENAI_API_KEY           API key for the OpenAI-compatible cloud provider
@@ -688,6 +688,7 @@ Dotenv:
 Mode policy:
   ask         Auto-apply ordinary workspace file patches; commands and high-risk writes need approval
   auto-edit   Auto-apply ordinary workspace file patches and allowlisted safe commands; high-risk and other commands need approval
+  full-auto   Approve everything automatically, including high-risk writes and arbitrary commands; network access and hard-denied destructive commands stay blocked
 
 Command allowlist:
   Workspace file .xcoding/command-allowlist extends the builtin auto-edit command allowlist.

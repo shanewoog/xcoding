@@ -34,7 +34,14 @@ export function formatMessageRole(role: MessageRole, locale: Locale = "en"): str
 }
 
 export function formatModeLabel(mode: Mode, locale: Locale = "en"): string {
-  return mode === "auto-edit" ? t(locale, "mode.autoEdit") : t(locale, "mode.ask");
+  switch (mode) {
+    case "full-auto":
+      return t(locale, "mode.fullAuto");
+    case "auto-edit":
+      return t(locale, "mode.autoEdit");
+    default:
+      return t(locale, "mode.ask");
+  }
 }
 
 export function formatRelativeTime(iso: string, nowMs: number = Date.now(), locale: Locale = "en"): string {

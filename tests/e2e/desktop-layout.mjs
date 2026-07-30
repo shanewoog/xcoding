@@ -30,7 +30,14 @@ function formatMessageRole(role) {
 }
 
 function formatModeLabel(mode) {
-  return mode === "auto-edit" ? "Auto edit" : "Ask";
+  switch (mode) {
+    case "full-auto":
+      return "Full auto";
+    case "auto-edit":
+      return "Auto edit";
+    default:
+      return "Ask";
+  }
 }
 
 function formatRelativeTime(iso, nowMs = Date.now()) {
@@ -227,6 +234,7 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
   assert.equal(formatMessageRole("assistant"), "Assistant");
   assert.equal(formatModeLabel("ask"), "Ask");
   assert.equal(formatModeLabel("auto-edit"), "Auto edit");
+  assert.equal(formatModeLabel("full-auto"), "Full auto");
   assert.equal(formatRelativeTime(new Date().toISOString()), "just now");
   assert.equal(
     sessionMetaLine({ mode: "ask", model: "gpt-5.5", updated_at: new Date().toISOString() }).includes("Ask"),

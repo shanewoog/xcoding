@@ -6,17 +6,29 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function modeHelpText(mode) {
-  return mode === "auto-edit"
-    ? "Auto edit applies ordinary workspace file patches and allowlisted safe commands automatically. High-risk writes and other commands still need approval."
-    : "Ask auto-applies ordinary workspace file patches. Commands and high-risk writes still need approval.";
+  switch (mode) {
+    case "full-auto":
+      return "Full auto approves every request automatically, including high-risk writes and arbitrary commands. Use it only in workspaces you fully trust. Network access and hard-denied destructive commands stay blocked.";
+    case "auto-edit":
+      return "Auto edit applies ordinary workspace file patches and allowlisted safe commands automatically. High-risk writes and other commands still need approval.";
+    default:
+      return "Ask auto-applies ordinary workspace file patches. Commands and high-risk writes still need approval.";
+  }
 }
 
 function formatModeOption(mode) {
-  return mode === "auto-edit" ? "Auto edit" : "Ask";
+  switch (mode) {
+    case "full-auto":
+      return "Full auto";
+    case "auto-edit":
+      return "Auto edit";
+    default:
+      return "Ask";
+  }
 }
 
 function isValidMode(value) {
-  return value === "ask" || value === "auto-edit";
+  return value === "ask" || value === "auto-edit" || value === "full-auto";
 }
 
 function buildDesktopDoctorChecks(input) {
@@ -320,13 +332,17 @@ async function main() {
 
   assert.equal(isValidMode("ask"), true);
   assert.equal(isValidMode("auto-edit"), true);
+  assert.equal(isValidMode("full-auto"), true);
   assert.equal(isValidMode("yolo"), false);
   assert.equal(formatModeOption("ask"), "Ask");
   assert.equal(formatModeOption("auto-edit"), "Auto edit");
+  assert.equal(formatModeOption("full-auto"), "Full auto");
   assert.match(modeHelpText("ask"), /ordinary workspace file patches/i);
   assert.match(modeHelpText("ask"), /Commands and high-risk writes still need approval/i);
   assert.match(modeHelpText("auto-edit"), /allowlisted safe commands/i);
   assert.match(modeHelpText("auto-edit"), /High-risk writes and other commands still need approval/i);
+  assert.match(modeHelpText("full-auto"), /approves every request automatically/i);
+  assert.match(modeHelpText("full-auto"), /Network access and hard-denied destructive commands stay blocked/i);
 
   const blocked = buildDesktopDoctorChecks({
     workspaceRoot: "",

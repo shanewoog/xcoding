@@ -174,6 +174,7 @@ impl RpcError {
 pub enum Mode {
     Ask,
     AutoEdit,
+    FullAuto,
 }
 
 impl Default for Mode {
@@ -1002,6 +1003,14 @@ mod tests {
         .expect("params parse");
 
         assert_eq!(params.mode, Mode::Ask);
+        assert_eq!(
+            serde_json::to_value(Mode::FullAuto).unwrap(),
+            serde_json::json!("full-auto")
+        );
+        assert_eq!(
+            serde_json::from_value::<Mode>(serde_json::json!("full-auto")).unwrap(),
+            Mode::FullAuto
+        );
         assert_eq!(params.provider, "openai");
         assert_eq!(params.model, "gpt-5.5");
     }

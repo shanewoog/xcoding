@@ -14,6 +14,7 @@ Covers:
 - read-only grounded answer
 - guarded write / reject / auto-edit command gate
 - dedicated auto-edit mode policy (`auto-edit-mode.mjs`: ask gate, auto write, command gate, high-risk path gate)
+- dedicated full-auto mode policy (`full-auto-mode.mjs`: high-risk path write and command run without approval)
 - running cancel
 - session replay steps
 - feature / bugfix / refactor write loops
@@ -40,6 +41,7 @@ Runs a short monorepo explanation chat against the configured OpenAI-compatible 
 | 4 | Behavior-preserving refactor | deterministic | automated |
 | 5 | ask mode confirms writes/exec | deterministic | automated (`auto-edit-mode.mjs` + guarded-write) |
 | 6 | auto-edit writes, still gates commands | deterministic | automated (`auto-edit-mode.mjs`) |
+| 6b | full-auto approves writes and commands | deterministic | automated (`full-auto-mode.mjs`) |
 | 7 | Rejected patch leaves workspace clean | deterministic | automated |
 | 8 | Cancel running task | deterministic | automated |
 | 9 | Replay session steps | deterministic | automated |

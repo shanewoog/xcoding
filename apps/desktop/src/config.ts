@@ -8,7 +8,14 @@ export type DesktopDoctorCheck = {
 };
 
 export function modeHelpText(mode: Mode, locale: Locale = "en"): string {
-  return mode === "auto-edit" ? t(locale, "mode.help.autoEdit") : t(locale, "mode.help.ask");
+  switch (mode) {
+    case "full-auto":
+      return t(locale, "mode.help.fullAuto");
+    case "auto-edit":
+      return t(locale, "mode.help.autoEdit");
+    default:
+      return t(locale, "mode.help.ask");
+  }
 }
 
 export function commandAllowlistHelpText(locale: Locale = "en"): string {
@@ -39,11 +46,18 @@ export function formatCommandDenylistText(patterns: string[] | undefined): strin
 }
 
 export function formatModeOption(mode: Mode, locale: Locale = "en"): string {
-  return mode === "auto-edit" ? t(locale, "mode.autoEdit") : t(locale, "mode.ask");
+  switch (mode) {
+    case "full-auto":
+      return t(locale, "mode.fullAuto");
+    case "auto-edit":
+      return t(locale, "mode.autoEdit");
+    default:
+      return t(locale, "mode.ask");
+  }
 }
 
 export function isValidMode(value: string): value is Mode {
-  return value === "ask" || value === "auto-edit";
+  return value === "ask" || value === "auto-edit" || value === "full-auto";
 }
 
 export function buildDesktopDoctorChecks(input: {

@@ -95,12 +95,19 @@ pub fn evaluate(mode: &Mode, kind: PermissionKind, high_risk: bool) -> Permissio
 /// workspace root. Paths outside the workspace remain rejected by the tools layer.
 /// High-risk writes (git mutations, `.git` / `.xcoding` paths) still need approval.
 /// `command_allowlisted` only affects `PermissionKind::Exec` under `auto-edit`.
+///
+/// Under `full-auto` every write and command that reached this function is allowed
+/// without approval. Hard-denied commands are rejected earlier by [`assess_command`],
+/// and `PermissionKind::Network` stays denied in every mode.
 pub fn evaluate_detailed(
     mode: &Mode,
     kind: PermissionKind,
     high_risk: bool,
     command_allowlisted: bool,
 ) -> PermissionDecision {
+    if matches!(mode, Mode::FullAuto) && !matches!(kind, PermissionKind::Network) {
+        return PermissionDecision::Allow;
+    }
     match kind {
         PermissionKind::Read => PermissionDecision::Allow,
         PermissionKind::Network => PermissionDecision::Deny,
@@ -860,6 +867,53 @@ mod tests {
         let parsed = parse_command_denylist("# x\npowershell\ngit:push\n");
         assert_eq!(parsed, vec!["powershell".to_owned(), "git:push".to_owned()]);
         assert!(normalize_denylist_pattern("bash").is_ok());
+    }
+
+    #[test]
+    fn full_auto_allows_high_risk_writes_and_commands() {
+        assert_eq!(
+            evaluate(&Mode::FullAuto, PermissionKind::Write, false),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            evaluate(&Mode::FullAuto, PermissionKind::Write, true),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            evaluate_detailed(&Mode::FullAuto, PermissionKind::Exec, false, false),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            evaluate_detailed(&Mode::FullAuto, PermissionKind::Exec, true, false),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            evaluate(&Mode::FullAuto, PermissionKind::Read, false),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn full_auto_still_denies_network_and_hard_denied_commands() {
+        assert_eq!(
+            evaluate(&Mode::FullAuto, PermissionKind::Network, false),
+            PermissionDecision::Deny
+        );
+        for (exe, args) in [
+            ("format", vec!["C:".to_owned()]),
+            ("git", vec!["clean".to_owned(), "-fdx".to_owned()]),
+            (
+                "git",
+                vec!["push".to_owned(), "--mirror".to_owned()],
+            ),
+        ] {
+            let assessment = assess_command(exe, &args);
+            assert_eq!(
+                assessment.decision,
+                PermissionDecision::Deny,
+                "{exe} should stay hard-denied"
+            );
+        }
     }
 
     #[test]

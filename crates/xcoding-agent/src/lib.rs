@@ -629,6 +629,7 @@ impl<'a> AgentService<'a> {
         let mode_label = match session.mode {
             xcoding_protocol::Mode::Ask => "ask",
             xcoding_protocol::Mode::AutoEdit => "auto-edit",
+            xcoding_protocol::Mode::FullAuto => "full-auto",
         };
         let mut system_prompt = context.system_prompt(mode_label);
         append_mcp_catalog(&mut system_prompt, &mcp);
@@ -1546,8 +1547,10 @@ fn tool_start_summary(
             format!("Auto-applying {name}")
         }
         PermissionDecision::Allow
-            if matches!(mode, xcoding_protocol::Mode::AutoEdit)
-                && matches!(kind, PermissionKind::Exec) =>
+            if matches!(
+                mode,
+                xcoding_protocol::Mode::AutoEdit | xcoding_protocol::Mode::FullAuto
+            ) && matches!(kind, PermissionKind::Exec) =>
         {
             format!("Auto-running {name}")
         }

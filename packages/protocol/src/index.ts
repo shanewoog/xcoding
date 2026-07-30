@@ -1,6 +1,6 @@
 export const JSON_RPC_VERSION = "2.0" as const;
 
-export type Mode = "ask" | "auto-edit";
+export type Mode = "ask" | "auto-edit" | "full-auto";
 export type SessionStatus =
   | "created"
   | "running"
