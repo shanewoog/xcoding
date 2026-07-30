@@ -125,6 +125,7 @@ async function main() {
       "git_push",
       "git_fetch",
       "git_pull",
+      "browser_state",
     ]) {
       assert.ok(tools.includes(name), `expected tool definition ${name}`);
     }

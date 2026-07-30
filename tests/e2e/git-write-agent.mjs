@@ -146,6 +146,7 @@ async function main() {
         "git_push",
         "git_fetch",
         "git_pull",
+        "browser_state",
       ],
     );
 

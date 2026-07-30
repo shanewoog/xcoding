@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,6 +7,7 @@ use tauri::{
   AppHandle, Emitter, Manager, LogicalPosition, LogicalSize, Url, Webview, WebviewUrl,
   webview::{PageLoadEvent, WebviewBuilder},
 };
+use xcoding_providers::user_config_dir;
 
 const SIDE_BROWSER_LABEL: &str = "side-browser";
 
@@ -53,7 +55,76 @@ fn set_bounds(webview: &Webview, x: f64, y: f64, width: f64, height: f64) -> Res
   Ok(())
 }
 
+fn browser_state_path() -> PathBuf {
+  if let Ok(path) = std::env::var("XCODING_BROWSER_STATE_PATH") {
+    let trimmed = path.trim();
+    if !trimmed.is_empty() {
+      return PathBuf::from(trimmed);
+    }
+  }
+  user_config_dir().join("browser-state.json")
+}
+
+fn persist_browser_state(available: bool, url: &str, title: &str, visible: bool) {
+  let path = browser_state_path();
+  if let Some(parent) = path.parent() {
+    let _ = std::fs::create_dir_all(parent);
+  }
+  let updated_at = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|duration| duration.as_millis())
+    .unwrap_or(0);
+  let payload = json!({
+    "available": available,
+    "url": url,
+    "title": title,
+    "visible": visible,
+    "updated_at": updated_at,
+  });
+  let Ok(raw) = serde_json::to_string_pretty(&payload) else {
+    return;
+  };
+  let tmp = path.with_extension("json.tmp");
+  if std::fs::write(&tmp, raw).is_err() {
+    return;
+  }
+  if std::fs::rename(&tmp, &path).is_err() {
+    let _ = std::fs::copy(&tmp, &path);
+    let _ = std::fs::remove_file(&tmp);
+  }
+}
+
+fn persist_browser_visibility(app: &AppHandle, visible: bool) {
+  let Some(webview) = side_browser(app) else {
+    persist_browser_state(false, "", "", false);
+    return;
+  };
+  let url = webview
+    .url()
+    .map(|value| value.to_string())
+    .unwrap_or_default();
+  // Keep the last known title from the snapshot when only visibility changes.
+  let title = std::fs::read_to_string(browser_state_path())
+    .ok()
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .and_then(|value| {
+      value
+        .get("title")
+        .and_then(|item| item.as_str())
+        .map(str::to_owned)
+    })
+    .unwrap_or_default();
+  persist_browser_state(true, &url, &title, visible);
+}
+
 fn emit_navigated(app: &AppHandle, url: String, title: String) {
+  // Webview has no is_visible(); keep the last visibility bit, default shown.
+  let visible = std::fs::read_to_string(browser_state_path())
+    .ok()
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .and_then(|value| value.get("visible").and_then(|item| item.as_bool()))
+    .unwrap_or(true);
+  persist_browser_state(true, &url, &title, visible);
   let _ = app.emit(
     "browser-navigated",
     BrowserNavigatedPayload { url, title },
@@ -121,8 +192,10 @@ fn create_side_browser(
     .map_err(map_err)?;
   if url.trim().is_empty() || url.trim().eq_ignore_ascii_case("about:blank") {
     let _ = webview.hide();
+    persist_browser_state(true, "about:blank", "", false);
   } else {
     let _ = webview.show();
+    persist_browser_state(true, url, "", true);
   }
   Ok(())
 }
@@ -259,7 +332,9 @@ pub async fn browser_show(app: AppHandle) -> Result<(), String> {
   let Some(webview) = side_browser(&app) else {
     return Ok(());
   };
-  webview.show().map_err(map_err)
+  webview.show().map_err(map_err)?;
+  persist_browser_visibility(&app, true);
+  Ok(())
 }
 
 #[tauri::command]
@@ -267,7 +342,9 @@ pub async fn browser_hide(app: AppHandle) -> Result<(), String> {
   let Some(webview) = side_browser(&app) else {
     return Ok(());
   };
-  webview.hide().map_err(map_err)
+  webview.hide().map_err(map_err)?;
+  persist_browser_visibility(&app, false);
+  Ok(())
 }
 
 #[tauri::command]
@@ -275,7 +352,9 @@ pub async fn browser_close(app: AppHandle) -> Result<(), String> {
   let Some(webview) = side_browser(&app) else {
     return Ok(());
   };
-  webview.close().map_err(map_err)
+  webview.close().map_err(map_err)?;
+  persist_browser_state(false, "", "", false);
+  Ok(())
 }
 
 #[tauri::command]

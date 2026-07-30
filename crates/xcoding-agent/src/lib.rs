@@ -1822,6 +1822,11 @@ fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             description: "Pull a branch from a remote. Always requires approval. Defaults to --ff-only; when ff_only is false uses --no-rebase only. Never force or rebase.".to_owned(),
             parameters: json!({ "type": "object", "properties": { "remote": { "type": "string", "description": "Remote name; defaults to origin" }, "branch": { "type": "string", "description": "Branch to pull; defaults to the current branch" }, "ff_only": { "type": "boolean", "description": "Use --ff-only (default true). When false, use --no-rebase merge pull." } } }),
         },
+        ToolDefinition {
+            name: "browser_state".to_owned(),
+            description: "Read the desktop embedded side-browser snapshot (url, title, visibility). Use this instead of probing with run_command. Returns available=false when no side browser is open.".to_owned(),
+            parameters: json!({ "type": "object", "properties": {} }),
+        },
     ]
 }
 
@@ -2505,7 +2510,8 @@ mod tests {
                 "git_commit",
                 "git_push",
                 "git_fetch",
-                "git_pull"
+                "git_pull",
+                "browser_state"
             ]
         );
     }

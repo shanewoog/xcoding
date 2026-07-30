@@ -2,6 +2,7 @@
 
 use std::{
     collections::VecDeque,
+    env,
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -396,7 +397,8 @@ impl ToolRegistry {
             | ToolName::GitStatus
             | ToolName::GitDiff
             | ToolName::GitLog
-            | ToolName::GitShow => Ok((PermissionKind::Read, false, false)),
+            | ToolName::GitShow
+            | ToolName::BrowserState => Ok((PermissionKind::Read, false, false)),
             ToolName::GitAdd
             | ToolName::GitCommit
             | ToolName::GitPush
@@ -488,6 +490,7 @@ impl ToolRegistry {
             ToolName::GitPush => self.git_push(parse_arguments(&tool_call.arguments)?),
             ToolName::GitFetch => self.git_fetch(parse_arguments(&tool_call.arguments)?),
             ToolName::GitPull => self.git_pull(parse_arguments(&tool_call.arguments)?),
+            ToolName::BrowserState => self.browser_state(),
             ToolName::Mcp => Err(ToolError::InvalidArguments(
                 "MCP tools must be executed by the agent MCP runtime".to_owned(),
             )),
@@ -518,6 +521,65 @@ impl ToolRegistry {
         Ok(ToolExecution {
             output: json!({ "path": relative_path, "changed": true, "rolled_back": true }),
             summary: format!("Restored {relative_path}"),
+        })
+    }
+
+    fn browser_state(&self) -> Result<ToolExecution, ToolError> {
+        let path = browser_state_path();
+        let missing = json!({ "available": false });
+        let Ok(raw) = fs::read_to_string(&path) else {
+            return Ok(ToolExecution {
+                output: missing,
+                summary: "Embedded browser is not available".to_owned(),
+            });
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            return Ok(ToolExecution {
+                output: missing,
+                summary: "Embedded browser is not available".to_owned(),
+            });
+        };
+        let available = value
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !available {
+            return Ok(ToolExecution {
+                output: json!({ "available": false }),
+                summary: "Embedded browser is not available".to_owned(),
+            });
+        }
+        let url = value
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let title = value
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let visible = value
+            .get("visible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let updated_at = value.get("updated_at").cloned().unwrap_or(Value::Null);
+        let summary = if url.trim().is_empty() {
+            "Embedded browser is available".to_owned()
+        } else if title.trim().is_empty() {
+            format!("Embedded browser at {url}")
+        } else {
+            format!("Embedded browser at {url} ({title})")
+        };
+        Ok(ToolExecution {
+            output: json!({
+                "available": true,
+                "url": url,
+                "title": title,
+                "visible": visible,
+                "updated_at": updated_at,
+            }),
+            summary,
         })
     }
 
@@ -2057,6 +2119,34 @@ fn path_rank_score(relative_path: &str) -> i32 {
     score
 }
 
+fn user_config_dir() -> PathBuf {
+    if let Ok(home) = env::var("USERPROFILE") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join(".xcoding");
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join(".xcoding");
+        }
+    }
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".xcoding")
+}
+
+fn browser_state_path() -> PathBuf {
+    if let Ok(path) = env::var("XCODING_BROWSER_STATE_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    user_config_dir().join("browser-state.json")
+}
+
 fn path_matches_glob(relative_path: &str, pattern: &str, case_insensitive: bool) -> bool {
     let path = relative_path.replace('\\', "/");
     let pattern = pattern.replace('\\', "/");
@@ -3391,5 +3481,39 @@ mod tests {
         assert_eq!(preview.path.replace('\\', "/"), "nested/missing/new.txt");
         assert!(!preview.file_existed);
         assert_eq!(preview.new_text, "created\n");
+    }
+
+    #[test]
+    fn reads_browser_state_snapshot_as_read_only_tool() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let state_path = root.join("browser-state.json");
+        fs::write(
+            &state_path,
+            r#"{"available":true,"url":"https://example.test/docs","title":"Docs","visible":true,"updated_at":123}"#,
+        )
+        .expect("state write");
+        // SAFETY: test-only path override for deterministic browser_state reads.
+        unsafe {
+            env::set_var("XCODING_BROWSER_STATE_PATH", &state_path);
+        }
+        let loaded = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "browser_1".to_owned(),
+                    name: ToolName::BrowserState,
+                    arguments: json!({}),
+                },
+            )
+            .expect("browser state loads");
+        unsafe {
+            env::remove_var("XCODING_BROWSER_STATE_PATH");
+        }
+        assert_eq!(loaded.output["available"], true);
+        assert_eq!(loaded.output["url"], "https://example.test/docs");
+        assert_eq!(loaded.output["title"], "Docs");
+        assert_eq!(loaded.output["visible"], true);
+        assert!(loaded.summary.contains("example.test/docs"));
     }
 }

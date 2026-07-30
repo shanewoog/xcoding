@@ -68,6 +68,33 @@ function hasTraceContent(input) {
   );
 }
 
+const DRAFT_SESSION_KEY = "__draft__";
+
+function sessionStateKey(sessionId) {
+  const trimmed = sessionId?.trim();
+  return trimmed ? trimmed : DRAFT_SESSION_KEY;
+}
+
+function rightPanelStateFor(sessionId, openBySession, tabBySession, defaultTab) {
+  const key = sessionStateKey(sessionId);
+  return { open: openBySession[key] === true, tab: tabBySession[key] ?? defaultTab };
+}
+
+function dropSessionKey(map, sessionId) {
+  const key = sessionStateKey(sessionId);
+  if (!(key in map)) return map;
+  const { [key]: _removed, ...rest } = map;
+  return rest;
+}
+
+function adoptDraftSessionKey(map, sessionId) {
+  const key = sessionStateKey(sessionId);
+  if (key === DRAFT_SESSION_KEY || !(DRAFT_SESSION_KEY in map)) return map;
+  const { [DRAFT_SESSION_KEY]: draft, ...rest } = map;
+  if (key in rest) return rest;
+  return { ...rest, [key]: draft };
+}
+
 async function main() {
   const appSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8");
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
@@ -85,6 +112,10 @@ const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/works
     "export function formatRelativeTime",
     "export function sessionMetaLine",
     "export function hasTraceContent",
+    "export function sessionStateKey",
+    "export function rightPanelStateFor",
+    "export function dropSessionKey",
+    "export function adoptDraftSessionKey",
   ]) {
     assert.ok(layoutSource.includes(needle), "layout.ts missing " + needle);
   }
@@ -228,6 +259,34 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
   assert.ok(!/onClick=\{\(\) => startNewChat\(\)\}[^>]*disabled=\{isRunning\}/.test(appSource), "New chat must remain available while sessions run");
   assert.ok(cssSource.includes(".send-needs-setup"), "styles.css missing .send-needs-setup");
 
+  // Right tools panel must follow the task it was opened in.
+  assert.ok(
+    appSource.includes("rightPanelOpenBySession") && appSource.includes("rightPanelTabBySession"),
+    "App.tsx should track right panel state per session",
+  );
+  assert.ok(
+    !appSource.includes("useState<ToolPanelTab>(\"review\")"),
+    "App.tsx should not keep a single global right panel tab",
+  );
+  assert.ok(appSource.includes("rightPanelStateFor<ToolPanelTab>"), "App.tsx should derive right panel state per session");
+  assert.ok(
+    appSource.includes("sessionStateKey(activeSessionIdRef.current)"),
+    "right panel writers must key off the session currently in view",
+  );
+  assert.ok(appSource.includes("adoptDraftRightPanelState"), "draft right panel state must migrate to the created session");
+  assert.ok(
+    appSource.includes("dropSessionKey(current, sessionId)"),
+    "deleting a session must drop its right panel state",
+  );
+  assert.ok(
+    appSource.includes("key={sessionStateKey(activeSessionId)}"),
+    "RightToolsPanel must remount per session so the embedded browser cannot leak another task's page",
+  );
+  assert.ok(
+    appSource.includes("browserNavigationBySession") && !appSource.includes("setBrowserNavigation("),
+    "assistant link navigation must be tracked per session",
+  );
+
   assert.equal(formatSessionStatus("need_user"), "needs review");
   assert.equal(formatSessionStatus("running"), "running");
   assert.equal(formatMessageRole("user"), "You");
@@ -262,6 +321,24 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
     }),
     true,
   );
+
+  assert.equal(sessionStateKey(null), DRAFT_SESSION_KEY);
+  assert.equal(sessionStateKey("  "), DRAFT_SESSION_KEY);
+  assert.equal(sessionStateKey("s1"), "s1");
+  assert.deepEqual(rightPanelStateFor("s1", {}, {}, "review"), { open: false, tab: "review" });
+  assert.deepEqual(
+    rightPanelStateFor("s1", { s1: true }, { s1: "browser" }, "review"),
+    { open: true, tab: "browser" },
+  );
+  // Another session's open panel must not leak into the active one.
+  assert.deepEqual(
+    rightPanelStateFor("s2", { s1: true }, { s1: "browser" }, "review"),
+    { open: false, tab: "review" },
+  );
+  assert.deepEqual(dropSessionKey({ s1: true, s2: true }, "s1"), { s2: true });
+  assert.deepEqual(adoptDraftSessionKey({ [DRAFT_SESSION_KEY]: true }, "s1"), { s1: true });
+  assert.deepEqual(adoptDraftSessionKey({ [DRAFT_SESSION_KEY]: true, s1: false }, "s1"), { s1: false });
+  assert.deepEqual(adoptDraftSessionKey({ s1: true }, "s1"), { s1: true });
 
   console.log("Desktop layout UX checks passed.");
 }

@@ -117,3 +117,37 @@ export function saveRightPanelWidth(width: number): void {
     // ignore storage failures
   }
 }
+
+// Right-panel state is tracked per session so the tools panel follows the task
+// it was opened in. The composer draft (no session yet) uses a reserved key.
+export const DRAFT_SESSION_KEY = "__draft__";
+
+export function sessionStateKey(sessionId: string | null): string {
+  const trimmed = sessionId?.trim();
+  return trimmed ? trimmed : DRAFT_SESSION_KEY;
+}
+
+export function rightPanelStateFor<Tab extends string>(
+  sessionId: string | null,
+  openBySession: Record<string, boolean>,
+  tabBySession: Record<string, Tab>,
+  defaultTab: Tab,
+): { open: boolean; tab: Tab } {
+  const key = sessionStateKey(sessionId);
+  return { open: openBySession[key] === true, tab: tabBySession[key] ?? defaultTab };
+}
+
+export function dropSessionKey<T>(map: Record<string, T>, sessionId: string): Record<string, T> {
+  const key = sessionStateKey(sessionId);
+  if (!(key in map)) return map;
+  const { [key]: _removed, ...rest } = map;
+  return rest;
+}
+
+export function adoptDraftSessionKey<T>(map: Record<string, T>, sessionId: string): Record<string, T> {
+  const key = sessionStateKey(sessionId);
+  if (key === DRAFT_SESSION_KEY || !(DRAFT_SESSION_KEY in map)) return map;
+  const { [DRAFT_SESSION_KEY]: draft, ...rest } = map;
+  if (key in rest) return rest;
+  return { ...rest, [key]: draft };
+}

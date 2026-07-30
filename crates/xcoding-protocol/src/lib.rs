@@ -231,6 +231,8 @@ pub enum ToolName {
     GitPush,
     GitFetch,
     GitPull,
+    /// Read the desktop side-browser URL/title/visibility snapshot.
+    BrowserState,
     /// External MCP tool (`mcp__server__tool` at the provider layer).
     Mcp,
 }
@@ -253,6 +255,7 @@ impl ToolName {
             Self::GitPush => "git_push",
             Self::GitFetch => "git_fetch",
             Self::GitPull => "git_pull",
+            Self::BrowserState => "browser_state",
             Self::Mcp => "mcp",
         }
     }

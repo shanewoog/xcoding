@@ -27,6 +27,7 @@ const EXPECTED_TOOLS = [
   "git_push",
   "git_fetch",
   "git_pull",
+  "browser_state",
 ];
 
 async function main() {

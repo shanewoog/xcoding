@@ -47,11 +47,15 @@ import {
   formatCommandDenylistText,
 } from "./config";
 import {
+  adoptDraftSessionKey,
   clampRightPanelWidth,
+  dropSessionKey,
   formatSessionStatus,
   loadRightPanelWidth,
+  rightPanelStateFor,
   saveRightPanelWidth,
   sessionMetaLine,
+  sessionStateKey,
 } from "./layout";
 import { applyUiFontSize, loadUiFontSize, saveUiFontSize } from "./appearance";
 import { isLocale, loadLocale, saveLocale, t, type Locale } from "./i18n";
@@ -777,9 +781,10 @@ export function App() {
   const pendingConversationScrollToBottomRef = useRef(false);
   const envButtonRef = useRef<HTMLButtonElement | null>(null);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(false);
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [rightPanelTab, setRightPanelTab] = useState<ToolPanelTab>("review");
-  const [browserNavigation, setBrowserNavigation] = useState<BrowserNavigationRequest | null>(null);
+  // Right panel state is per session: the tools panel follows the task it was opened in.
+  const [rightPanelOpenBySession, setRightPanelOpenBySession] = useState<Record<string, boolean>>({});
+  const [rightPanelTabBySession, setRightPanelTabBySession] = useState<Record<string, ToolPanelTab>>({});
+  const [browserNavigationBySession, setBrowserNavigationBySession] = useState<Record<string, BrowserNavigationRequest>>({});
   const [rightPanelWidth, setRightPanelWidth] = useState(() => loadRightPanelWidth());
   const [envPopoverOpen, setEnvPopoverOpen] = useState(false);
   const [contextUsageOpen, setContextUsageOpen] = useState(false);
@@ -823,6 +828,13 @@ export function App() {
   const runStatus = activeSessionId
     ? (runStatusBySession[activeSessionId] ?? null)
     : draftRunStatus;
+  const { open: rightPanelOpen, tab: rightPanelTab } = rightPanelStateFor<ToolPanelTab>(
+    activeSessionId,
+    rightPanelOpenBySession,
+    rightPanelTabBySession,
+    "review",
+  );
+  const browserNavigation = browserNavigationBySession[sessionStateKey(activeSessionId)] ?? null;
   const completedRunElapsed = useMemo(
     () => completedRunElapsedByMessageId(messages),
     [messages],
@@ -1452,6 +1464,7 @@ export function App() {
       // Never steal focus from another parallel session the user is viewing.
       if (!activeSessionIdRef.current) {
         setActiveSessionId(sid);
+        adoptDraftRightPanelState(sid);
       }
 
       if (payload.type === "text_delta") {
@@ -1675,14 +1688,32 @@ export function App() {
     }
   }
 
+  function setRightPanelState(open: boolean, tab?: ToolPanelTab): void {
+    // Read the ref so callbacks registered once (shortcuts) still target the visible session.
+    const key = sessionStateKey(activeSessionIdRef.current);
+    setRightPanelOpenBySession((current) => ({ ...current, [key]: open }));
+    if (tab) {
+      setRightPanelTabBySession((current) => ({ ...current, [key]: tab }));
+    }
+  }
+
+  function adoptDraftRightPanelState(sessionId: string): void {
+    setRightPanelOpenBySession((current) => adoptDraftSessionKey(current, sessionId));
+    setRightPanelTabBySession((current) => adoptDraftSessionKey(current, sessionId));
+    setBrowserNavigationBySession((current) => adoptDraftSessionKey(current, sessionId));
+  }
+
   function openRightPanel(tab: ToolPanelTab): void {
-    setRightPanelTab(tab);
-    setRightPanelOpen(true);
+    setRightPanelState(true, tab);
     setEnvPopoverOpen(false);
   }
 
   function openAssistantLink(url: string): void {
-    setBrowserNavigation((current) => ({ url, id: (current?.id ?? 0) + 1 }));
+    const key = sessionStateKey(activeSessionIdRef.current);
+    setBrowserNavigationBySession((current) => ({
+      ...current,
+      [key]: { url, id: (current[key]?.id ?? 0) + 1 },
+    }));
     openRightPanel("browser");
   }
 
@@ -1699,7 +1730,8 @@ export function App() {
   }
 
   function toggleRightPanel(): void {
-    setRightPanelOpen((current) => !current);
+    const key = sessionStateKey(activeSessionIdRef.current);
+    setRightPanelOpenBySession((current) => ({ ...current, [key]: current[key] !== true }));
   }
 
   function resetComposerSession(): void {
@@ -1859,6 +1891,9 @@ export function App() {
     try {
       await invoke("delete_session", { sessionId });
       setSessions((current) => current.filter((session) => session.id !== sessionId));
+      setRightPanelOpenBySession((current) => dropSessionKey(current, sessionId));
+      setRightPanelTabBySession((current) => dropSessionKey(current, sessionId));
+      setBrowserNavigationBySession((current) => dropSessionKey(current, sessionId));
       if (activeSessionId === sessionId) {
         resetComposerSession();
       }
@@ -2143,6 +2178,7 @@ export function App() {
             // or already viewing this session. Never steal focus from another parallel task.
             if (!activeSessionIdRef.current || activeSessionIdRef.current === result.session.id) {
               setActiveSessionId(result.session.id);
+              adoptDraftRightPanelState(result.session.id);
               const completedMessage = result.message;
               if (completedMessage?.content.trim()) {
                 setMessages((current) => mergeMessage(current, completedMessage));
@@ -4069,12 +4105,14 @@ export function App() {
       </section>
 
       <RightToolsPanel
+        // Remount per session so the embedded browser never shows another task's page.
+        key={sessionStateKey(activeSessionId)}
         locale={locale}
         open={rightPanelOpen}
         tab={rightPanelTab}
         browserNavigation={browserNavigation}
-        onTabChange={setRightPanelTab}
-        onClose={() => setRightPanelOpen(false)}
+        onTabChange={(next) => setRightPanelState(true, next)}
+        onClose={() => setRightPanelState(false)}
         workspaceRoot={workspaceRoot}
         width={rightPanelWidth}
         onWidthChange={(next) => {
