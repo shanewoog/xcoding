@@ -1,6 +1,8 @@
 //! Cloud-model adapters for OpenAI-compatible streaming chat completions.
 
 use std::{collections::BTreeMap, env, fs, path::PathBuf, pin::Pin, time::Duration};
+use std::io::Write;
+use std::path::Path;
 
 use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
@@ -1260,10 +1262,42 @@ pub fn load_user_config() -> UserConfig {
 pub fn save_user_config(config: &UserConfig) -> Result<(), String> {
     let normalized = normalize_user_config(config.clone());
     let dir = user_config_dir();
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join("config.json");
     let body = serde_json::to_string_pretty(&normalized).map_err(|error| error.to_string())?;
-    fs::write(&path, format!("{body}\n")).map_err(|error| error.to_string())?;
+    write_text_utf8(&path, &format!("{body}\n")).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn temporary_sibling(path: &Path) -> PathBuf {
+    match path.file_name().and_then(|value| value.to_str()) {
+        Some(file_name) => path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(".{file_name}.xcoding.tmp")),
+        None => path.with_extension("xcoding.tmp"),
+    }
+}
+
+fn write_text_utf8(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = temporary_sibling(path);
+    {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_data()?;
+    }
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
     Ok(())
 }
 

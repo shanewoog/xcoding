@@ -57,12 +57,16 @@ export interface ListModelsResult {
 }
 
 /** One OpenAI-compatible cloud provider endpoint in Desktop settings. */
+export type ProviderWireApi = "chat_completions" | "responses";
+
 export interface CloudProviderConfig {
   id: string;
   /** Display name shown in the Desktop provider manager. */
   name: string;
   /** OpenAI-compatible API host without a trailing /v1 suffix. */
   base_url: string;
+  /** HTTP request/stream protocol used by this provider. */
+  wire_api?: ProviderWireApi;
   /** Full API key when configured. Never log this value. */
   api_key?: string;
 }
@@ -78,6 +82,8 @@ export interface UserConfig {
   reasoning_effort?: string;
   /** Retries after the initial failed request for one provider before XCoding tries a backup provider. */
   max_provider_retries?: number;
+  /** Whether XCoding may switch to another configured provider after the active provider fails. */
+  provider_fallback_enabled?: boolean;
   /** Maximum model/tool interaction rounds for one user turn before the agent stops. */
   max_tool_rounds?: number;
   /** Consecutive failed turns that open a provider circuit. */

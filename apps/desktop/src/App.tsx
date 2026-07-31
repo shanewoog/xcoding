@@ -180,6 +180,7 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
       id: item.id.trim() || `provider-${index + 1}`,
       name: item.name?.trim() || `Provider ${index + 1}`,
       base_url: normalizeProviderBaseUrl(item.base_url) || DEFAULT_PROVIDER_BASE_URL,
+      wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
       api_key: item.api_key || undefined,
     }));
   const providers = configured.length > 0
@@ -188,6 +189,7 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
         id: "default",
         name: defaultProvider,
         base_url: normalizeProviderBaseUrl(config.base_url) || DEFAULT_PROVIDER_BASE_URL,
+        wire_api: "chat_completions" as const,
         api_key: config.api_key || undefined,
       }];
   const activeProviderId = providers.some((item) => item.id === config.active_provider_id)
@@ -706,6 +708,7 @@ export function App() {
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
   const [maxProviderRetries, setMaxProviderRetries] = useState(DEFAULT_MAX_PROVIDER_RETRIES);
+  const [providerFallbackEnabled, setProviderFallbackEnabled] = useState(true);
   const [maxToolRounds, setMaxToolRounds] = useState(DEFAULT_MAX_TOOL_ROUNDS);
   const [circuitFailureThreshold, setCircuitFailureThreshold] = useState(DEFAULT_CIRCUIT_FAILURE_THRESHOLD);
   const [streamFirstEventTimeoutSecs, setStreamFirstEventTimeoutSecs] = useState(DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS);
@@ -768,7 +771,7 @@ export function App() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [view, setView] = useState<"workbench" | "settings" | "model-logs">("workbench");
   const [providers, setProviders] = useState<CloudProviderConfig[]>([
-    { id: "default", name: defaultProvider, base_url: DEFAULT_PROVIDER_BASE_URL },
+    { id: "default", name: defaultProvider, base_url: DEFAULT_PROVIDER_BASE_URL, wire_api: "chat_completions" },
   ]);
   const [activeProviderId, setActiveProviderId] = useState("default");
   const [selectedProviderId, setSelectedProviderId] = useState("default");
@@ -862,7 +865,7 @@ export function App() {
     const id = providerId();
     setProviders((current) => [
       ...current,
-      { id, name: `Provider ${current.length + 1}`, base_url: DEFAULT_PROVIDER_BASE_URL },
+      { id, name: `Provider ${current.length + 1}`, base_url: DEFAULT_PROVIDER_BASE_URL, wire_api: "chat_completions" },
     ]);
     setSelectedProviderId(id);
   }
@@ -1028,6 +1031,7 @@ export function App() {
         setModel((config.model || "").trim());
         setReasoningEffort(normalizeReasoningEffort(config.reasoning_effort));
         setMaxProviderRetries(normalizeBoundedInteger(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
+        setProviderFallbackEnabled(config.provider_fallback_enabled !== false);
         setMaxToolRounds(normalizeBoundedInteger(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
         setCircuitFailureThreshold(normalizeBoundedInteger(config.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
         setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(config.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
@@ -2734,6 +2738,7 @@ export function App() {
         ...item,
         name: item.name.trim() || "Provider",
         base_url: normalizeProviderBaseUrl(item.base_url) || DEFAULT_PROVIDER_BASE_URL,
+        wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
         api_key: item.api_key?.trim() || undefined,
       }));
       const selectedProvider = normalizedProviders.find((item) => item.id === activeProviderId) ?? normalizedProviders[0];
@@ -2749,6 +2754,7 @@ export function App() {
           model: model.trim(),
           reasoning_effort: reasoningEffort,
           max_provider_retries: normalizeBoundedInteger(maxProviderRetries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES),
+          provider_fallback_enabled: providerFallbackEnabled,
           max_tool_rounds: normalizeBoundedInteger(maxToolRounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS),
           circuit_failure_threshold: normalizeBoundedInteger(circuitFailureThreshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD),
           stream_first_event_timeout_secs: normalizeBoundedInteger(streamFirstEventTimeoutSecs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS),
@@ -2773,6 +2779,7 @@ export function App() {
       setModel((savedUser.model || "").trim());
       setReasoningEffort(normalizeReasoningEffort(savedUser.reasoning_effort));
       setMaxProviderRetries(normalizeBoundedInteger(savedUser.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
+      setProviderFallbackEnabled(savedUser.provider_fallback_enabled !== false);
       setMaxToolRounds(normalizeBoundedInteger(savedUser.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
       setCircuitFailureThreshold(normalizeBoundedInteger(savedUser.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
       setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(savedUser.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
@@ -3094,6 +3101,19 @@ export function App() {
                     disabled={anySessionRunning || isSavingConfig}
                     spellCheck={false}
                   />
+                  <label className="field-label" htmlFor={`provider-wire-api-${selectedProvider.id}`}>{t(locale, "field.providerProtocol")}</label>
+                  <select
+                    id={`provider-wire-api-${selectedProvider.id}`}
+                    value={selectedProvider.wire_api || "chat_completions"}
+                    onChange={(event) => updateProvider(selectedProvider.id, {
+                      wire_api: event.target.value === "responses" ? "responses" : "chat_completions",
+                    })}
+                    disabled={anySessionRunning || isSavingConfig}
+                  >
+                    <option value="chat_completions">{t(locale, "providerProtocol.chatCompletions")}</option>
+                    <option value="responses">{t(locale, "providerProtocol.responses")}</option>
+                  </select>
+                  <p className="mode-help">{t(locale, "field.providerProtocolHint")}</p>
                   <label className="field-label" htmlFor={`provider-base-url-${selectedProvider.id}`}>{t(locale, "field.baseUrl")}</label>
                   <input
                     id={`provider-base-url-${selectedProvider.id}`}
@@ -3167,6 +3187,22 @@ export function App() {
 
             <div className="resilience-setting-group">
               <p className="resilience-setting-group-title">{t(locale, "settings.resilience.retryTimeout")}</p>
+              <div className="resilience-toggle-row">
+                <div>
+                  <span className="field-label">{t(locale, "field.providerFallback")}</span>
+                  <p className="mode-help">{t(locale, "field.providerFallbackHint")}</p>
+                </div>
+                <button
+                  type="button"
+                  className={`browser-toggle${providerFallbackEnabled ? " on" : ""}`}
+                  aria-label={t(locale, "field.providerFallback")}
+                  aria-pressed={providerFallbackEnabled}
+                  onClick={() => setProviderFallbackEnabled((enabled) => !enabled)}
+                  disabled={anySessionRunning || isSavingConfig}
+                >
+                  <span className="browser-toggle-knob" />
+                </button>
+              </div>
               <div className="resilience-setting-grid">
                 <label htmlFor="provider-max-retries">
                   <span className="field-label">{t(locale, "field.maxProviderRetries")}</span>
@@ -4129,4 +4165,3 @@ export function App() {
     </main>
   );
 }
-

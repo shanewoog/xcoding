@@ -2946,6 +2946,15 @@ body.is-resizing-right-panel .browser-surface-host {
 .resilience-setting-grid .field-label {
   margin: 0;
 }
+.resilience-toggle-row {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+.resilience-toggle-row .mode-help {
+  margin: 0.25rem 0 0;
+}
 .provider-manager-header,
 .provider-entry-header,
 .provider-model-actions {

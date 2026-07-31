@@ -441,6 +441,14 @@ pub struct ListModelsResult {
     pub base_url: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderWireApi {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
 /// One OpenAI-compatible cloud provider endpoint in Desktop settings.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CloudProviderConfig {
@@ -449,6 +457,9 @@ pub struct CloudProviderConfig {
     pub name: String,
     /// OpenAI-compatible API host without a trailing `/v1` suffix.
     pub base_url: String,
+    /// HTTP request/stream protocol used by this provider.
+    #[serde(default)]
+    pub wire_api: ProviderWireApi,
     /// Full API key when configured. Never log this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -473,6 +484,9 @@ pub struct UserConfig {
     /// Retries after the initial failed request for one provider before trying a backup provider.
     #[serde(default = "default_max_provider_retries")]
     pub max_provider_retries: u32,
+    /// Whether XCoding may switch to another configured provider after the active provider fails.
+    #[serde(default = "default_provider_fallback_enabled")]
+    pub provider_fallback_enabled: bool,
     /// Maximum model↔tool interaction rounds for one user turn before the agent stops.
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
@@ -532,6 +546,7 @@ impl Default for UserConfig {
             id: "default".to_owned(),
             name: "openai".to_owned(),
             base_url: default_base_url(),
+            wire_api: ProviderWireApi::default(),
             api_key: None,
         };
         Self {
@@ -541,6 +556,7 @@ impl Default for UserConfig {
             model: default_model(),
             reasoning_effort: default_reasoning_effort(),
             max_provider_retries: default_max_provider_retries(),
+            provider_fallback_enabled: default_provider_fallback_enabled(),
             max_tool_rounds: default_max_tool_rounds(),
             circuit_failure_threshold: default_circuit_failure_threshold(),
             stream_first_event_timeout_secs: default_stream_first_event_timeout_secs(),
@@ -861,6 +877,10 @@ fn default_max_provider_retries() -> u32 {
     DEFAULT_MAX_PROVIDER_RETRIES
 }
 
+fn default_provider_fallback_enabled() -> bool {
+    true
+}
+
 fn default_max_tool_rounds() -> u32 {
     DEFAULT_MAX_TOOL_ROUNDS
 }
@@ -940,6 +960,7 @@ mod tests {
             DEFAULT_STREAM_IDLE_TIMEOUT_SECS
         );
         assert_eq!(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES);
+        assert!(config.provider_fallback_enabled);
         assert_eq!(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS);
         assert_eq!(
             config.circuit_failure_threshold,
@@ -995,7 +1016,29 @@ mod tests {
         assert_eq!(config.base_url, "https://ai.v58.dev");
         assert_eq!(config.providers.len(), 1);
         assert_eq!(config.providers[0].base_url, "https://ai.v58.dev");
+        assert_eq!(
+            config.providers[0].wire_api,
+            ProviderWireApi::ChatCompletions
+        );
         assert_eq!(config.active_provider_id.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn provider_wire_api_is_backward_compatible() {
+        let legacy: CloudProviderConfig = serde_json::from_value(json!({
+            "id": "legacy",
+            "name": "Legacy provider",
+            "base_url": "https://example.test"
+        }))
+        .expect("legacy provider config parses");
+        assert_eq!(legacy.wire_api, ProviderWireApi::ChatCompletions);
+
+        let responses = CloudProviderConfig {
+            wire_api: ProviderWireApi::Responses,
+            ..legacy
+        };
+        let encoded = serde_json::to_value(responses).expect("provider config serializes");
+        assert_eq!(encoded["wire_api"], "responses");
     }
 
     #[test]
