@@ -271,7 +271,7 @@ const en = {
   "review.commandSummaryWith": "Review and approve command: {command}",
   "review.commandRiskHint": "Shell or force-push style commands can change the system or remote git history. Approve only if you trust the exact command.",
   "review.localApiRemember": "Do not ask again for this type of local API request",
-  "review.localApiRememberHint": "Only applies to PowerShell HTTP requests to 127.0.0.1, localhost, or [::1]. Remote addresses and other commands still require approval.",
+  "review.localApiRememberHint": "Only applies to approved local HTTP requests to 127.0.0.1, localhost, or [::1]. Remote addresses and other commands still require approval.",
   "review.gitTitle": "High-risk git approval",
   "review.gitSummary": "Review HIGH-RISK {tool}",
   "review.gitRiskHint": "Git write and remote tools always need approval, even in auto-edit. Check remote, branch, paths, and message before approving.",
@@ -446,8 +446,8 @@ const en = {
   "env.compare": "Compare branch",
   "env.sources": "Sources",
   "env.noSources": "No sources yet.",
-  "terminal.placeholder": "Run a PowerShell command",
-  "terminal.ready": "PowerShell ready · {cwd}",
+  "terminal.placeholder": "Run a command",
+  "terminal.ready": "Shell ready · {cwd}",
   "terminal.exitCode": "Exit code: {code}",
 } as const;
 
@@ -717,7 +717,7 @@ const zhCN: Record<MessageKey, string> = {
   "review.commandSummaryWith": "请审阅并批准命令：{command}",
   "review.commandRiskHint": "Shell 或强制推送类命令可能改变系统或远程 Git 历史。仅在信任该精确命令时批准。",
   "review.localApiRemember": "以后对此类本机 API 请求不再确认",
-  "review.localApiRememberHint": "仅适用于调用 127.0.0.1、localhost 或 [::1] 的 PowerShell HTTP 请求；远程地址和其他命令仍会确认。",
+  "review.localApiRememberHint": "仅适用于对 127.0.0.1、localhost 或 [::1] 的已批准本地 HTTP 请求；远程地址和其他命令仍会确认。",
   "review.gitTitle": "高风险 Git 审批",
   "review.gitSummary": "请审阅高风险 {tool}",
   "review.gitRiskHint": "即使在自动编辑模式下，Git 写入与远程操作也始终需要审批。批准前请检查 remote、分支、路径与提交信息。",
@@ -892,8 +892,8 @@ const zhCN: Record<MessageKey, string> = {
   "env.compare": "比较分支",
   "env.sources": "来源",
   "env.noSources": "暂无来源。",
-  "terminal.placeholder": "运行 PowerShell 命令",
-  "terminal.ready": "PowerShell 已就绪 · {cwd}",
+  "terminal.placeholder": "运行命令",
+  "terminal.ready": "命令行已就绪 · {cwd}",
   "terminal.exitCode": "退出码：{code}",
 };
 

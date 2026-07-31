@@ -1,7 +1,9 @@
 //! XCoding's core request dispatcher and chat session lifecycle.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -19,6 +21,52 @@ use xcoding_protocol::{
     WorkspaceConfig,
 };
 use xcoding_store::{SessionStore, StoreError};
+
+fn temporary_sibling(path: &Path) -> PathBuf {
+    match path.file_name().and_then(|value| value.to_str()) {
+        Some(file_name) => path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(".{file_name}.xcoding.tmp")),
+        None => path.with_extension("xcoding.tmp"),
+    }
+}
+
+fn write_text_utf8(path: &Path, text: &str) -> Result<(), CoreError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            CoreError::InvalidInput(format!("failed to create {}: {error}", parent.display()))
+        })?;
+    }
+    let temporary = temporary_sibling(path);
+    {
+        let mut file = fs::File::create(&temporary).map_err(|error| {
+            CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
+        })?;
+        file.write_all(text.as_bytes()).map_err(|error| {
+            CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
+        })?;
+        file.sync_data().map_err(|error| {
+            CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
+        })?;
+    }
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| {
+                CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
+            })?;
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(CoreError::InvalidInput(format!(
+            "failed to write {}: {error}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -854,15 +902,7 @@ fn write_command_allowlist(
         }
     }
     let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_ALLOWLIST_RELATIVE_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            CoreError::InvalidInput(format!("failed to create {}: {error}", parent.display()))
-        })?;
-    }
-    let body = xcoding_policy::render_command_allowlist_file(&normalized);
-    std::fs::write(&path, body).map_err(|error| {
-        CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
-    })?;
+    write_text_utf8(&path, &xcoding_policy::render_command_allowlist_file(&normalized))?;
     Ok(normalized)
 }
 
@@ -887,15 +927,7 @@ fn write_command_denylist(
         }
     }
     let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_DENYLIST_RELATIVE_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            CoreError::InvalidInput(format!("failed to create {}: {error}", parent.display()))
-        })?;
-    }
-    let body = xcoding_policy::render_command_denylist_file(&normalized);
-    std::fs::write(&path, body).map_err(|error| {
-        CoreError::InvalidInput(format!("failed to write {}: {error}", path.display()))
-    })?;
+    write_text_utf8(&path, &xcoding_policy::render_command_denylist_file(&normalized))?;
     Ok(normalized)
 }
 

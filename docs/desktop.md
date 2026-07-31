@@ -4,7 +4,7 @@
 
 Start the Tauri app:
 
-```powershell
+```bash
 pnpm --filter @xcoding/desktop exec tauri dev
 # or from repo root after PATH is set:
 pnpm desktop
@@ -15,9 +15,9 @@ Values are written to `~/.xcoding/config.json` (Windows: `%USERPROFILE%\.xcoding
 
 Optional overrides still work at process start (existing env wins; the file only fills missing values):
 
-```powershell
-$env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1"
+```bash
+export OPENAI_API_KEY="..."
+export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1"
 ```
 
 Session database lives at `~/.xcoding/xcoding.db`. Workspace command policy files stay under each project's `.xcoding/`.
@@ -102,14 +102,28 @@ Session history items show status, mode, model, and a relative updated time. Mes
 When a session has no plan, activity, restore points, replay, or summary yet, the right pane shows a short empty Trace hint. Plan, Restore points, and Replay sections collapse when empty and expand when they have content. Pending approvals stay sticky at the top of the trace pane.
 
 
+## Browser snapshot (Windows)
+
+Desktop provides a browser snapshot workflow that exports the embedded webview content as PDF using the native WebView2 `PrintToPdf` API. No external tools are required.
+
+Current behavior:
+- `browser_save_snapshot` exports the webview to a PDF file in the user's Downloads directory.
+- The export uses the WebView2 COM `PrintToPdf` interface directly through a custom Tauri runtime extension.
+- No PowerShell, ImageMagick, or other external tools are involved.
+
+Error examples:
+- `failed to start PDF export: ...` — the WebView2 COM call failed to initiate.
+- `PDF export timed out` — the async callback did not fire within 30 seconds.
+- `PDF export failed` — the WebView2 callback reported failure.
+- `PDF file was not created` — the file did not appear on disk after success callback.
+
+
 ## Portable package (no installer)
 
 No installer required. Build and package:
 
-```powershell
+```bash
 pnpm desktop:portable
-# or
-.\scripts\package-desktop-portable.ps1
 ```
 
 Output: `dist/portable/XCoding/`
@@ -124,7 +138,7 @@ Requires Windows 10/11 + WebView2 Runtime. Session database and user config live
 
 That binary is a **dev-mode** build (UI tries `http://localhost:1420`). Rebuild with:
 
-```powershell
+```bash
 pnpm desktop:portable
 ```
 

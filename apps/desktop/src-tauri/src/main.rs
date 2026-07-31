@@ -458,7 +458,7 @@ fn main() {
             browser::browser_eval,
             browser::browser_find,
             browser::browser_download_dir,
-            browser::browser_screenshot
+            browser::browser_save_snapshot
         ])
         .run(tauri::generate_context!());
 

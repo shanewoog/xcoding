@@ -3310,7 +3310,7 @@ export function App() {
               disabled={anySessionRunning || isSavingConfig || !workspaceRoot.trim()}
               spellCheck={false}
               rows={3}
-              placeholder={"powershell\ncurl"}
+             placeholder={"bash\ncurl"}
             />
             <p className="mode-help">{commandDenylistHelpText(locale)}</p>
             {!workspaceRoot.trim() ? (

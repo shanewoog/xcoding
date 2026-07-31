@@ -28,3 +28,9 @@ default = ["custom-protocol"]
 # Production / portable builds must enable this so the UI loads embedded assets
 # instead of http://localhost:1420 (dev server).
 custom-protocol = ["tauri/custom-protocol"]
+
+[patch.crates-io]
+wry = { path = "../../../patches/wry-0.55.1" }
+tauri-runtime = { path = "../../../patches/tauri-runtime-2.11.3" }
+tauri-runtime-wry = { path = "../../../patches/tauri-runtime-wry-2.11.4" }
+tauri = { path = "../../../patches/tauri-2.11.5" }

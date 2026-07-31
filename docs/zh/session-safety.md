@@ -12,7 +12,7 @@ XCoding 会把每个会话持久化到本地 SQLite 数据库：CLI 使用 `<wor
 
 每个工作区都有本地的模式、供应商和模型默认配置。V1 仅支持名为 `openai` 的 OpenAI 兼容云供应商，配置中不会包含任何凭据。
 
-```powershell
+```bash
 xcoding config show --workspace <path>
 xcoding config set --workspace <path> --mode ask --model gpt-5.5
 xcoding config set --workspace <path> --mode auto-edit
@@ -22,7 +22,7 @@ CLI 将这些值保存到该工作区的 `.xcoding/xcoding.db`。Desktop 将本�
 
 ## 会话命令
 
-```powershell
+```bash
 xcoding session list --workspace <path>
 xcoding session show <session-id> --workspace <path>
 xcoding session approve <session-id> <action-id> --workspace <path>
@@ -60,9 +60,9 @@ Windows 上替换已有文件时，需要先删除目标文件，再重命名临
 
 XCoding 不会把云模型凭据保存到仓库或会话数据库中。请通过环境变量配置 OpenAI 兼容供应商：
 
-```powershell
-$env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
+```bash
+export OPENAI_API_KEY="..."
+export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1" # optional
 ```
 
 `OPENAI_API_KEY` 仅保留在启动 CLI 或 Desktop 的进程环境中，RPC 协议不接受任何凭据字段。
@@ -86,7 +86,7 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 
 配置方式：
 
-```powershell
+```bash
 xcoding config set --workspace <path> --command-allowlist "rg,git:--version"
 xcoding config set --workspace <path> --command-denylist "cargo:--version,powershell"
 ```

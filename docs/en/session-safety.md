@@ -12,7 +12,7 @@ XCoding persists each session in the local SQLite database at `<workspace>/.xcod
 
 Each workspace has local defaults for mode, provider, and model. Only the `openai` OpenAI-compatible cloud provider is available in V1. The defaults contain no credentials.
 
-```powershell
+```bash
 xcoding config show --workspace <path>
 xcoding config set --workspace <path> --mode ask --model gpt-5.5
 xcoding config set --workspace <path> --mode auto-edit
@@ -22,7 +22,7 @@ The CLI stores these values in that workspace's `.xcoding/xcoding.db`. Desktop s
 
 ## Session Commands
 
-```powershell
+```bash
 xcoding session list --workspace <path>
 xcoding session show <session-id> --workspace <path>
 xcoding session approve <session-id> <action-id> --workspace <path>
@@ -65,9 +65,9 @@ Protocol tool calls use `name: "mcp"` with arguments `{ "server", "tool", "argum
 
 XCoding does not store cloud credentials in the repository or its session database. Configure the OpenAI-compatible provider through environment variables:
 
-```powershell
-$env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
+```bash
+export OPENAI_API_KEY="..."
+export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1" # optional
 ```
 
 `OPENAI_API_KEY` stays in the environment of the CLI or Desktop process. The RPC protocol accepts no credential fields.
@@ -91,7 +91,7 @@ Workspace files:
 
 Configure via:
 
-```powershell
+```bash
 xcoding config set --workspace <path> --command-allowlist "rg,git:--version"
 xcoding config set --workspace <path> --command-denylist "cargo:--version,powershell"
 ```
@@ -117,4 +117,3 @@ During a task, tool activity summaries show how policy decided:
 - `Blocked ...` — hard-denied by policy
 
 Ordinary patches and allowlisted commands under `auto-edit` never emit `approval_requested`. Non-allowlisted commands, high-risk commands, and writes under `.git` / `.xcoding` still require approval.
-

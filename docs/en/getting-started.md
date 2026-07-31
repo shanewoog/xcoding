@@ -13,7 +13,7 @@ XCoding is a local-first AI coding agent with a Rust core and CLI or Desktop cli
 
 From the repository root:
 
-```powershell
+```bash
 pnpm install
 cargo build -p xcoding-server
 pnpm build
@@ -33,7 +33,7 @@ XCODING_OPENAI_BASE_URL=https://ai.v58.dev/v1
 
 The CLI, Desktop shell, and provider load this file when the corresponding variables are missing. **Existing process environment values always win.**
 
-On Windows:
+On Windows, the helper launcher still uses PowerShell:
 
 ```powershell
 .\scripts\xcoding.ps1 chat "Explain this repository"
@@ -44,9 +44,9 @@ On Windows:
 
 Set credentials in the shell that starts XCoding:
 
-```powershell
-$env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # optional
+```bash
+export OPENAI_API_KEY="..."
+export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1" # optional
 ```
 
 `OPENAI_API_KEY` is required for model requests. `XCODING_OPENAI_BASE_URL` is optional and is useful for an OpenAI-compatible endpoint. XCoding never sends credentials through its RPC protocol and does not save them in the workspace, session database, or Desktop settings.
@@ -59,7 +59,7 @@ If chat fails with HTTP 401/403 or "OPENAI_API_KEY is not set", verify:
 
 ## Use The CLI
 
-```powershell
+```bash
 pnpm cli -- ping --workspace .
 pnpm cli -- config show --workspace .
 pnpm cli -- config set --workspace . --mode auto-edit --model gpt-5.5
@@ -71,7 +71,7 @@ The CLI database is `<workspace>/.xcoding/xcoding.db`. Configuration stores mode
 
 ## Portable Desktop (no install)
 
-```powershell
+```bash
 pnpm desktop:portable
 ```
 
@@ -80,7 +80,7 @@ Produces `dist/portable/XCoding/XCoding.exe`. Place a `.env` beside the exe, the
 
 Start the Tauri desktop app from a shell with the same credential variables:
 
-```powershell
+```bash
 pnpm --filter @xcoding/desktop exec tauri dev
 ```
 
@@ -101,7 +101,7 @@ Keep these files short and actionable. Oversized rule files are truncated.
 
 Check whether cloud credentials are visible to the server without making a model call:
 
-```powershell
+```bash
 pnpm cli -- auth --workspace .
 ```
 
@@ -111,9 +111,9 @@ Desktop shows the same readiness state (ready / API key missing, base URL, maske
 
 Check workspace, server binary, core RPC, cloud credentials, workspace config, and git in one shot:
 
-`powershell
+```bash
 pnpm cli -- doctor --workspace .
-`
+```
 
 Prints JSON. Exit code is 2 when 
 eady is false.
@@ -126,7 +126,7 @@ eady is false.
 - **auto-edit** — allowlisted safe developer commands auto-run (builtin plus `.xcoding/command-allowlist`); high-risk and non-allowlisted commands still need approval
 - **Workspace denylist** (`.xcoding/command-denylist`) always blocks matches, even when also allowlisted
 - **Hard-denies** commands such as format, shutdown, git clean -fdx, recursive root deletes, and absolute executables
-- **Flags high-risk** shells/network-style helpers such as powershell -Command, cmd /c, git push --force, and pnpm publish
+- **Flags high-risk** shells/network-style helpers such as `powershell -Command`, `cmd /c`, `git push --force`, and `pnpm publish`
 
 Hard-denied and denylisted commands never enter the approval queue; they return a structured tool error (`code: command_policy_denied`, plus `policy_code`) to the model.
 Ordinary high-risk workspace writes under `.git` / `.xcoding` always need approval, even in auto-edit.
@@ -160,9 +160,8 @@ Enabled servers are started for each agent turn. Their tools appear to the model
 
 Follow up in an existing finished session (same id, shared history):
 
-```powershell
+```bash
 pnpm cli -- chat "What about the CLI package?" --workspace . --session <session-id>
 ```
 
 Desktop: select a finished session, then send another message (button shows **Continue**). Use **New chat** to start a fresh session.
-

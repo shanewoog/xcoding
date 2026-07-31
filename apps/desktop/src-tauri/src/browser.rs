@@ -1,7 +1,6 @@
 use serde::Serialize;
 use serde_json::json;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{
   AppHandle, Emitter, Manager, LogicalPosition, LogicalSize, Url, Webview, WebviewUrl,
@@ -223,47 +222,7 @@ fn default_download_dir() -> Result<PathBuf, String> {
     .or_else(|_| Ok(std::env::temp_dir()))
 }
 
-fn capture_screen_region(x: i32, y: i32, width: u32, height: u32, path: &Path) -> Result<(), String> {
-  #[cfg(windows)]
-  {
-    let width = width.max(1);
-    let height = height.max(1);
-    let path_str = path.to_string_lossy().replace('\'', "''");
-    let script = format!(
-      "Add-Type -AssemblyName System.Drawing; $b = New-Object System.Drawing.Bitmap({width},{height}); $g = [System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen({x},{y},0,0,(New-Object System.Drawing.Size({width},{height}))); $b.Save('{path_str}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $b.Dispose();"
-    );
-    let output = Command::new("powershell")
-      .args([
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        &script,
-      ])
-      .output()
-      .map_err(|error| format!("failed to capture screenshot: {error}"))?;
-    if !output.status.success() {
-      let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-      let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-      return Err(if !stderr.is_empty() {
-        stderr
-      } else if !stdout.is_empty() {
-        stdout
-      } else {
-        "screenshot capture failed".to_owned()
-      });
-    }
-    if !path.is_file() {
-      return Err("screenshot file was not created".to_owned());
-    }
-    Ok(())
-  }
-  #[cfg(not(windows))]
-  {
-    let _ = (x, y, width, height, path);
-    Err("screenshot is only supported on Windows".to_owned())
-  }
-}
+use std::sync::mpsc;
 
 #[tauri::command]
 pub async fn browser_ensure(
@@ -434,19 +393,29 @@ pub async fn browser_download_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn browser_screenshot(app: AppHandle) -> Result<String, String> {
+pub async fn browser_save_snapshot(app: AppHandle) -> Result<String, String> {
   let webview = side_browser(&app).ok_or_else(|| "side browser is not ready".to_owned())?;
-  let pos = webview.position().map_err(map_err)?;
-  let size = webview.size().map_err(map_err)?;
-  let width = size.width.max(1);
-  let height = size.height.max(1);
   let dir = default_download_dir()?;
   std::fs::create_dir_all(&dir).map_err(map_err)?;
   let stamp = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .map(|d| d.as_millis())
     .unwrap_or(0);
-  let path = dir.join(format!("xcoding-browser-{stamp}.png"));
-  capture_screen_region(pos.x, pos.y, width, height, &path)?;
-  Ok(path.display().to_string())
+  let pdf = dir.join(format!("xcoding-browser-{stamp}.pdf"));
+  let (tx, rx) = mpsc::channel();
+  webview
+    .print_to_pdf(pdf.clone(), Box::new(move |ok| {
+      let _ = tx.send(ok);
+    }))
+    .map_err(|error| format!("failed to start PDF export: {error}"))?;
+  let ok = rx
+    .recv_timeout(std::time::Duration::from_secs(30))
+    .map_err(|_| "PDF export timed out".to_owned())?;
+  if !ok {
+    return Err("PDF export failed".to_owned());
+  }
+  if !pdf.is_file() {
+    return Err("PDF file was not created".to_owned());
+  }
+  Ok(pdf.display().to_string())
 }

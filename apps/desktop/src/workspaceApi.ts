@@ -221,7 +221,7 @@ export async function browserDownloadDir(): Promise<string> {
 }
 
 export async function browserScreenshot(): Promise<string> {
-  return invoke<string>("browser_screenshot");
+  return invoke<string>("browser_save_snapshot");
 }
 
 

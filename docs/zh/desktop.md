@@ -4,9 +4,9 @@
 
 启动 Tauri 应用：
 
-```powershell
+```bash
 pnpm --filter @xcoding/desktop exec tauri dev
-# 或仓库根目录：
+# or from repo root:
 pnpm desktop
 ```
 
@@ -15,9 +15,9 @@ pnpm desktop
 
 仍可用环境变量作为启动时覆盖（进程已有 env 优先，文件只回填缺失项）：
 
-```powershell
-$env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1"
+```bash
+export OPENAI_API_KEY="..."
+export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1"
 ```
 
 会话数据库位于 `~/.xcoding/xcoding.db`。命令白/黑名单仍保存在各工作区的 `.xcoding/` 下。
@@ -105,10 +105,8 @@ v0.1 为便于使用，API Key 以明文保存在用户目录。请勿提交该�
 
 不需要安装程序。构建并打包：
 
-```powershell
+```bash
 pnpm desktop:portable
-# 或
-.\scripts\package-desktop-portable.ps1
 ```
 
 输出目录：`dist/portable/XCoding/`
@@ -126,7 +124,7 @@ pnpm desktop:portable
 
 说明打开的是 **开发模式** 二进制（UI 去连 `http://localhost:1420`）。请重新执行：
 
-```powershell
+```bash
 pnpm desktop:portable
 ```
 

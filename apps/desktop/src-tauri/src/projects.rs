@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use pinyin::ToPinyin;
@@ -93,14 +94,42 @@ fn read_title(project_path: &Path, fallback: &str) -> String {
 }
 
 fn write_title(project_path: &Path, title: &str) -> Result<(), String> {
-    let meta_dir = project_path.join(".xcoding");
-    fs::create_dir_all(&meta_dir).map_err(|error| error.to_string())?;
-    let meta = json!({ "title": title });
-    fs::write(
-        meta_path(project_path),
-        serde_json::to_vec_pretty(&meta).map_err(|e| e.to_string())?,
-    )
-    .map_err(|error| error.to_string())
+    let path = meta_path(project_path);
+    let body = serde_json::to_string_pretty(&json!({ "title": title })).map_err(|error| error.to_string())?;
+    write_text_utf8(&path, &body).map_err(|error| error.to_string())
+}
+
+fn temporary_sibling(path: &Path) -> PathBuf {
+    match path.file_name().and_then(|value| value.to_str()) {
+        Some(file_name) => path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(".{file_name}.xcoding.tmp")),
+        None => path.with_extension("xcoding.tmp"),
+    }
+}
+
+fn write_text_utf8(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = temporary_sibling(path);
+    {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_data()?;
+    }
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn project_from_path(path: PathBuf) -> Option<ProjectDir> {

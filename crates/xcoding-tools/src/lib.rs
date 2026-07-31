@@ -17,13 +17,13 @@ use std::os::windows::process::CommandExt;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use thiserror::Error;
-use uuid::Uuid;
 use xcoding_policy::{
     COMMAND_ALLOWLIST_RELATIVE_PATH, COMMAND_DENYLIST_RELATIVE_PATH, PermissionDecision,
     PermissionKind, assess_command_with_lists, evaluate_detailed, parse_command_allowlist,
     parse_command_denylist,
 };
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
+use std::io::Write;
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
 const MAX_LIST_ENTRIES: usize = 1_000;
@@ -57,6 +57,40 @@ fn workspace_command(executable: &str) -> Command {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+fn temporary_sibling(path: &Path) -> PathBuf {
+    match path.file_name().and_then(|value| value.to_str()) {
+        Some(file_name) => path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(".{file_name}.xcoding.tmp")),
+        None => path.with_extension("xcoding.tmp"),
+    }
+}
+
+/// Write text to `path` as UTF-8 using an atomic rename strategy.
+fn write_text_utf8(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = temporary_sibling(path);
+    {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_data()?;
+    }
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Returns true only for a tightly constrained PowerShell HTTP request to a loopback API.
@@ -1524,26 +1558,7 @@ impl ToolRegistry {
     }
 
     fn write_atomically(&self, path: &Path, text: &str) -> Result<(), ToolError> {
-        let parent = path.parent().expect("workspace file has a parent");
-        fs::create_dir_all(parent)?;
-        let temporary = parent.join(format!(
-            ".xcoding-{}-{}.tmp",
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("patch"),
-            Uuid::new_v4()
-        ));
-        fs::write(&temporary, text)?;
-        #[cfg(windows)]
-        {
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
-        }
-        if let Err(error) = fs::rename(&temporary, path) {
-            let _ = fs::remove_file(&temporary);
-            return Err(ToolError::Io(error));
-        }
+        write_text_utf8(path, text)?;
         Ok(())
     }
 

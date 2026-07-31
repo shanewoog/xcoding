@@ -279,6 +279,29 @@ pub fn list_workspace_entries(
     Ok(entries)
 }
 
+fn terminal_shell_command(command: &str) -> Result<Command, String> {
+    if cfg!(target_os = "windows") {
+        let candidates = [
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+        ];
+        for candidate in candidates {
+            if Path::new(candidate).is_file() {
+                let mut cmd = Command::new(candidate);
+                cmd.args(["--noprofile", "--norc", "-lc", command]);
+                return Ok(cmd);
+            }
+        }
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        return Ok(cmd);
+    }
+
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", command]);
+    Ok(cmd)
+}
+
 #[tauri::command]
 pub fn run_terminal_command(
     workspace_root: String,
@@ -290,17 +313,8 @@ pub fn run_terminal_command(
         return Err("command is empty".to_owned());
     }
 
-    let mut shell = Command::new("powershell");
+    let mut shell = terminal_shell_command(&command)?;
     shell
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &command,
-        ])
         .current_dir(&root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

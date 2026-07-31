@@ -12,7 +12,7 @@
 
 ## Validation
 
-```powershell
+```bash
 cargo test
 cargo build -p xcoding-server
 pnpm install

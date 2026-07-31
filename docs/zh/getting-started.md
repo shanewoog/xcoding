@@ -13,7 +13,7 @@ XCoding 是一个本地优先的 AI 编程 Agent，提供 Rust 核心、CLI 和 
 
 在仓库根目录执行：
 
-```powershell
+```bash
 pnpm install
 cargo build -p xcoding-server
 pnpm build
@@ -33,7 +33,7 @@ XCODING_OPENAI_BASE_URL=https://ai.v58.dev/v1
 
 CLI、Desktop 与 server provider 会在缺少对应环境变量时自动读取该文件；**已存在的进程环境变量优先**。
 
-Windows 推荐：
+Windows 下辅助脚本仍使用 PowerShell：
 
 ```powershell
 .\scripts\xcoding.ps1 chat "说明这个仓库"
@@ -44,9 +44,9 @@ Windows 推荐：
 
 在启动 XCoding 的终端中设置凭据：
 
-```powershell
-$env:OPENAI_API_KEY = "..."
-$env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
+```bash
+export OPENAI_API_KEY="..."
+export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1" # optional
 ```
 
 模型请求需要 `OPENAI_API_KEY`。`XCODING_OPENAI_BASE_URL` 可用于设置 OpenAI 兼容服务的地址。XCoding 不会经由 RPC 协议传输密钥，也不会将密钥保存到工作区、会话数据库或 Desktop 设置中。
@@ -59,7 +59,7 @@ $env:XCODING_OPENAI_BASE_URL = "https://ai.v58.dev/v1" # 可选
 
 ## 使用 CLI
 
-```powershell
+```bash
 pnpm cli -- ping --workspace .
 pnpm cli -- config show --workspace .
 pnpm cli -- config set --workspace . --mode auto-edit --model gpt-5.5
@@ -71,7 +71,7 @@ CLI 数据库位于 `<workspace>/.xcoding/xcoding.db`。配置保存该工作区
 
 ## 绿色 Desktop（免安装）
 
-```powershell
+```bash
 pnpm desktop:portable
 ```
 
@@ -80,7 +80,7 @@ pnpm desktop:portable
 
 在设置了相同凭据变量的终端中启动 Tauri Desktop：
 
-```powershell
+```bash
 pnpm --filter @xcoding/desktop exec tauri dev
 ```
 
@@ -101,7 +101,7 @@ Desktop 将数据库保存在 `~/.xcoding/xcoding.db`，用户偏好保存在 `~
 
 不发起模型请求，仅检查服务端是否看到云端凭据：
 
-```powershell
+```bash
 pnpm cli -- auth --workspace .
 ```
 
@@ -111,9 +111,9 @@ Desktop 左侧设置区会显示同样的就绪状态（就绪 / 缺少 API key�
 
 一键检查工作区、server 二进制、核心 RPC、云模型凭据、工作区配置和 git：
 
-`powershell
+```bash
 pnpm cli -- doctor --workspace .
-`
+```
 
 返回 JSON。
 eady=false 时退出码为 2。
@@ -126,7 +126,7 @@ eady=false 时退出码为 2。
 - **auto-edit** — 白名单内安全开发命令可自动执行（内置 + `.xcoding/command-allowlist`）；高风险与非白名单命令仍需审批
 - **工作区黑名单**（`.xcoding/command-denylist`）始终拦截匹配项，即使同时在白名单中
 - **硬拒绝**：format / shutdown / git clean -fdx / 递归删除根路径 / 绝对路径可执行文件等
-- **高风险标注**：powershell -Command、cmd /c、git push --force、pnpm publish 等
+- **高风险标注**：`powershell -Command`、`cmd /c`、`git push --force`、`pnpm publish` 等
 
 硬拒绝与黑名单拦截不会进入审批队列，会作为结构化工具错误回传给模型（`code: command_policy_denied`，以及 `policy_code`）。
 即使在 auto-edit 下，`.git` / `.xcoding` 等高风险工作区写入也始终需要审批。
@@ -141,7 +141,7 @@ eady=false 时退出码为 2。
 
 在已完成的会话上追加提问（同一 session id，共享历史）：
 
-```powershell
+```bash
 pnpm cli -- chat "CLI 包是做什么的？" --workspace . --session <session-id>
 ```
 
