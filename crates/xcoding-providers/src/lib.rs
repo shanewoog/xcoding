@@ -212,13 +212,35 @@ pub fn provider_retry_delay(retry_number: u32) -> Duration {
     Duration::from_millis(250u64.saturating_mul(1u64 << shift))
 }
 
+/// Default HTTP User-Agent shaped like OpenAI Codex (`originator/version`).
+/// Many restricted gateways only allow Codex-looking clients.
+pub const DEFAULT_HTTP_USER_AGENT: &str = "codex_cli_rs/0.50.0";
+
+/// Resolve the provider HTTP User-Agent.
+/// Override with `XCODING_HTTP_USER_AGENT` when a gateway expects a different Codex flavor.
+pub fn http_user_agent() -> String {
+    env::var("XCODING_HTTP_USER_AGENT")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_HTTP_USER_AGENT.to_owned())
+}
+
 fn build_http_client() -> Client {
+    let user_agent = http_user_agent();
     Client::builder()
+        // Present as Codex so client-restricted OpenAI-compatible gateways accept traffic.
+        .user_agent(user_agent.clone())
         // Avoid hanging forever on dead endpoints; do not set a total body timeout so
         // long-lived SSE chat streams are not cut mid-turn.
         .connect_timeout(Duration::from_secs(15))
         .build()
-        .unwrap_or_else(|_| Client::new())
+        .unwrap_or_else(|_| {
+            Client::builder()
+                .user_agent(user_agent)
+                .build()
+                .unwrap_or_else(|_| Client::new())
+        })
 }
 
 fn format_empty_stream_message(status: &StatusCode, body: &str) -> String {
@@ -1046,6 +1068,28 @@ fn completed_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_http_user_agent_looks_like_codex() {
+        assert!(DEFAULT_HTTP_USER_AGENT.starts_with("codex_cli_rs/"));
+        assert!(DEFAULT_HTTP_USER_AGENT.contains('/'));
+    }
+
+    #[test]
+    fn http_user_agent_uses_env_override() {
+        let key = "XCODING_HTTP_USER_AGENT";
+        let previous = env::var(key).ok();
+        unsafe {
+            env::set_var(key, "codex-cli/9.9.9");
+        }
+        assert_eq!(http_user_agent(), "codex-cli/9.9.9");
+        unsafe {
+            match previous {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
 
     #[test]
     fn parses_text_delta() {
