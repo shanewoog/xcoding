@@ -18,7 +18,7 @@ use xcoding_protocol::{
     MIN_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
     MIN_CIRCUIT_RECOVERY_WAIT_SECS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
     MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS,
-    ProviderAuthStatus, ProviderModel, UserConfig,
+    ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
 
 pub type ProviderEventStream =
@@ -309,6 +309,7 @@ fn truncate_provider_body(body: &str, max_chars: usize) -> String {
 pub struct OpenAiCompatibleProvider {
     api_key: String,
     base_url: String,
+    wire_api: ProviderWireApi,
     client: Client,
 }
 
@@ -432,6 +433,7 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
             } else {
                 base
             },
+            wire_api: ProviderWireApi::default(),
             api_key: config.api_key.clone(),
         });
         config.active_provider_id = Some(id);
@@ -685,17 +687,29 @@ impl OpenAiCompatibleProvider {
     }
 
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
+        Self::with_wire_api(api_key, base_url, ProviderWireApi::ChatCompletions)
+    }
+
+    pub fn with_wire_api(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        wire_api: ProviderWireApi,
+    ) -> Self {
         Self {
             api_key: api_key.into(),
             base_url: api_root_url(&base_url.into()),
+            wire_api,
             client: build_http_client(),
         }
     }
 
-    /// Return the exact chat endpoint used for OpenAI-compatible requests.
+    /// Return the exact endpoint used for model response requests.
     /// This intentionally exposes no credential material.
-    pub fn chat_completions_url(&self) -> String {
-        format!("{}/chat/completions", self.base_url)
+    pub fn chat_url(&self) -> String {
+        match self.wire_api {
+            ProviderWireApi::ChatCompletions => format!("{}/chat/completions", self.base_url),
+            ProviderWireApi::Responses => format!("{}/responses", self.base_url),
+        }
     }
 
     /// List models from the OpenAI-compatible `GET {base_url}/models` endpoint.
@@ -718,6 +732,25 @@ impl OpenAiCompatibleProvider {
     }
 
     pub async fn stream_chat(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        tools: &[ToolDefinition],
+        reasoning_effort: Option<&str>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        match self.wire_api {
+            ProviderWireApi::ChatCompletions => {
+                self.stream_chat_completions(model, messages, tools, reasoning_effort)
+                    .await
+            }
+            ProviderWireApi::Responses => {
+                self.stream_responses(model, messages, tools, reasoning_effort)
+                    .await
+            }
+        }
+    }
+
+    async fn stream_chat_completions(
         &self,
         model: &str,
         messages: Vec<ChatMessage>,
@@ -814,7 +847,7 @@ impl OpenAiCompatibleProvider {
     async fn open_chat_completion(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
         let response = self
             .client
-            .post(self.chat_completions_url())
+            .post(self.chat_url())
             .bearer_auth(&self.api_key)
             .json(body)
             .send()
@@ -827,6 +860,276 @@ impl OpenAiCompatibleProvider {
         }
 
         Ok(response)
+    }
+
+    async fn stream_responses(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        tools: &[ToolDefinition],
+        reasoning_effort: Option<&str>,
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let body = responses_request_body(model, messages, tools, reasoning_effort);
+        let response = self.open_chat_completion(&body).await?;
+        let response_status = response.status();
+
+        let stream = try_stream! {
+            let mut bytes = response.bytes_stream();
+            let mut buffer = Vec::new();
+            let mut body_sample = Vec::new();
+            let mut body_sample_truncated = false;
+            let mut emitted_event = false;
+            let mut completed = false;
+
+            while let Some(chunk) = bytes.next().await {
+                let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                append_stream_body_sample(&mut body_sample, &mut body_sample_truncated, &chunk);
+                buffer.extend_from_slice(&chunk);
+
+                while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = buffer.drain(..=newline).collect();
+                    let line = std::str::from_utf8(&line)?.trim();
+                    let Some(data) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    let data = data.trim();
+                    if data == "[DONE]" {
+                        completed = true;
+                        break;
+                    }
+
+                    match parse_responses_event(data)? {
+                        ResponsesParsedEvent::TextDelta(delta) => {
+                            if !delta.is_empty() {
+                                emitted_event = true;
+                                yield ProviderEvent::TextDelta(delta);
+                            }
+                        }
+                        ResponsesParsedEvent::ToolCall(tool_call) => {
+                            emitted_event = true;
+                            yield ProviderEvent::ToolCall(tool_call);
+                        }
+                        ResponsesParsedEvent::Completed => {
+                            completed = true;
+                            break;
+                        }
+                        ResponsesParsedEvent::Failed(message) => {
+                            Err::<(), ProviderError>(ProviderError::InvalidResponse(message))?;
+                        }
+                        ResponsesParsedEvent::Ignored => {}
+                    }
+                }
+                if completed {
+                    break;
+                }
+            }
+
+            if !completed {
+                Err::<(), ProviderError>(ProviderError::StreamDisconnected(
+                    "connection closed before response.completed".to_owned(),
+                ))?;
+            }
+            if !emitted_event {
+                Err::<(), ProviderError>(ProviderError::EmptyStream {
+                    status: response_status,
+                    body: format_stream_body_sample(&body_sample, body_sample_truncated),
+                })?;
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+}
+
+fn responses_request_body(
+    model: &str,
+    messages: Vec<ChatMessage>,
+    tools: &[ToolDefinition],
+    reasoning_effort: Option<&str>,
+) -> Value {
+    let mut instructions = Vec::new();
+    let mut input = Vec::new();
+    for message in messages {
+        if message.role == "system" {
+            if let Some(content) = message.content {
+                instructions.push(chat_content_as_text(content));
+            }
+            continue;
+        }
+        if let Some(tool_calls) = message.tool_calls {
+            input.extend(tool_calls.into_iter().map(|tool_call| {
+                json!({
+                    "type": "function_call",
+                    "call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments
+                })
+            }));
+            continue;
+        }
+        if message.role == "tool" {
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": message.tool_call_id.unwrap_or_default(),
+                "output": message.content.map(chat_content_as_text).unwrap_or_default()
+            }));
+            continue;
+        }
+        if let Some(content) = message.content {
+            input.push(responses_message_item(&message.role, content));
+        }
+    }
+
+    let mut body = json!({
+        "model": model,
+        "instructions": instructions.join("\n\n"),
+        "input": input,
+        "stream": true,
+        "store": false
+    });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                        "strict": false
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(true);
+    }
+    if let Some(effort) = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body["reasoning"] = json!({ "effort": effort });
+    }
+    body
+}
+
+fn chat_content_as_text(content: ChatMessageContent) -> String {
+    match content {
+        ChatMessageContent::Text(text) => text,
+        ChatMessageContent::Parts(parts) => parts
+            .into_iter()
+            .filter_map(|part| match part {
+                ChatContentPart::Text { text } => Some(text),
+                ChatContentPart::ImageUrl { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn responses_message_item(role: &str, content: ChatMessageContent) -> Value {
+    let content_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    let parts = match content {
+        ChatMessageContent::Text(text) => vec![json!({ "type": content_type, "text": text })],
+        ChatMessageContent::Parts(parts) => parts
+            .into_iter()
+            .map(|part| match part {
+                ChatContentPart::Text { text } => json!({ "type": content_type, "text": text }),
+                ChatContentPart::ImageUrl { image_url } => json!({
+                    "type": "input_image",
+                    "image_url": image_url.url,
+                    "detail": "auto"
+                }),
+            })
+            .collect(),
+    };
+    json!({ "type": "message", "role": role, "content": parts })
+}
+
+enum ResponsesParsedEvent {
+    TextDelta(String),
+    ToolCall(ProviderToolCall),
+    Completed,
+    Failed(String),
+    Ignored,
+}
+
+fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderError> {
+    let event: Value = serde_json::from_str(data)?;
+    match event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "response.output_text.delta" => Ok(ResponsesParsedEvent::TextDelta(
+            event
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        )),
+        "response.output_item.done" => {
+            let Some(item) = event.get("item") else {
+                return Ok(ResponsesParsedEvent::Ignored);
+            };
+            if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                return Ok(ResponsesParsedEvent::Ignored);
+            }
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::InvalidToolCall(
+                        "Responses function call is missing call_id".to_owned(),
+                    )
+                })?;
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::InvalidToolCall(
+                        "Responses function call is missing name".to_owned(),
+                    )
+                })?;
+            let arguments = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            Ok(ResponsesParsedEvent::ToolCall(ProviderToolCall {
+                id: call_id.to_owned(),
+                kind: "function".to_owned(),
+                function: ProviderFunctionCall {
+                    name: name.to_owned(),
+                    arguments: if arguments.trim().is_empty() {
+                        "{}".to_owned()
+                    } else {
+                        arguments.to_owned()
+                    },
+                },
+            }))
+        }
+        "response.completed" => Ok(ResponsesParsedEvent::Completed),
+        "response.failed" | "response.incomplete" => {
+            let message = event
+                .pointer("/response/error/message")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    event
+                        .pointer("/response/incomplete_details/reason")
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("Responses API returned a failed response");
+            Ok(ResponsesParsedEvent::Failed(message.to_owned()))
+        }
+        _ => Ok(ResponsesParsedEvent::Ignored),
     }
 }
 
@@ -1096,6 +1399,125 @@ mod tests {
         let parsed =
             parse_chunk(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#).expect("event parses");
         assert_eq!(parsed.content.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn provider_protocol_selects_model_response_endpoint() {
+        let chat = OpenAiCompatibleProvider::new("test-key", "https://example.test/v1/");
+        assert_eq!(chat.chat_url(), "https://example.test/v1/chat/completions");
+
+        let responses = OpenAiCompatibleProvider::with_wire_api(
+            "test-key",
+            "https://example.test/v1/",
+            ProviderWireApi::Responses,
+        );
+        assert_eq!(responses.chat_url(), "https://example.test/v1/responses");
+    }
+
+    #[test]
+    fn builds_standard_responses_request_body() {
+        let tool_call = ProviderToolCall {
+            id: "call_1".to_owned(),
+            kind: "function".to_owned(),
+            function: ProviderFunctionCall {
+                name: "read_file".to_owned(),
+                arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
+            },
+        };
+        let body = responses_request_body(
+            "gpt-test",
+            vec![
+                ChatMessage::system("Follow the repository instructions."),
+                ChatMessage::user_with_images(
+                    "Inspect this image.",
+                    &[("image/png".to_owned(), "aGVsbG8=".to_owned())],
+                ),
+                ChatMessage::assistant_tool_calls(vec![tool_call]),
+                ChatMessage::tool_result("call_1", "file contents"),
+            ],
+            &[ToolDefinition {
+                name: "read_file".to_owned(),
+                description: "Read one file".to_owned(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            }],
+            Some("high"),
+        );
+
+        assert_eq!(body["model"], "gpt-test");
+        assert_eq!(body["instructions"], "Follow the repository instructions.");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            body["input"][0]["content"][1]["image_url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+        assert_eq!(body["input"][1]["type"], "function_call");
+        assert_eq!(body["input"][1]["call_id"], "call_1");
+        assert_eq!(body["input"][1]["name"], "read_file");
+        assert_eq!(body["input"][1]["arguments"], r#"{"path":"src/lib.rs"}"#);
+        assert_eq!(body["input"][2]["type"], "function_call_output");
+        assert_eq!(body["input"][2]["call_id"], "call_1");
+        assert_eq!(body["input"][2]["output"], "file contents");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert_eq!(body["tools"][0]["strict"], false);
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn parses_responses_stream_events() {
+        match parse_responses_event(r#"{"type":"response.output_text.delta","delta":"Hello"}"#)
+            .expect("text event parses")
+        {
+            ResponsesParsedEvent::TextDelta(delta) => assert_eq!(delta, "Hello"),
+            _ => panic!("expected text delta"),
+        }
+
+        match parse_responses_event(
+            r#"{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"src/lib.rs\"}"}}"#,
+        )
+        .expect("tool event parses")
+        {
+            ResponsesParsedEvent::ToolCall(tool_call) => assert_eq!(
+                tool_call,
+                ProviderToolCall {
+                    id: "call_1".to_owned(),
+                    kind: "function".to_owned(),
+                    function: ProviderFunctionCall {
+                        name: "read_file".to_owned(),
+                        arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
+                    },
+                }
+            ),
+            _ => panic!("expected tool call"),
+        }
+
+        assert!(matches!(
+            parse_responses_event(
+                r#"{"type":"response.completed","response":{"status":"completed"}}"#
+            )
+            .expect("completion event parses"),
+            ResponsesParsedEvent::Completed
+        ));
+
+        match parse_responses_event(
+            r#"{"type":"response.failed","response":{"error":{"message":"upstream failed"}}}"#,
+        )
+        .expect("failure event parses")
+        {
+            ResponsesParsedEvent::Failed(message) => assert_eq!(message, "upstream failed"),
+            _ => panic!("expected failed event"),
+        }
     }
 
     #[test]
