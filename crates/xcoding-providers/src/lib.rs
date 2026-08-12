@@ -1901,13 +1901,6 @@ mod tests {
         assert_eq!(result.models[0].owned_by.as_deref(), Some("openai"));
     }
 
-    fn inspect_auth_returns_status_struct() {
-        let status = inspect_auth();
-        assert!(!status.base_url.is_empty());
-        assert!(!status.message.is_empty());
-        assert_eq!(status.ready, status.has_api_key);
-    }
-
     #[test]
     fn normalizes_stream_idle_timeout_within_safe_bounds() {
         let too_short = normalize_user_config(UserConfig {

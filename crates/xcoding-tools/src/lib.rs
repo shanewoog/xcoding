@@ -2069,7 +2069,10 @@ fn truncate_output(value: &str) -> String {
     if value.len() <= MAX_OUTPUT_BYTES {
         value.to_owned()
     } else {
-        format!("{}\n[output truncated]", &value[..MAX_OUTPUT_BYTES])
+        // Cut on a char boundary: the byte cap can land inside a multi-byte
+        // character, and slicing a `str` there panics.
+        let end = value.floor_char_boundary(MAX_OUTPUT_BYTES);
+        format!("{}\n[output truncated]", &value[..end])
     }
 }
 
@@ -2428,6 +2431,29 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn truncate_output_cuts_on_char_boundary_for_multibyte_text() {
+        // 32 KiB lands mid-character for 3-byte text: boundaries sit at
+        // multiples of 3, so byte 32_768 is the last byte of a character.
+        let value = "\u{4e2d}".repeat(10_923);
+        assert_eq!(value.len(), 32_769);
+        assert!(!value.is_char_boundary(32 * 1024));
+
+        let truncated = truncate_output(&value);
+
+        let kept = truncated
+            .strip_suffix("\n[output truncated]")
+            .expect("truncation marker appended");
+        assert_eq!(kept, "\u{4e2d}".repeat(10_922));
+    }
+
+    #[test]
+    fn truncate_output_keeps_output_within_budget_verbatim() {
+        let value = "\u{4e2d}".repeat(10_922);
+        assert_eq!(value.len(), 32_766);
+        assert_eq!(truncate_output(&value), value);
     }
 
     #[test]
