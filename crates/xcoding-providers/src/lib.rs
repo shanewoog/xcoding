@@ -195,7 +195,11 @@ impl ProviderError {
                     || (!error.is_decode() && error.status().is_none())
             }
             Self::HttpStatus { status, .. } => {
-                matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504)
+                // Context overflow (400 + overflow body) needs history trimming, not a plain resend.
+                if self.is_context_overflow() {
+                    return false;
+                }
+                matches!(status.as_u16(), 400 | 401 | 403 | 404 | 408 | 409 | 429 | 500 | 502 | 503 | 504)
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
             Self::MissingApiKey
@@ -1735,16 +1739,30 @@ mod tests {
             .is_retryable()
         );
         assert!(
-            !ProviderError::HttpStatus {
+            ProviderError::HttpStatus {
                 status: StatusCode::UNAUTHORIZED,
-                body: "nope".to_owned(),
+                body: "transient auth error".to_owned(),
             }
             .is_retryable()
         );
         assert!(
-            !ProviderError::HttpStatus {
+            ProviderError::HttpStatus {
+                status: StatusCode::FORBIDDEN,
+                body: "forbidden".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::NOT_FOUND,
+                body: "not found".to_owned(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            ProviderError::HttpStatus {
                 status: StatusCode::BAD_REQUEST,
-                body: "bad".to_owned(),
+                body: "bad request".to_owned(),
             }
             .is_retryable()
         );

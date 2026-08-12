@@ -237,7 +237,13 @@ fn is_retryable_provider_attempt(error: &AgentError) -> bool {
         AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
         | AgentError::EmptyProviderResponse => true,
-        AgentError::Provider(provider_error) => provider_error.is_retryable(),
+        AgentError::Provider(provider_error) => {
+            // Context overflow needs history trimming, not a plain retry.
+            if provider_error.is_context_overflow() {
+                return false;
+            }
+            provider_error.is_retryable()
+        }
         _ => false,
     }
 }
