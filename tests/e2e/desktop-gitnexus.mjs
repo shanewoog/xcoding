@@ -10,7 +10,7 @@ async function source(path) {
 }
 
 async function main() {
-  const [panels, api, rust, mainRs, i18n, css, packageJson] = await Promise.all([
+  const [panels, api, rust, mainRs, i18n, css, packageJsonSource, e2eRunner] = await Promise.all([
     source("apps/desktop/src/panels.tsx"),
     source("apps/desktop/src/workspaceApi.ts"),
     source("apps/desktop/src-tauri/src/gitnexus.rs"),
@@ -18,7 +18,9 @@ async function main() {
     source("apps/desktop/src/i18n.ts"),
     source("apps/desktop/src/styles.css"),
     source("package.json"),
+    source("tests/e2e/run.mjs"),
   ]);
+  const packageJson = JSON.parse(packageJsonSource);
 
   for (const needle of [
     'ToolPanelTab = "review" | "browser" | "files" | "code"',
@@ -88,7 +90,11 @@ async function main() {
     assert.ok(css.includes(needle), `styles.css missing ${needle}`);
   }
 
-  assert.ok(packageJson.includes("tests/e2e/desktop-gitnexus.mjs"), "package.json must run the GitNexus desktop regression check");
+  assert.equal(packageJson.scripts["test:e2e"], "node tests/e2e/run.mjs", "package.json must use the unified e2e runner");
+  assert.ok(
+    e2eRunner.includes('entry.name.endsWith(".mjs")') && e2eRunner.includes("entry.name !== runnerName"),
+    "the e2e runner must automatically discover top-level regression checks",
+  );
   console.log("desktop GitNexus integration source checks passed");
 }
 

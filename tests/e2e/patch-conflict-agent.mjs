@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,7 +38,8 @@ async function main() {
 }
 
 async function runAskRaceConflict(rpc, mock, workspace) {
-  const notesPath = resolve(workspace, "notes.txt");
+  const notesPath = resolve(workspace, ".xcoding/notes.txt");
+  await mkdir(resolve(workspace, ".xcoding"), { recursive: true });
   await writeFile(notesPath, "base\n", "utf8");
   mock.scenario = "ask-race";
   rpc.events.length = 0;
@@ -52,7 +53,7 @@ async function runAskRaceConflict(rpc, mock, workspace) {
   assert.equal(started.session.status, "need_user");
   const approval = eventFor(rpc, started.session.id, "approval_requested");
   assert.equal(approval.action.tool_call.name, "apply_patch");
-  assert.equal(approval.action.tool_call.arguments.path, "notes.txt");
+  assert.equal(approval.action.tool_call.arguments.path, ".xcoding/notes.txt");
   assert.equal(approval.action.tool_call.arguments.old_text, "base\n");
   assert.equal(approval.action.tool_call.arguments.new_text, "next\n");
 
@@ -75,7 +76,7 @@ async function runAskRaceConflict(rpc, mock, workspace) {
       event.success === false,
   );
   assert.ok(failedEnd, "expected failed apply_patch tool_end");
-  assert.match(String(failedEnd.summary), /patch conflict on notes\.txt/i);
+  assert.match(String(failedEnd.summary), /patch conflict on \.xcoding[\\/]notes\.txt/i);
   assert.match(String(failedEnd.summary), /re-read the file/i);
 
   const { detail } = await rpc.request("session.detail", { session_id: started.session.id });
@@ -83,7 +84,7 @@ async function runAskRaceConflict(rpc, mock, workspace) {
   assert.ok(toolMessage, "expected tool role message after conflict");
   const payload = JSON.parse(toolMessage.content);
   assert.equal(payload.code, "patch_conflict");
-  assert.equal(payload.path, "notes.txt");
+  assert.equal(payload.path, ".xcoding/notes.txt");
   assert.match(String(payload.hint ?? ""), /read_file/i);
   assert.match(String(payload.error ?? ""), /patch conflict/i);
 }
@@ -214,7 +215,7 @@ async function startMockProvider() {
         writeText(response, "Patch conflict detected; notes.txt was not modified.");
       } else {
         writeTool(response, "call_ask_patch", "apply_patch", {
-          path: "notes.txt",
+          path: ".xcoding/notes.txt",
           old_text: "base\n",
           new_text: "next\n",
         });

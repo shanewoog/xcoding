@@ -36,6 +36,15 @@ function runDoctor(workspace, env = {}) {
   });
 }
 
+function parseReport(result, scenario) {
+  assert.notEqual(
+    result.stdout.trim(),
+    "",
+    `${scenario} doctor produced no JSON (exit ${result.code}): ${result.stderr.trim() || "no stderr"}`,
+  );
+  return JSON.parse(result.stdout);
+}
+
 async function main() {
   const workspace = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-doctor-"));
   try {
@@ -43,7 +52,7 @@ async function main() {
       OPENAI_API_KEY: "",
       XCODING_OPENAI_BASE_URL: "https://example.test/v1",
     });
-    const missingReport = JSON.parse(missing.stdout);
+    const missingReport = parseReport(missing, "missing-auth");
     assert.equal(missingReport.ready, false);
     assert.equal(missing.code, 2);
     const auth = missingReport.checks.find((check) => check.name === "provider_auth");
@@ -54,7 +63,7 @@ async function main() {
       OPENAI_API_KEY: "sk-test-key-abcdef",
       XCODING_OPENAI_BASE_URL: "https://example.test/v1",
     });
-    const presentReport = JSON.parse(present.stdout);
+    const presentReport = parseReport(present, "present-auth");
     assert.equal(presentReport.ready, true);
     assert.equal(present.code, 0);
     for (const name of [
