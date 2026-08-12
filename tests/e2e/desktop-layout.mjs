@@ -103,7 +103,8 @@ async function main() {
   assert.ok(cssSource.includes(".message-tool-group"), "styles.css missing tool group styles");
   const layoutSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/layout.ts"), "utf8");
   const panelsSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/panels.tsx"), "utf8");
-const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
+  const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
+  const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
 
   for (const needle of [
     "export function formatSessionStatus",
@@ -168,11 +169,27 @@ const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/works
     "TerminalBottomPanel",
     "RightToolsPanel",
     "right-tools-panel",
-    "runTerminalCommand",
+    'invoke("terminal_start"',
     "fetchGitEnvironment",
   ]) {
     assert.ok(panelsSource.includes(needle) || appSource.includes(needle), "panel wiring missing " + needle);
   }
+
+  for (const needle of [
+    "terminal-context-menu",
+    "navigator.clipboard.writeText",
+    "navigator.clipboard.readText",
+    "getSelection()",
+    "term.paste(text)",
+    "term.selectAll()",
+    "term.clear()",
+  ]) {
+    assert.ok(panelsSource.includes(needle), "terminal context menu missing " + needle);
+  }
+  for (const key of ["action.paste", "action.selectAll", "action.clearTerminal", "terminal.contextMenu"]) {
+    assert.ok(i18nSource.includes(`"${key}"`), "terminal context menu translation missing " + key);
+  }
+  assert.ok(cssSource.includes(".terminal-context-menu"), "terminal context menu styles missing");
 
   for (const needle of [
     ".status-badge",
@@ -213,7 +230,7 @@ assert.ok(
 );
 assert.match(
   panelsSource,
-  /return \(\) => \{\s*void browserHide\(\)\.catch\(\(\) => undefined\);/,
+  /return \(\) => \{\s*mountedRef\.current = false;\s*void browserHide\(sessionKey\)\.catch\(\(\) => undefined\);/,
   "native browser should hide when the side panel unmounts",
 );
 assert.ok(cssSource.includes(".builtin-browser"), "built-in browser styles missing");
@@ -285,6 +302,135 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
   assert.ok(
     appSource.includes("browserNavigationBySession") && !appSource.includes("setBrowserNavigation("),
     "assistant link navigation must be tracked per session",
+  );
+  assert.ok(
+    appSource.includes("browserStateBySession"),
+    "browser tabs and current page must be tracked per session",
+  );
+  assert.ok(
+    appSource.includes("setBrowserStateBySession((current) => adoptDraftSessionKey(current, sessionId))"),
+    "draft browser state must migrate to the created session",
+  );
+  assert.ok(
+    appSource.includes("setBrowserStateBySession((current) => dropSessionKey(current, sessionId))"),
+    "deleting a session must drop its browser state",
+  );
+  assert.ok(
+    appSource.includes("browserState={browserState}") && appSource.includes("onBrowserStateChange="),
+    "App must pass the active session browser state to the right tools panel",
+  );
+  assert.ok(
+    panelsSource.includes("initialState={browserState}") && panelsSource.includes("onStateChange={onBrowserStateChange}"),
+    "RightToolsPanel must pass browser state through to BuiltInBrowserPanel",
+  );
+  assert.ok(
+    panelsSource.includes("initialState?.tabs.length") &&
+      panelsSource.includes("onStateChangeRef.current({ tabs, activeTabId, handledNavigationId })"),
+    "BuiltInBrowserPanel must restore and report its tab state",
+  );
+
+  // Returning to a task must not hard-reload the page it already had open.
+  const browserRustSource = await readFile(
+    resolve(repositoryRoot, "apps/desktop/src-tauri/src/browser.rs"),
+    "utf8",
+  );
+  const mainRustSource = await readFile(
+    resolve(repositoryRoot, "apps/desktop/src-tauri/src/main.rs"),
+    "utf8",
+  );
+  assert.ok(
+    browserRustSource.includes("pub struct BrowserRegistry") && browserRustSource.includes("fn browser_label(index: u64)"),
+    "browser.rs must keep one webview per task instead of a single shared label",
+  );
+  assert.ok(
+    !browserRustSource.includes("const SIDE_BROWSER_LABEL"),
+    "the single global side-browser label must be gone",
+  );
+  const ensureStart = browserRustSource.indexOf("pub async fn browser_ensure");
+  const ensureBody = browserRustSource.slice(
+    ensureStart,
+    browserRustSource.indexOf("#[tauri::command]", ensureStart),
+  );
+  assert.ok(ensureStart > 0 && ensureBody.length > 0, "browser_ensure must exist");
+  assert.ok(
+    !ensureBody.includes("browser_navigate_inner"),
+    "browser_ensure must not navigate an existing webview",
+  );
+  assert.ok(
+    browserRustSource.includes("pub async fn browser_adopt_session"),
+    "a draft task's live webview must be adoptable by the created session",
+  );
+  assert.ok(
+    browserRustSource.includes("if !registry(app).is_active(session)"),
+    "only the visible task may write the shared browser-state.json snapshot",
+  );
+  assert.ok(
+    browserRustSource.includes("session: String,") && browserRustSource.includes("BrowserNavigatedPayload {"),
+    "browser-navigated must report which task navigated",
+  );
+  assert.ok(
+    mainRustSource.includes("browser::BrowserRegistry::default()") && mainRustSource.includes("browser::browser_adopt_session"),
+    "main.rs must register the browser registry state and the adopt command",
+  );
+  assert.ok(
+    apiSource.includes("export async function browserAdoptSession(from: string, to: string)") &&
+      apiSource.includes("browserEnsure(\n  session: string,"),
+    "workspaceApi must expose per-session browser commands",
+  );
+  assert.ok(
+    panelsSource.includes("sessionKey={sessionKey}") && panelsSource.includes("browserHide(sessionKey)"),
+    "BuiltInBrowserPanel must address its own task's webview",
+  );
+  assert.ok(
+    panelsSource.includes("if (!ensured.created && ensured.url)") && panelsSource.includes("adoptLiveUrl"),
+    "the panel must adopt the live page after switching back instead of reloading it",
+  );
+  assert.ok(
+    panelsSource.includes("handledNavigationId") && panelsSource.includes("initialState?.handledNavigationId ?? null"),
+    "an already-opened assistant link must not be replayed when returning to a task",
+  );
+  assert.ok(
+    panelsSource.includes("if (id === activeTabIdRef.current)"),
+    "re-selecting the open tab must not reload it",
+  );
+  // Exactly one task's page may be on screen: a background task must never float
+  // over the chat area.
+  assert.ok(
+    browserRustSource.includes("fn hide_other_browsers") && browserRustSource.includes("fn hide_inactive_browsers"),
+    "browser.rs must be able to sweep every side webview that is not in view",
+  );
+  assert.ok(
+    browserRustSource.includes("for (label, webview) in app.webviews()"),
+    "the sweep must walk real webview labels so orphans are caught too",
+  );
+  const showStart = browserRustSource.indexOf("pub async fn browser_show");
+  const showBody = browserRustSource.slice(
+    showStart,
+    browserRustSource.indexOf("#[tauri::command]", showStart),
+  );
+  assert.ok(
+    showBody.includes("if !registry(&app).is_active(&session)"),
+    "a stale show from a task that already switched away must be ignored",
+  );
+  assert.ok(
+    showBody.includes("hide_other_browsers"),
+    "showing a task's page must hide every other task's page",
+  );
+  assert.ok(
+    panelsSource.includes("if (!mountedRef.current)") && panelsSource.includes("mountedRef.current = false"),
+    "an unmounted browser panel must not finish a pending show",
+  );
+  assert.ok(
+    appSource.includes("browserAdoptSession(DRAFT_SESSION_KEY, sessionStateKey(sessionId))"),
+    "promoting a draft task must migrate its webview instead of recreating it",
+  );
+  assert.ok(
+    appSource.includes("browserClose(sessionStateKey(sessionId))"),
+    "deleting a task must release its native webview",
+  );
+  assert.ok(
+    appSource.includes("sessionKey={activeSessionStateKey}"),
+    "App must tell the right tools panel which task it is rendering",
   );
 
   assert.equal(formatSessionStatus("need_user"), "needs review");

@@ -1,6 +1,7 @@
 //! Shared JSON-RPC contracts for XCoding clients and the Rust core.
 
 use chrono::{DateTime, Utc};
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -28,6 +29,8 @@ pub const DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 2;
 pub const MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 1;
 pub const MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 20;
 pub const DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 60;
+pub const MIN_CONTEXT_WINDOW_TOKENS: usize = 1_024;
+pub const MAX_CONTEXT_WINDOW_TOKENS: usize = 10_000_000;
 pub const MIN_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 30;
 pub const MAX_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 120;
 pub const DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT: u32 = 60;
@@ -449,6 +452,35 @@ pub enum ProviderWireApi {
     Responses,
 }
 
+/// Vision delegate configuration for models without native vision support.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct VisionDelegateConfig {
+    /// Whether vision delegation is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider id to use for vision (e.g., "openai").
+    #[serde(default)]
+    pub provider_id: String,
+    /// Vision model id (e.g., "gpt-4o").
+    #[serde(default)]
+    pub model: String,
+    /// Timeout for vision model calls in seconds.
+    #[serde(default = "default_vision_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_vision_timeout() -> u64 {
+    30
+}
+
+/// Model capability flags for vision support detection.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ModelCapabilities {
+    /// Whether the model natively supports image inputs.
+    #[serde(default)]
+    pub supports_vision: bool,
+}
+
 /// One OpenAI-compatible cloud provider endpoint in Desktop settings.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CloudProviderConfig {
@@ -538,6 +570,15 @@ pub struct UserConfig {
     /// Whether tightly constrained PowerShell requests to loopback HTTP APIs may run without a high-risk prompt.
     #[serde(default, skip_serializing_if = "is_false")]
     pub skip_local_api_confirmation: bool,
+    /// Per-model context window overrides keyed by normalized (trimmed, lowercased) model id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_context_windows: BTreeMap<String, usize>,
+    /// Vision delegate configuration for models without native vision support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_delegate: Option<VisionDelegateConfig>,
+    /// Model capability flags keyed by normalized model id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_capabilities: BTreeMap<String, ModelCapabilities>,
 }
 
 impl Default for UserConfig {
@@ -574,6 +615,9 @@ impl Default for UserConfig {
             workspace_home: None,
             hidden_project_paths: Vec::new(),
             skip_local_api_confirmation: false,
+            model_context_windows: BTreeMap::new(),
+            vision_delegate: None,
+            model_capabilities: BTreeMap::new(),
         }
     }
 }
@@ -855,6 +899,24 @@ pub enum SessionEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Vision delegate started processing images.
+    VisionDelegateStart {
+        session_id: Uuid,
+        image_count: usize,
+        delegate_model: String,
+    },
+    /// Vision delegate successfully returned image descriptions.
+    VisionDelegateSuccess {
+        session_id: Uuid,
+        image_count: usize,
+        description_length: usize,
+    },
+    /// Vision delegate failed to process images.
+    VisionDelegateFailed {
+        session_id: Uuid,
+        image_count: usize,
+        error: String,
+    },
     Error {
         session_id: Uuid,
         message: String,
@@ -1008,6 +1070,37 @@ mod tests {
         };
         let enabled_json = serde_json::to_value(&enabled).expect("enabled config serializes");
         assert_eq!(enabled_json["skip_local_api_confirmation"], true);
+    }
+
+    #[test]
+    fn defaults_and_round_trips_model_context_windows() {
+        let legacy: UserConfig = serde_json::from_value(json!({
+            "locale": "en",
+            "mode": "ask",
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "base_url": "https://example.test/v1"
+        }))
+        .expect("legacy user config parses");
+        assert!(legacy.model_context_windows.is_empty());
+        assert!(
+            serde_json::to_value(&legacy)
+                .expect("legacy config serializes")
+                .get("model_context_windows")
+                .is_none()
+        );
+
+        let mut windows = BTreeMap::new();
+        windows.insert("gpt-5.5".to_owned(), 272_000usize);
+        let configured = UserConfig {
+            model_context_windows: windows,
+            ..UserConfig::default()
+        };
+        let json = serde_json::to_value(&configured).expect("configured config serializes");
+        assert_eq!(json["model_context_windows"]["gpt-5.5"], 272_000);
+        let decoded: UserConfig =
+            serde_json::from_value(json).expect("configured config round-trips");
+        assert_eq!(decoded.model_context_windows["gpt-5.5"], 272_000);
     }
 
     #[test]

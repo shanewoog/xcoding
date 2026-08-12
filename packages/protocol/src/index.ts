@@ -71,6 +71,24 @@ export interface CloudProviderConfig {
   api_key?: string;
 }
 
+/** Vision delegate configuration for models without native vision support. */
+export interface VisionDelegateConfig {
+  /** Whether vision delegation is enabled. */
+  enabled: boolean;
+  /** Provider id used for vision calls. */
+  provider_id: string;
+  /** Vision model id, for example gpt-4o. */
+  model: string;
+  /** Timeout for vision model calls in seconds. */
+  timeout_seconds: number;
+}
+
+/** Model capability flags for vision support detection. */
+export interface ModelCapabilities {
+  /** Whether the model natively supports image inputs. */
+  supports_vision: boolean;
+}
+
 /** User-level preferences stored under ~/.xcoding/config.json */
 export interface UserConfig {
   locale: string;
@@ -117,6 +135,12 @@ export interface UserConfig {
   hidden_project_paths?: string[];
   /** Skip high-risk confirmation only for tightly constrained PowerShell loopback API requests. */
   skip_local_api_confirmation?: boolean;
+  /** Per-model context window overrides keyed by normalized (trimmed, lowercased) model id. */
+  model_context_windows?: Record<string, number>;
+  /** Describes images with a second model when the session model cannot read them. */
+  vision_delegate?: VisionDelegateConfig;
+  /** Per-model capability overrides keyed by normalized (trimmed, lowercased) model id. */
+  model_capabilities?: Record<string, ModelCapabilities>;
 }
 
 export interface ProjectDir {
@@ -436,6 +460,24 @@ export type SessionEvent =
       output_chars: number;
       tool_calls: number;
       error?: string;
+    }
+  | {
+      type: "vision_delegate_start";
+      session_id: string;
+      image_count: number;
+      delegate_model: string;
+    }
+  | {
+      type: "vision_delegate_success";
+      session_id: string;
+      image_count: number;
+      description_length: number;
+    }
+  | {
+      type: "vision_delegate_failed";
+      session_id: string;
+      image_count: number;
+      error: string;
     }
   | {
       type: "error";

@@ -153,6 +153,38 @@ export function eventActivity(
       policy: "failed",
     };
   }
+  // The three delegate events share one id so the row moves from running to
+  // its outcome instead of stacking up.
+  if (event.type === "vision_delegate_start") {
+    return {
+      id: "vision-delegate",
+      label: t(locale, "activity.visionDelegate"),
+      detail: event.delegate_model,
+      state: "running",
+      policy: "running",
+    };
+  }
+  if (event.type === "vision_delegate_success") {
+    return {
+      id: "vision-delegate",
+      label: t(locale, "activity.visionDelegateDone"),
+      detail: t(locale, "activity.visionDelegateDetail", {
+        count: event.image_count,
+        chars: event.description_length,
+      }),
+      state: "done",
+      policy: "done",
+    };
+  }
+  if (event.type === "vision_delegate_failed") {
+    return {
+      id: "vision-delegate",
+      label: t(locale, "activity.visionDelegateFailed"),
+      detail: event.error,
+      state: "failed",
+      policy: "failed",
+    };
+  }
   if (event.type === "error") {
     return {
       id: sequence,

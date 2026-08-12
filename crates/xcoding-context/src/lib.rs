@@ -66,7 +66,16 @@ Current mode: {mode}. \
 In ask mode, propose writes and wait for required approval. In auto-edit mode, ordinary file patches and allowlisted safe commands may apply without approval; high-risk writes and non-allowlisted commands still require user approval. \
 In full-auto mode, every permitted write and command runs without approval; hard-denied destructive commands are still blocked, so act with extra care. \
 Prefer minimal, scoped changes. Do not invent secrets or commit credentials. If apply_patch fails with a patch conflict, re-read the file and retry with updated old_text; do not force-write without matching the current contents. \
+When several independent read-only lookups are needed, request them as parallel tool calls in one turn instead of one call per turn. \
 When a workspace skill matches the task, call load_skill with its name before following its instructions."
+        );
+
+        #[cfg(target_os = "windows")]
+        prompt.push_str(
+            "\n\nRuntime environment: Windows. run_command executes one program with a separate argument vector; do not invoke cmd, PowerShell, bash, or another shell wrapper. \
+Use Windows-compatible direct commands: rg for text search, where.exe to locate an executable, tasklist for processes, and netstat -ano for ports. \
+Do not use Unix-only diagnostics such as ps -ef, which, lsof, grep, or netstat -tln/-tlnp. \
+For GitNexus, prefer built-in code-analysis tools. For a CLI fallback, invoke gitnexus directly with --repo when needed. Never run node .gitnexus/run.cjs unless that exact file was verified to exist; a missing runner is not a reason to retry it.",
         );
 
         if !self.project_rules.is_empty() {
@@ -343,6 +352,33 @@ mod tests {
         assert!(prompt.contains("Current mode: ask"));
         assert!(prompt.contains("AGENTS.md"));
         assert!(prompt.contains("Workspace sketch"));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn system_prompt_asks_for_parallel_read_only_tool_calls() {
+        let root = temp_workspace("parallel-tool-guidance");
+
+        let prompt = ContextSnapshot::load(&root).system_prompt("full-auto");
+        assert!(prompt.contains("independent read-only lookups"));
+        assert!(prompt.contains("parallel tool calls in one turn"));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn system_prompt_gives_windows_command_guidance() {
+        let root = temp_workspace("windows-command-guidance");
+
+        let prompt = ContextSnapshot::load(&root).system_prompt("ask");
+        assert!(prompt.contains("Runtime environment: Windows"));
+        assert!(prompt.contains("netstat -ano"));
+        assert!(prompt.contains("ps -ef"));
+        assert!(prompt.contains("netstat -tln/-tlnp"));
+        assert!(prompt.contains("invoke gitnexus directly"));
+        assert!(prompt.contains("Never run node .gitnexus/run.cjs unless"));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }

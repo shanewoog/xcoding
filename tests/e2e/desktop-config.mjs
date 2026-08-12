@@ -135,6 +135,34 @@ async function main() {
   const submitSource = appSource.slice(submitStart, submitEnd);
   assert.ok(submitSource.includes("enqueueFollowUp(activeSessionId, message, images);"), "running sessions must queue follow-up input");
 
+  const keyDownStart = appSource.indexOf("function onComposerKeyDown(");
+  assert.ok(keyDownStart >= 0, "App missing composer keyboard handler");
+  const keyDownSource = appSource.slice(keyDownStart, appSource.indexOf("\n  }\n", keyDownStart));
+  assert.ok(
+    keyDownSource.includes("void submitComposer()"),
+    "Ctrl+Enter must reuse the send-button path so it follows the queue/steer toggle",
+  );
+  assert.ok(
+    keyDownSource.includes("if (sendBlockReason) return;"),
+    "Ctrl+Enter must respect the same block reasons that disable the send button",
+  );
+  assert.ok(
+    keyDownSource.includes("event.shiftKey") && keyDownSource.includes("steerCurrentRun()"),
+    "keyboard steering must require the explicit Ctrl+Shift+Enter chord",
+  );
+  assert.ok(
+    !/if \(queueMode\) \{\s*void steerCurrentRun\(\);/.test(keyDownSource),
+    "Ctrl+Enter must never turn a queued follow-up into an interrupt",
+  );
+  assert.ok(
+    appSource.includes("if (!sent) restoreComposerDraft(message, images);"),
+    "a steer that never reaches the model must put the message back in the composer",
+  );
+  assert.ok(
+    appSource.includes("<kbd>Ctrl+Shift</kbd>"),
+    "the steer toggle should advertise the Ctrl+Shift+Enter chord",
+  );
+
   const cliSource = await readFile(resolve(repositoryRoot, "apps/cli/src/index.ts"), "utf8");
 
   for (const needle of [
@@ -275,6 +303,7 @@ async function main() {
   assert.ok(!/fs::remove_dir|remove_dir_all/.test(projectsProductionSource), "project removal must not delete workspace folders");
   const protocolSource = await readFile(resolve(repositoryRoot, "packages/protocol/src/index.ts"), "utf8");
   assert.ok(protocolSource.includes("hidden_project_paths"), "protocol missing hidden_project_paths");
+  assert.ok(protocolSource.includes("model_context_windows"), "protocol missing model_context_windows");
   assert.ok(protocolSource.includes("ImportProjectResult"), "protocol missing ImportProjectResult");
   const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
   assert.ok(apiSource.includes("includeBranches"), "git_environment should support includeBranches");
@@ -302,6 +331,24 @@ async function main() {
   assert.ok(appSource.includes("contextWindowForModel"), "context usage should choose a model context window");
   assert.ok(cssSource.includes(".context-usage-popover") && cssSource.includes(".context-usage-meter"), "styles.css missing context usage popover styles");
   assert.ok(i18nSource.includes("context.title") && i18nSource.includes("context.estimated"), "i18n missing context usage copy");
+  assert.ok(appSource.includes("model_context_windows"), "settings should persist model context window overrides");
+  assert.ok(appSource.includes("modelContextWindowEntries"), "settings should track model context window entries");
+  assert.ok(appSource.includes("normalizeModelContextWindows") && appSource.includes("contextWindowMapFromEntries"), "settings should normalize model context window values");
+  assert.ok(appSource.includes("context-windows-settings-card") && appSource.includes('id="context-window-list"') && appSource.includes("context-window-row"), "settings should render model context window controls");
+  assert.ok(cssSource.includes(".context-windows-settings-card") && cssSource.includes(".context-window-list") && cssSource.includes(".context-window-row"), "styles.css missing model context window settings layout");
+  assert.ok(appSource.includes("settings-tabs-container") && appSource.includes('role="tablist"') && appSource.includes('role="tabpanel"') && appSource.includes("setSettingsTab"), "settings sections should render as a tabbed interface");
+  assert.ok(cssSource.includes(".settings-tabs-container") && cssSource.includes(".settings-tab"), "styles.css missing settings tab layout");
+  assert.ok(cssSource.includes("grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;"), "context window rows should align model, tokens, and remove button horizontally");
+  assert.ok(i18nSource.includes("settings.contextWindows.title") && i18nSource.includes("field.contextWindowTokens") && i18nSource.includes("action.addContextWindow"), "i18n missing model context window settings keys");
+
+  assert.ok(protocolSource.includes("VisionDelegateConfig") && protocolSource.includes("vision_delegate"), "protocol missing vision delegate config");
+  assert.ok(protocolSource.includes("vision_delegate_start") && protocolSource.includes("vision_delegate_success") && protocolSource.includes("vision_delegate_failed"), "protocol missing vision delegate events");
+  assert.ok(appSource.includes("vision-settings-card") && appSource.includes('id="vision-delegate-provider"') && appSource.includes('id="vision-delegate-model"') && appSource.includes('id="vision-delegate-timeout"'), "settings should render vision delegate controls");
+  assert.ok(appSource.includes("visionDelegateConfigFromForm") && appSource.includes("visionDelegateFormFromConfig"), "settings should map vision delegate config to form state");
+  assert.ok(appSource.includes("model_capabilities"), "settings should persist model vision capabilities");
+  assert.ok(cssSource.includes(".vision-settings-card"), "styles.css missing vision delegate settings layout");
+  assert.ok(i18nSource.includes("settings.vision.title") && i18nSource.includes("field.visionDelegateProvider") && i18nSource.includes("field.visionDelegateModel"), "i18n missing vision delegate settings keys");
+  assert.ok(i18nSource.includes("activity.visionDelegate") && i18nSource.includes("activity.visionDelegateFailed"), "i18n missing vision delegate activity copy");
 
   for (const needle of [
     ".mode-help",
@@ -371,6 +418,50 @@ async function main() {
   assert.equal(desktopDoctorReady(ready), true);
   assert.equal(ready.find((c) => c.name === "defaults")?.detail.includes("Auto edit"), true);
   assert.equal(ready.find((c) => c.name === "base_url")?.detail, "https://ai.v58.dev/v1");
+
+  // Epoch barrier prevents background tasks from hijacking a fresh composer after "new task".
+  assert.ok(appSource.includes("const composerEpochRef"), "Missing composerEpochRef");
+  assert.ok(appSource.includes("const draftEpochRef"), "Missing draftEpochRef");
+  assert.ok(appSource.includes("const draftKnownSessionIdsRef"), "Missing draftKnownSessionIdsRef");
+  assert.ok(
+    appSource.includes("composerEpochRef.current += 1"),
+    "resetComposerSession must bump composerEpochRef",
+  );
+  assert.ok(
+    appSource.includes("draftEpochRef.current === composerEpochRef.current"),
+    "Event handler or invoke result must check epoch ownership",
+  );
+  assert.ok(
+    appSource.includes("draftEpochRef.current = composerEpochRef.current"),
+    "New draft turn must claim the current epoch",
+  );
+  assert.ok(
+    appSource.includes("draftKnownSessionIdsRef.current = new Set(sessionsRef.current.map"),
+    "New draft turn must snapshot known sessions",
+  );
+  assert.ok(
+    appSource.includes("draftEpochRef.current = null"),
+    "Draft turn cleanup must release epoch ownership",
+  );
+
+  const resetComposerStart = appSource.indexOf("function resetComposerSession(");
+  assert.ok(resetComposerStart >= 0, "App missing resetComposerSession");
+  const resetComposerSource = appSource.slice(
+    resetComposerStart,
+    appSource.indexOf("\n  }\n", resetComposerStart),
+  );
+  assert.ok(
+    resetComposerSource.includes("composerEpochRef.current += 1;"),
+    "resetComposerSession must bump the epoch before clearing the composer",
+  );
+  assert.ok(
+    resetComposerSource.includes("setDraftRunning(false);"),
+    "resetComposerSession must clear draftRunning",
+  );
+  assert.ok(
+    !resetComposerSource.includes("if (!draftInFlightRef.current)"),
+    "resetComposerSession must clear draftRunning unconditionally, otherwise the new composer stays blocked",
+  );
 
   console.log("Desktop config UX checks passed.");
 }

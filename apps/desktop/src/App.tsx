@@ -9,6 +9,7 @@ import type {
   ChatResult,
   CloudProviderConfig,
   Message,
+  ModelCapabilities,
   Mode,
   PatchPreview,
   PendingAction,
@@ -30,6 +31,7 @@ import type {
   ProviderAuthStatus,
   ProviderModel,
   UserConfig,
+  VisionDelegateConfig,
   WorkspaceConfig,
 } from "@xcoding/protocol";
 import { buildActivity, eventActivity, mergeActivity } from "./activity";
@@ -49,6 +51,7 @@ import {
 import {
   adoptDraftSessionKey,
   clampRightPanelWidth,
+  DRAFT_SESSION_KEY,
   dropSessionKey,
   formatSessionStatus,
   loadRightPanelWidth,
@@ -58,7 +61,7 @@ import {
   sessionStateKey,
 } from "./layout";
 import { applyUiFontSize, loadUiFontSize, saveUiFontSize } from "./appearance";
-import { isLocale, loadLocale, saveLocale, t, type Locale } from "./i18n";
+import { isLocale, loadLocale, saveLocale, t, type Locale, type MessageKey } from "./i18n";
 import {
   EmptyQuickActions,
   EnvironmentPopover,
@@ -72,8 +75,15 @@ import {
   type SourceItem,
   type ToolPanelTab,
   type BrowserNavigationRequest,
+  type BrowserSessionState,
 } from "./panels";
-import { fetchGitEnvironment, formatDiffStat, openPath } from "./workspaceApi";
+import {
+  browserAdoptSession,
+  browserClose,
+  fetchGitEnvironment,
+  formatDiffStat,
+  openPath,
+} from "./workspaceApi";
 
 const defaultProvider = "openai";
 const DEFAULT_PROVIDER_BASE_URL = "https://ai.v58.dev";
@@ -107,6 +117,11 @@ const MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT = 100;
 const DEFAULT_CIRCUIT_MIN_REQUEST_COUNT = 10;
 const MIN_CIRCUIT_MIN_REQUEST_COUNT = 1;
 const MAX_CIRCUIT_MIN_REQUEST_COUNT = 100;
+const MIN_CONTEXT_WINDOW_TOKENS = 1_024;
+const MAX_CONTEXT_WINDOW_TOKENS = 10_000_000;
+const DEFAULT_VISION_TIMEOUT_SECS = 30;
+const MIN_VISION_TIMEOUT_SECS = 5;
+const MAX_VISION_TIMEOUT_SECS = 300;
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 const REASONING_EFFORTS = ["none", "low", "medium", "high"] as const;
 type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
@@ -276,6 +291,143 @@ function toolMessagePreview(content: string): string {
   return `${collapsed.slice(0, 71)}…`;
 }
 
+type ToolCallLike = { id: string; name: string; arguments: Record<string, unknown> };
+
+type InlineActivityEntry = {
+  id: string;
+  kind: "file" | "command";
+  label: string;
+  path?: string;
+  command?: string;
+  state: "running" | "done" | "failed";
+  created_at: string;
+  added?: number;
+  removed?: number;
+  fileExisted?: boolean;
+  summary?: string;
+};
+
+function applyPatchCounts(argumentsJson: Record<string, unknown>): { path: string; fileExisted: boolean; added: number; removed: number } {
+  const path = typeof argumentsJson.path === "string" ? argumentsJson.path : "";
+  const oldText = typeof argumentsJson.old_text === "string" ? argumentsJson.old_text : "";
+  const newText = typeof argumentsJson.new_text === "string" ? argumentsJson.new_text : "";
+  const fileExisted = oldText.trim().length > 0;
+  const removed = fileExisted ? oldText.split("\n").length : 0;
+  const added = newText ? newText.split("\n").length : 0;
+  return { path, fileExisted, added, removed };
+}
+
+function runCommandPreview(argumentsJson: Record<string, unknown>): string {
+  const executable = typeof argumentsJson.executable === "string" ? argumentsJson.executable : "";
+  const rawArgs = argumentsJson.args;
+  const pieces = Array.isArray(rawArgs) ? rawArgs.map((item) => String(item)) : [];
+  const parts = [executable, ...pieces].filter((part) => part.length > 0);
+  return parts.length > 0 ? parts.join(" ") : JSON.stringify(argumentsJson);
+}
+
+function buildInlineActivityStart(toolCall: ToolCallLike, createdAt: string, locale: Locale): InlineActivityEntry | null {
+  if (toolCall.name === "apply_patch") {
+    const { path, fileExisted, added, removed } = applyPatchCounts(toolCall.arguments);
+    if (!path) return null;
+    return {
+      id: toolCall.id,
+      kind: "file",
+      label: t(locale, fileExisted ? "activity.fileEdited" : "activity.fileCreated"),
+      path,
+      state: "running",
+      created_at: createdAt,
+      added,
+      removed,
+      fileExisted,
+    };
+  }
+  if (toolCall.name === "run_command") {
+    return {
+      id: toolCall.id,
+      kind: "command",
+      label: t(locale, "activity.commandRan"),
+      command: runCommandPreview(toolCall.arguments),
+      state: "running",
+      created_at: createdAt,
+    };
+  }
+  return null;
+}
+
+function inlineActivityLabel(entry: InlineActivityEntry, state: InlineActivityEntry["state"], locale: Locale): string {
+  if (entry.kind !== "file" || state !== "failed") return entry.label;
+  return t(locale, entry.fileExisted ? "activity.fileEditFailed" : "activity.fileCreateFailed");
+}
+
+function upsertInlineActivity(
+  current: InlineActivityEntry[],
+  toolCall: ToolCallLike,
+  createdAt: string,
+  state: "running" | "done" | "failed",
+  summary: string,
+  locale: Locale,
+): InlineActivityEntry[] {
+  const next = buildInlineActivityStart(toolCall, createdAt, locale);
+  if (!next) return current;
+  const index = current.findIndex((item) => item.id === toolCall.id);
+  const list = index >= 0
+    ? current.map((item, itemIndex) => (
+        itemIndex === index
+          ? { ...item, ...next, label: inlineActivityLabel(next, state, locale), state, summary, created_at: item.created_at }
+          : item
+      ))
+    : [...current, { ...next, label: inlineActivityLabel(next, state, locale), state, summary }];
+  return list.sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+function buildInlineActivity(events: PersistedSessionEvent[], locale: Locale): InlineActivityEntry[] {
+  const byId = new Map<string, InlineActivityEntry>();
+  const ordered = [...events].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  for (const item of ordered) {
+    const event = item.event;
+    if (event.type === "tool_start") {
+      const entry = buildInlineActivityStart(event.tool_call, item.created_at, locale);
+      if (entry) byId.set(entry.id, entry);
+    } else if (event.type === "tool_end") {
+      const existing = byId.get(event.tool_call.id);
+      if (existing) {
+        byId.set(event.tool_call.id, {
+          ...existing,
+          label: inlineActivityLabel(existing, event.success ? "done" : "failed", locale),
+          state: event.success ? "done" : "failed",
+          summary: event.summary,
+        });
+      }
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+function splitInlineActivityByMessage(
+  messages: Message[],
+  entries: InlineActivityEntry[],
+): { buckets: Map<string, InlineActivityEntry[]>; pending: InlineActivityEntry[] } {
+  const buckets = new Map<string, InlineActivityEntry[]>();
+  let previousAssistantAt: string | null = null;
+  let lastAssistantAt: string | null = null;
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const bucket: InlineActivityEntry[] = [];
+    for (const entry of entries) {
+      if ((previousAssistantAt === null || entry.created_at > previousAssistantAt) && entry.created_at <= message.created_at) {
+        bucket.push(entry);
+      }
+    }
+    if (bucket.length > 0) buckets.set(message.id, bucket);
+    previousAssistantAt = message.created_at;
+    lastAssistantAt = message.created_at;
+  }
+  const pending = lastAssistantAt === null
+    ? entries
+    : entries.filter((entry) => entry.created_at > lastAssistantAt);
+  return { buckets, pending };
+}
+
 type ConversationEntry =
   | { kind: "message"; message: Message }
   | { kind: "tool-group"; id: string; messages: Message[] };
@@ -330,11 +482,115 @@ function estimateMessageTokens(message: Message): number {
   return estimateTextTokens(parsed.text) + parsed.images.length * IMAGE_CONTEXT_TOKEN_ESTIMATE;
 }
 
-function contextWindowForModel(model: string): number {
+function contextWindowForModel(model: string, overrides?: Record<string, number>): number {
   const normalized = model.trim().toLowerCase();
+  if (overrides && normalized in overrides) return overrides[normalized];
   if (/gemini/.test(normalized)) return 1_000_000;
+  if (/deepseek/.test(normalized)) return 1_048_576;
+  if (/grok/.test(normalized)) return 256_000;
   if (/claude/.test(normalized)) return 200_000;
+  if (/gpt-5/.test(normalized) || /gpt-4\.1/.test(normalized)) return 272_000;
+  if (/qwen/.test(normalized) || /kimi/.test(normalized) || /mimo/.test(normalized)) return 256_000;
   return DEFAULT_CONTEXT_WINDOW;
+}
+
+function normalizeModelContextWindows(value: Record<string, number> | undefined | null): Record<string, number> {
+  const result: Record<string, number> = {};
+  if (!value) return result;
+  for (const [model, window] of Object.entries(value)) {
+    const normalized = model.trim().toLowerCase();
+    if (!normalized) continue;
+    result[normalized] = normalizeBoundedInteger(
+      window,
+      DEFAULT_CONTEXT_WINDOW,
+      MIN_CONTEXT_WINDOW_TOKENS,
+      MAX_CONTEXT_WINDOW_TOKENS,
+    );
+  }
+  return result;
+}
+
+interface ModelContextWindowEntry {
+  id: string;
+  model: string;
+  window: number;
+}
+
+function contextWindowEntriesFromMap(
+  value: Record<string, number> | undefined | null,
+): ModelContextWindowEntry[] {
+  const normalized = normalizeModelContextWindows(value);
+  return Object.entries(normalized).map(([model, window], index) => ({
+    id: `context-window-${index}`,
+    model,
+    window,
+  }));
+}
+
+function contextWindowMapFromEntries(entries: ModelContextWindowEntry[]): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const entry of entries) {
+    const model = entry.model.trim().toLowerCase();
+    if (!model) continue;
+    result[model] = normalizeBoundedInteger(
+      entry.window,
+      DEFAULT_CONTEXT_WINDOW,
+      MIN_CONTEXT_WINDOW_TOKENS,
+      MAX_CONTEXT_WINDOW_TOKENS,
+    );
+  }
+  return result;
+}
+
+interface VisionDelegateForm {
+  enabled: boolean;
+  providerId: string;
+  model: string;
+  timeoutSeconds: number;
+}
+
+const EMPTY_VISION_DELEGATE_FORM: VisionDelegateForm = {
+  enabled: false,
+  providerId: "",
+  model: "",
+  timeoutSeconds: DEFAULT_VISION_TIMEOUT_SECS,
+};
+
+function visionDelegateFormFromConfig(
+  value: VisionDelegateConfig | undefined | null,
+): VisionDelegateForm {
+  if (!value) return EMPTY_VISION_DELEGATE_FORM;
+  return {
+    enabled: value.enabled === true,
+    providerId: (value.provider_id || "").trim(),
+    model: (value.model || "").trim(),
+    timeoutSeconds: normalizeBoundedInteger(
+      value.timeout_seconds,
+      DEFAULT_VISION_TIMEOUT_SECS,
+      MIN_VISION_TIMEOUT_SECS,
+      MAX_VISION_TIMEOUT_SECS,
+    ),
+  };
+}
+
+/** Omitted entirely while untouched so config.json stays clean. */
+function visionDelegateConfigFromForm(
+  form: VisionDelegateForm,
+): VisionDelegateConfig | undefined {
+  const providerId = form.providerId.trim();
+  const model = form.model.trim();
+  if (!form.enabled && !providerId && !model) return undefined;
+  return {
+    enabled: form.enabled,
+    provider_id: providerId,
+    model,
+    timeout_seconds: normalizeBoundedInteger(
+      form.timeoutSeconds,
+      DEFAULT_VISION_TIMEOUT_SECS,
+      MIN_VISION_TIMEOUT_SECS,
+      MAX_VISION_TIMEOUT_SECS,
+    ),
+  };
 }
 
 function formatContextTokenCount(tokens: number): string {
@@ -641,53 +897,213 @@ function currentRunPlanStep(plan: PlanStep[], activity: ActivityItem[]): number 
   return 0;
 }
 
-const MESSAGE_LINK_PATTERN = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s<>()\]]+/gi;
-
 function splitLinkPunctuation(value: string): { url: string; suffix: string } {
   const suffix = value.match(/(?:\*\*|[.,!?;:'"\u2018\u2019\u201C\u201D，。！？；：])+$/)?.[0] || "";
   return { url: suffix ? value.slice(0, -suffix.length) : value, suffix };
 }
 
-function AssistantMessageBody({ content, onOpenLink }: { content: string; onOpenLink: (url: string) => void }) {
+function renderInlineMarkdown(
+  text: string,
+  onOpenLink: (url: string) => void,
+  keyBase: string,
+): ReactNode[] {
   const parts: ReactNode[] = [];
   let cursor = 0;
   let key = 0;
-
-  for (const match of content.matchAll(MESSAGE_LINK_PATTERN)) {
+  for (const match of text.matchAll(INLINE_TOKEN_PATTERN)) {
     const start = match.index ?? 0;
-    let end = start + match[0].length;
+    if (start > cursor) parts.push(text.slice(cursor, start));
+    const end = start + match[0].length;
     const markdownLabel = match[1];
-    const { url, suffix } = splitLinkPunctuation(match[2] || match[0]);
-    if (!url) continue;
-
-    const trailingBareLinkBoldDelimiter = !markdownLabel && suffix.includes("**") && start >= cursor + 2 && content.slice(start - 2, start) === "**";
-    const boldLink = trailingBareLinkBoldDelimiter || (Boolean(markdownLabel) && start >= cursor + 2 && content.slice(start - 2, start) === "**" && content.slice(end, end + 2) === "**");
-    const visibleSuffix = trailingBareLinkBoldDelimiter ? suffix.replace("**", "") : suffix;
-    const textEnd = boldLink ? start - 2 : start;
-    if (textEnd > cursor) parts.push(content.slice(cursor, textEnd));
-
-    const link = (
-      <a
-        key={`message-link-${key}`}
-        className="assistant-message-link"
-        href={url}
-        onClick={(event) => {
-          event.preventDefault();
-          onOpenLink(url);
-        }}
-      >
-        {markdownLabel || url}
-      </a>
-    );
-    parts.push(boldLink ? <strong key={`message-link-strong-${key}`}>{link}</strong> : link);
-    if (visibleSuffix) parts.push(visibleSuffix);
-    cursor = boldLink && markdownLabel ? end + 2 : end;
+    const markdownUrl = match[2];
+    const code = match[3];
+    const bold = match[4];
+    const bareUrl = match[5];
+    if (markdownUrl) {
+      const { url, suffix } = splitLinkPunctuation(markdownUrl);
+      if (url) {
+        parts.push(
+          <a
+            key={`${keyBase}-link-${key}`}
+            className="assistant-message-link"
+            href={url}
+            onClick={(event) => {
+              event.preventDefault();
+              onOpenLink(url);
+            }}
+          >
+            {markdownLabel || url}
+          </a>,
+        );
+        if (suffix) parts.push(suffix);
+      } else {
+        parts.push(match[0]);
+      }
+      cursor = end;
+    } else if (code) {
+      parts.push(<code key={`${keyBase}-code-${key}`}>{code}</code>);
+      cursor = end;
+    } else if (bold) {
+      parts.push(
+        <strong key={`${keyBase}-strong-${key}`}>
+          {renderInlineMarkdown(bold, onOpenLink, `${keyBase}-bold-${key}`)}
+        </strong>,
+      );
+      cursor = end;
+    } else if (bareUrl) {
+      const { url, suffix } = splitLinkPunctuation(bareUrl);
+      if (url) {
+        parts.push(
+          <a
+            key={`${keyBase}-url-${key}`}
+            className="assistant-message-link"
+            href={url}
+            onClick={(event) => {
+              event.preventDefault();
+              onOpenLink(url);
+            }}
+          >
+            {url}
+          </a>,
+        );
+        if (suffix) parts.push(suffix);
+      } else {
+        parts.push(match[0]);
+      }
+      cursor = end;
+    } else {
+      cursor = end;
+    }
     key += 1;
   }
-
-  if (cursor < content.length) parts.push(content.slice(cursor));
-  return <>{parts.length > 0 ? parts : content}</>;
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
 }
+
+function renderMarkdownBlocks(content: string, onOpenLink: (url: string) => void): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const lines = content.split("\n");
+  let index = 0;
+  let blockKey = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    const orderedMatch = ORDERED_ITEM_PATTERN.exec(line);
+    const unorderedMatch = !orderedMatch && UNORDERED_ITEM_PATTERN.exec(line);
+    if (orderedMatch || unorderedMatch) {
+      const itemPattern = orderedMatch ? ORDERED_ITEM_PATTERN : UNORDERED_ITEM_PATTERN;
+      const items: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index];
+        if (!current.trim()) break;
+        const match = itemPattern.exec(current);
+        if (!match) break;
+        items.push(match[1]);
+        index += 1;
+      }
+      const list = items.map((item, itemIndex) => (
+        <li key={`md-item-${blockKey}-${itemIndex}`}>
+          {renderInlineMarkdown(item, onOpenLink, `md-${blockKey}-${itemIndex}`)}
+        </li>
+      ));
+      nodes.push(
+        orderedMatch
+          ? <ol key={`md-block-${blockKey}`}>{list}</ol>
+          : <ul key={`md-block-${blockKey}`}>{list}</ul>,
+      );
+    } else {
+      const paragraph: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index];
+        if (!current.trim()) break;
+        if (ORDERED_ITEM_PATTERN.test(current) || UNORDERED_ITEM_PATTERN.test(current)) break;
+        paragraph.push(current);
+        index += 1;
+      }
+      nodes.push(
+        <p key={`md-block-${blockKey}`}>
+          {renderInlineMarkdown(paragraph.join("\n"), onOpenLink, `md-${blockKey}`)}
+        </p>,
+      );
+    }
+    blockKey += 1;
+  }
+  return nodes;
+}
+
+const INLINE_TOKEN_PATTERN = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\r\n]+)`|\*\*([^*\r\n]+)\*\*|(https?:\/\/[^\s<>()\]]+)/g;
+const UNORDERED_ITEM_PATTERN = /^\s*[-*]\s+(.*)$/;
+const ORDERED_ITEM_PATTERN = /^\s*\d+[.)]\s+(.*)$/;
+
+function AssistantMessageBody({ content, onOpenLink }: { content: string; onOpenLink: (url: string) => void }) {
+  if (!content) return <>{content}</>;
+  return <>{renderMarkdownBlocks(content, onOpenLink)}</>;
+}
+
+function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; locale: Locale }) {
+  if (items.length === 0) return null;
+  const groupState = items.some((entry) => entry.state === "running")
+    ? "running"
+    : items.some((entry) => entry.state === "failed")
+      ? "failed"
+      : "done";
+  const groupStatus = t(
+    locale,
+    groupState === "running" ? "status.running" : groupState === "failed" ? "status.failed" : "status.done",
+  );
+  return (
+    <details className={`inline-activity-group ${groupState}`}>
+      <summary className="inline-activity-group-summary">
+        <span className="inline-activity-group-label">{t(locale, "activity.toolCalls", { count: items.length })}</span>
+        {groupState === "failed" ? (
+          <span className="inline-activity-dot failed" aria-hidden="true">!</span>
+        ) : (
+          <span className={`inline-activity-dot ${groupState}`} aria-hidden="true" />
+        )}
+        <span className="inline-activity-group-status">{groupStatus}</span>
+      </summary>
+      <div className="inline-activity">
+        {items.map((entry) => {
+          if (entry.kind === "command") {
+            return (
+              <details className={`inline-activity-item inline-activity-command ${entry.state}`} key={entry.id}>
+                <summary>
+                  <span className="inline-activity-label">{t(locale, "activity.commandRan")}</span>
+                  <code className="inline-activity-command-preview">{entry.command}</code>
+                  {entry.state === "running" ? <span className="inline-activity-dot running" aria-label="running" /> : null}
+                  {entry.state === "failed" ? <span className="inline-activity-dot failed" aria-hidden="true">!</span> : null}
+                </summary>
+                <div className="inline-activity-detail">
+                  <code>{entry.command}</code>
+                  {entry.summary ? <p className="inline-activity-summary">{entry.summary}</p> : null}
+                </div>
+              </details>
+            );
+          }
+          return (
+            <div className={`inline-activity-item inline-activity-file ${entry.state}`} key={entry.id} title={entry.path}>
+              <span className="inline-activity-label">{entry.label}</span>
+              <code className="inline-activity-file-path">{entry.path}</code>
+              {(entry.added ?? 0) > 0 || (entry.removed ?? 0) > 0 ? (
+                <span className="inline-activity-delta">
+                  {(entry.added ?? 0) > 0 ? <span className="delta-add">+{entry.added}</span> : null}
+                  {(entry.removed ?? 0) > 0 ? <span className="delta-remove">−{entry.removed}</span> : null}
+                </span>
+              ) : null}
+              {entry.state === "running" ? <span className="inline-activity-dot running" aria-label="running" /> : null}
+              {entry.state === "failed" ? <span className="inline-activity-dot failed" aria-hidden="true">!</span> : null}
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+type SettingsTab = "provider" | "resilience" | "context" | "vision" | "defaults";
 
 export function App() {
   const [locale, setLocale] = useState<Locale>(() => loadLocale());
@@ -718,6 +1134,10 @@ export function App() {
   const [circuitRecoveryWaitSecs, setCircuitRecoveryWaitSecs] = useState(DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS);
   const [circuitErrorRateThresholdPercent, setCircuitErrorRateThresholdPercent] = useState(DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT);
   const [circuitMinRequestCount, setCircuitMinRequestCount] = useState(DEFAULT_CIRCUIT_MIN_REQUEST_COUNT);
+  const [modelContextWindowEntries, setModelContextWindowEntries] = useState<ModelContextWindowEntry[]>([]);
+  const [visionDelegate, setVisionDelegate] = useState<VisionDelegateForm>(EMPTY_VISION_DELEGATE_FORM);
+  // Kept verbatim so saving from Settings never drops hand-written entries.
+  const [modelCapabilities, setModelCapabilities] = useState<Record<string, ModelCapabilities>>({});
   const [availableModels, setAvailableModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -738,6 +1158,14 @@ export function App() {
   const chatGenerationBySessionRef = useRef<Map<string, number>>(new Map());
   const draftInFlightRef = useRef<Promise<string | null> | null>(null);
   const draftGenerationRef = useRef(0);
+  // Epoch barrier: bumped on every user-initiated composer reset (new task / new chat / project switch).
+  // Background sessions must not steal focus from a composer opened in a newer epoch.
+  const composerEpochRef = useRef(0);
+  // Epoch the in-flight draft turn was started in; null when no draft turn is running.
+  const draftEpochRef = useRef<number | null>(null);
+  // Sessions that already existed when the current draft turn started. A brand-new task's id
+  // cannot be in this set, so events from older running tasks are rejected as focus candidates.
+  const draftKnownSessionIdsRef = useRef<Set<string>>(new Set());
   // Monotonic counter shared by draft + session turns so draft→session handoff cannot collide with steer gens.
   const chatGenerationMonoRef = useRef(0);
   const streamedTextBySessionRef = useRef<Map<string, string>>(new Map());
@@ -749,6 +1177,7 @@ export function App() {
   const [streamedTextBySession, setStreamedTextBySession] = useState<Record<string, string>>({});
   const [plan, setPlan] = useState<PlanStep[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [inlineActivityBySession, setInlineActivityBySession] = useState<Record<string, InlineActivityEntry[]>>({});
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [approvalSummary, setApprovalSummary] = useState<string | null>(null);
   const [patchPreview, setPatchPreview] = useState<PatchPreview | null>(null);
@@ -777,6 +1206,7 @@ export function App() {
   const [selectedProviderId, setSelectedProviderId] = useState("default");
   const [showApiKey, setShowApiKey] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
   const [userConfigReady, setUserConfigReady] = useState(false); // used to delay hydration
   const conversationRef = useRef<HTMLDivElement | null>(null);
   const conversationAtBottomRef = useRef(true);
@@ -788,6 +1218,7 @@ export function App() {
   const [rightPanelOpenBySession, setRightPanelOpenBySession] = useState<Record<string, boolean>>({});
   const [rightPanelTabBySession, setRightPanelTabBySession] = useState<Record<string, ToolPanelTab>>({});
   const [browserNavigationBySession, setBrowserNavigationBySession] = useState<Record<string, BrowserNavigationRequest>>({});
+  const [browserStateBySession, setBrowserStateBySession] = useState<Record<string, BrowserSessionState>>({});
   const [rightPanelWidth, setRightPanelWidth] = useState(() => loadRightPanelWidth());
   const [envPopoverOpen, setEnvPopoverOpen] = useState(false);
   const [contextUsageOpen, setContextUsageOpen] = useState(false);
@@ -837,10 +1268,17 @@ export function App() {
     rightPanelTabBySession,
     "review",
   );
-  const browserNavigation = browserNavigationBySession[sessionStateKey(activeSessionId)] ?? null;
+  const activeSessionStateKey = sessionStateKey(activeSessionId);
+  const browserNavigation = browserNavigationBySession[activeSessionStateKey] ?? null;
+  const browserState = browserStateBySession[activeSessionStateKey] ?? null;
   const completedRunElapsed = useMemo(
     () => completedRunElapsedByMessageId(messages),
     [messages],
+  );
+  const currentInlineActivity = inlineActivityBySession[activeSessionId || ""] || [];
+  const { buckets: inlineActivityBuckets, pending: pendingInlineActivity } = useMemo(
+    () => splitInlineActivityByMessage(messages, currentInlineActivity),
+    [messages, currentInlineActivity],
   );
   const currentPlanStepIndex = currentRunPlanStep(plan, activity);
   const latestActivity = activity.length > 0 ? activity[activity.length - 1] : null;
@@ -919,8 +1357,12 @@ export function App() {
       })),
     [composerImages],
   );
+  const modelContextWindows = useMemo(
+    () => contextWindowMapFromEntries(modelContextWindowEntries),
+    [modelContextWindowEntries],
+  );
   const contextUsage = useMemo(() => {
-    const limit = contextWindowForModel(model);
+    const limit = contextWindowForModel(model, modelContextWindows);
     const used = SYSTEM_CONTEXT_TOKEN_RESERVE
       + messages.reduce((total, message) => total + estimateMessageTokens(message), 0)
       + estimateTextTokens(streamedText)
@@ -931,7 +1373,7 @@ export function App() {
       percent: Math.min(100, Math.round((used / limit) * 100)),
       used,
     };
-  }, [composerImages.length, messages, model, prompt, streamedText]);
+  }, [composerImages.length, messages, model, modelContextWindows, prompt, streamedText]);
 
   useEffect(() => {
     followUpQueueRef.current = followUpQueue;
@@ -1041,6 +1483,9 @@ export function App() {
         setCircuitRecoveryWaitSecs(normalizeBoundedInteger(config.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
         setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(config.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
         setCircuitMinRequestCount(normalizeBoundedInteger(config.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
+        setModelContextWindowEntries(contextWindowEntriesFromMap(config.model_context_windows));
+        setVisionDelegate(visionDelegateFormFromConfig(config.vision_delegate));
+        setModelCapabilities(config.model_capabilities ?? {});
         const hydratedProviders = hydrateProviders(config);
         setProviders(hydratedProviders.providers);
         setActiveProviderId(hydratedProviders.activeProviderId);
@@ -1265,7 +1710,20 @@ export function App() {
       const liveStream = streamedTextBySessionRef.current.get(sessionId) ?? "";
       setStreamedText(liveStream);
       setPlan(latestPlan(detail.events));
-      setActivity(buildActivity(detail.events, locale));
+      let activityEvents = detail.events;
+      if (detail.session.status === "running" || detail.session.status === "need_user") {
+        let previousRunEnd = -1;
+        for (let index = detail.events.length - 1; index >= 0; index -= 1) {
+          const type = detail.events[index].event.type;
+          if (type === "session_cancelled" || type === "task_completed" || type === "error") {
+            previousRunEnd = index;
+            break;
+          }
+        }
+        activityEvents = detail.events.slice(previousRunEnd + 1);
+      }
+      setActivity(buildActivity(activityEvents, locale));
+      setInlineActivityBySession((current) => ({ ...current, [sessionId]: buildInlineActivity(detail.events, locale) }));
       setPendingAction(pending);
       setApprovalSummary(latestApprovalSummary(detail.events, pending));
       setPatchPreview(latestPatchPreview(detail.events, pending));
@@ -1466,7 +1924,14 @@ export function App() {
 
       // Only auto-focus a session when nothing is selected yet (first event of a new task).
       // Never steal focus from another parallel session the user is viewing.
-      if (!activeSessionIdRef.current) {
+      // Also never adopt the composer on behalf of a task the user did not just start: the
+      // draft turn must belong to the current composer epoch, and the session must be one this
+      // turn created (older running tasks are already in the pre-turn snapshot).
+      if (
+        !activeSessionIdRef.current
+        && draftEpochRef.current === composerEpochRef.current
+        && !draftKnownSessionIdsRef.current.has(sid)
+      ) {
         setActiveSessionId(sid);
         adoptDraftRightPanelState(sid);
       }
@@ -1566,6 +2031,17 @@ export function App() {
           setRunStatusExpanded(false);
           setPendingAction(null);
           setApprovalSummary(null);
+        }
+      }
+      if (payload.type === "tool_start" || payload.type === "tool_end") {
+        if (payload.tool_call.name === "apply_patch" || payload.tool_call.name === "run_command") {
+          const state: InlineActivityEntry["state"] = payload.type === "tool_start"
+            ? "running"
+            : payload.success ? "done" : "failed";
+          setInlineActivityBySession((current) => ({
+            ...current,
+            [sid]: upsertInlineActivity(current[sid] || [], payload.tool_call, new Date().toISOString(), state, payload.summary, locale),
+          }));
         }
       }
       if (isActive) {
@@ -1705,6 +2181,9 @@ export function App() {
     setRightPanelOpenBySession((current) => adoptDraftSessionKey(current, sessionId));
     setRightPanelTabBySession((current) => adoptDraftSessionKey(current, sessionId));
     setBrowserNavigationBySession((current) => adoptDraftSessionKey(current, sessionId));
+    setBrowserStateBySession((current) => adoptDraftSessionKey(current, sessionId));
+    // Hand the draft's live webview to the created session instead of rebuilding it.
+    void browserAdoptSession(DRAFT_SESSION_KEY, sessionStateKey(sessionId)).catch(() => undefined);
   }
 
   function openRightPanel(tab: ToolPanelTab): void {
@@ -1740,16 +2219,19 @@ export function App() {
 
   function resetComposerSession(): void {
     // Leave other sessions running in the background; only clear the composer view.
+    // Bump the epoch first: turns started before this reset must not adopt the fresh composer.
+    composerEpochRef.current += 1;
     setActiveSessionId(null);
     setComposerImages([]);
     setMessages([]);
     setStreamedText("");
-    if (!draftInFlightRef.current) {
-      setDraftRunning(false);
-      setDraftRunStatus(null);
-    }
+    // Always clear draft run state. A still-in-flight draft belongs to the previous epoch, and
+    // leaving draftRunning=true here would keep the new composer in queue mode and block sending.
+    setDraftRunning(false);
+    setDraftRunStatus(null);
     setPlan([]);
     setActivity([]);
+    setInlineActivityBySession({});
     setPendingAction(null);
     setApprovalSummary(null);
     setPatchPreview(null);
@@ -1898,6 +2380,9 @@ export function App() {
       setRightPanelOpenBySession((current) => dropSessionKey(current, sessionId));
       setRightPanelTabBySession((current) => dropSessionKey(current, sessionId));
       setBrowserNavigationBySession((current) => dropSessionKey(current, sessionId));
+      setBrowserStateBySession((current) => dropSessionKey(current, sessionId));
+      // Release the task's native webview so deleted tasks stop holding one.
+      void browserClose(sessionStateKey(sessionId)).catch(() => undefined);
       if (activeSessionId === sessionId) {
         resetComposerSession();
       }
@@ -2120,6 +2605,10 @@ export function App() {
 
           if (!continuing) {
             // Starting a brand-new task: focus the draft composer and leave other sessions alone.
+            // Claim the current epoch so only this turn may adopt the composer, and snapshot the
+            // sessions that already exist so an older running task cannot pose as this new task.
+            draftEpochRef.current = composerEpochRef.current;
+            draftKnownSessionIdsRef.current = new Set(sessionsRef.current.map((item) => item.id));
             setActiveSessionId(null);
             setMessages([]);
             setStreamedText("");
@@ -2140,6 +2629,7 @@ export function App() {
             setSessionRunStatus(sid, { startedAt: Date.now(), phase: "thinking" });
             if (touchesActive(sid)) {
               commitStreamedAssistant(sid);
+              setActivity([]);
               setPendingAction(null);
               setApprovalSummary(null);
               setPatchPreview(null);
@@ -2180,7 +2670,15 @@ export function App() {
             }
             // Only jump focus to this session if the user is still on the draft that started it,
             // or already viewing this session. Never steal focus from another parallel task.
-            if (!activeSessionIdRef.current || activeSessionIdRef.current === result.session.id) {
+            // An empty composer is only adoptable by the turn that owns the current epoch, so a
+            // background task finishing after "new task" cannot hijack the fresh composer.
+            const mayAdoptEmptyComposer =
+              draftEpochRef.current === composerEpochRef.current
+              && !draftKnownSessionIdsRef.current.has(result.session.id);
+            if (
+              activeSessionIdRef.current === result.session.id
+              || (!activeSessionIdRef.current && mayAdoptEmptyComposer)
+            ) {
               setActiveSessionId(result.session.id);
               adoptDraftRightPanelState(result.session.id);
               const completedMessage = result.message;
@@ -2272,6 +2770,9 @@ export function App() {
         }
       } else if (draftInFlightRef.current === inFlight) {
         draftInFlightRef.current = null;
+        // This draft turn is over: it must no longer count as the composer-adoption owner.
+        draftEpochRef.current = null;
+        draftKnownSessionIdsRef.current = new Set();
       }
     }
   }
@@ -2359,8 +2860,29 @@ export function App() {
     event.target.value = "";
   }
 
+  // Restores composer content when a send never reached the model, so an
+  // interrupted steer cannot silently swallow the user's message.
+  function restoreComposerDraft(message: string, images: ChatImageAttachment[]): void {
+    setPrompt((current) => (current.trim() ? current : message));
+    setComposerImages((current) =>
+      current.length > 0
+        ? current
+        : images.map((image, index) => ({
+            id: `restore-${Date.now()}-${index}`,
+            mime_type: image.mime_type,
+            data_base64: image.data_base64,
+            name: image.name,
+            previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
+          })),
+    );
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    await submitComposer();
+  }
+
+  async function submitComposer(): Promise<void> {
     const message = prompt.trim();
     const images = composerImages.map(({ mime_type, data_base64, name }) => ({
       mime_type,
@@ -2381,7 +2903,8 @@ export function App() {
       if (composerSendMode === "steer") {
         setPrompt("");
         setComposerImages([]);
-        await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images });
+        const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images });
+        if (!sent) restoreComposerDraft(message, images);
         setComposerSendMode("queue");
         return;
       }
@@ -2414,7 +2937,8 @@ export function App() {
     }
     setPrompt("");
     setComposerImages([]);
-    await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images });
+    const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images });
+    if (!sent) restoreComposerDraft(message, images);
   }
 
   async function resolveAction(approved: boolean): Promise<void> {
@@ -2729,6 +3253,10 @@ export function App() {
       setError(t(locale, "error.needModel"));
       return;
     }
+    if (visionDelegate.enabled && (!visionDelegate.providerId.trim() || !visionDelegate.model.trim())) {
+      setError(t(locale, "error.visionDelegateIncomplete"));
+      return;
+    }
     setError(null);
     setIsSavingConfig(true);
     try {
@@ -2772,6 +3300,9 @@ export function App() {
           last_workspace_root: root || undefined,
           workspace_home: home || undefined,
           hidden_project_paths: hiddenProjectPaths,
+          model_context_windows: contextWindowMapFromEntries(modelContextWindowEntries),
+          vision_delegate: visionDelegateConfigFromForm(visionDelegate),
+          model_capabilities: modelCapabilities,
         } satisfies UserConfig,
       });
       setWorkspaceHome((savedUser.workspace_home || "").trim());
@@ -2789,6 +3320,9 @@ export function App() {
       setCircuitRecoveryWaitSecs(normalizeBoundedInteger(savedUser.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
       setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(savedUser.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
       setCircuitMinRequestCount(normalizeBoundedInteger(savedUser.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
+      setModelContextWindowEntries(contextWindowEntriesFromMap(savedUser.model_context_windows));
+      setVisionDelegate(visionDelegateFormFromConfig(savedUser.vision_delegate));
+      setModelCapabilities(savedUser.model_capabilities ?? {});
       const hydratedProviders = hydrateProviders(savedUser);
       setProviders(hydratedProviders.providers);
       setActiveProviderId(hydratedProviders.activeProviderId);
@@ -2819,6 +3353,30 @@ export function App() {
     } finally {
       setIsSavingConfig(false);
     }
+  }
+
+  function addContextWindowEntry(): void {
+    setModelContextWindowEntries((current) => [
+      ...current,
+      {
+        id: `context-window-${Date.now()}-${current.length}`,
+        model: "",
+        window: DEFAULT_CONTEXT_WINDOW,
+      },
+    ]);
+  }
+
+  function updateContextWindowEntry(
+    id: string,
+    patch: Partial<Pick<ModelContextWindowEntry, "model" | "window">>,
+  ): void {
+    setModelContextWindowEntries((current) =>
+      current.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)),
+    );
+  }
+
+  function removeContextWindowEntry(id: string): void {
+    setModelContextWindowEntries((current) => current.filter((entry) => entry.id !== id));
   }
 
 
@@ -2878,14 +3436,16 @@ export function App() {
   }, [queueMode]);
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      if (queueMode) {
-        void steerCurrentRun();
-        return;
-      }
-      event.currentTarget.form?.requestSubmit();
+    if (!(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
+    event.preventDefault();
+    // Ctrl+Shift+Enter is the only keyboard interrupt; plain Ctrl+Enter must
+    // behave exactly like the send button and honour the queue/steer toggle.
+    if (event.shiftKey) {
+      if (queueMode) void steerCurrentRun();
+      return;
     }
+    if (sendBlockReason) return;
+    void submitComposer();
   }
 
   if (view === "model-logs") {
@@ -2964,6 +3524,36 @@ export function App() {
   }
 
   if (view === "settings") {
+    const settingsTabs: { id: SettingsTab; labelKey: MessageKey }[] = [
+      { id: "provider", labelKey: "settings.tab.provider" },
+      { id: "resilience", labelKey: "settings.tab.resilience" },
+      { id: "context", labelKey: "settings.tab.context" },
+      { id: "vision", labelKey: "settings.tab.vision" },
+      { id: "defaults", labelKey: "settings.tab.defaults" },
+    ];
+    const focusSettingsTab = (tab: SettingsTab) => {
+      requestAnimationFrame(() => {
+        const el = document.getElementById(`settings-tab-${tab}`);
+        if (el instanceof HTMLElement) el.focus();
+      });
+    };
+    const handleSettingsTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+      let nextIndex: number | null = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (index + 1) % settingsTabs.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (index - 1 + settingsTabs.length) % settingsTabs.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = settingsTabs.length - 1;
+      }
+      if (nextIndex === null) return;
+      event.preventDefault();
+      const next = settingsTabs[nextIndex].id;
+      setSettingsTab(next);
+      focusSettingsTab(next);
+    };
     return (
       <main className="settings-page">
         <header className="settings-header">
@@ -3045,8 +3635,37 @@ export function App() {
 
         {error ? <p className="error-message settings-error">{error}</p> : null}
 
-        <div className="settings-grid">
-          <section className="settings-card provider-settings-card" aria-label={t(locale, "settings.section.provider")}>
+        <nav className="settings-tabs" role="tablist" aria-label={t(locale, "settings.tabsLabel")}>
+          {settingsTabs.map((tab, index) => {
+            const active = settingsTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                id={`settings-tab-${tab.id}`}
+                className={`settings-tab${active ? " active" : ""}`}
+                aria-selected={active}
+                aria-controls={`settings-panel-${tab.id}`}
+                tabIndex={active ? 0 : -1}
+                onClick={() => setSettingsTab(tab.id)}
+                onKeyDown={(event) => handleSettingsTabKeyDown(event, index)}
+              >
+                {t(locale, tab.labelKey)}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="settings-tabs-container">
+          <section
+            className="settings-card provider-settings-card"
+            role="tabpanel"
+            id="settings-panel-provider"
+            aria-labelledby="settings-tab-provider"
+            aria-label={t(locale, "settings.section.provider")}
+            hidden={settingsTab !== "provider"}
+          >
             <div className="provider-manager-header">
               <p className="panel-title">{t(locale, "settings.section.provider")}</p>
               <button type="button" className="quiet-button" onClick={addProvider} disabled={anySessionRunning || isSavingConfig}>
@@ -3182,7 +3801,14 @@ export function App() {
             <p className="mode-help">{t(locale, "settings.providerHelp")}</p>
           </section>
 
-          <section className="settings-card resilience-settings-card" aria-label={t(locale, "settings.resilience.title")}>
+          <section
+            className="settings-card resilience-settings-card"
+            role="tabpanel"
+            id="settings-panel-resilience"
+            aria-labelledby="settings-tab-resilience"
+            aria-label={t(locale, "settings.resilience.title")}
+            hidden={settingsTab !== "resilience"}
+          >
             <p className="panel-title">{t(locale, "settings.resilience.title")}</p>
 
             <div className="resilience-setting-group">
@@ -3264,7 +3890,162 @@ export function App() {
             </div>
           </section>
 
-          <section className="settings-card settings-defaults-card" aria-label={t(locale, "aria.workspaceDefaults")}>
+          <section
+            className="settings-card context-windows-settings-card"
+            role="tabpanel"
+            id="settings-panel-context"
+            aria-labelledby="settings-tab-context"
+            aria-label={t(locale, "settings.contextWindows.title")}
+            hidden={settingsTab !== "context"}
+          >
+            <div className="provider-manager-header">
+              <p className="panel-title">{t(locale, "settings.contextWindows.title")}</p>
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={addContextWindowEntry}
+                disabled={anySessionRunning || isSavingConfig}
+              >
+                {t(locale, "action.addContextWindow")}
+              </button>
+            </div>
+            <p className="mode-help">{t(locale, "settings.contextWindows.hint")}</p>
+            <div id="context-window-list" className="context-window-list">
+              {modelContextWindowEntries.length === 0 ? (
+                <p className="mode-help">{t(locale, "settings.contextWindows.empty")}</p>
+              ) : (
+                modelContextWindowEntries.map((entry) => (
+                  <div className="context-window-row" key={entry.id}>
+                    <div className="context-window-field">
+                      <label className="field-label" htmlFor={`context-window-model-${entry.id}`}>
+                        {t(locale, "field.contextWindowModel")}
+                      </label>
+                      <input
+                        id={`context-window-model-${entry.id}`}
+                        value={entry.model}
+                        onChange={(event) => updateContextWindowEntry(entry.id, { model: event.target.value })}
+                        disabled={anySessionRunning || isSavingConfig}
+                        spellCheck={false}
+                        placeholder={t(locale, "field.contextWindowModelPlaceholder")}
+                      />
+                    </div>
+                    <div className="context-window-field">
+                      <label className="field-label" htmlFor={`context-window-tokens-${entry.id}`}>
+                        {t(locale, "field.contextWindowTokens")}
+                      </label>
+                      <input
+                        id={`context-window-tokens-${entry.id}`}
+                        type="number"
+                        min={MIN_CONTEXT_WINDOW_TOKENS}
+                        max={MAX_CONTEXT_WINDOW_TOKENS}
+                        step={1_024}
+                        value={entry.window}
+                        onChange={(event) => updateContextWindowEntry(entry.id, { window: Number(event.target.value) })}
+                        disabled={anySessionRunning || isSavingConfig}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="danger-button"
+                      onClick={() => removeContextWindowEntry(entry.id)}
+                      disabled={anySessionRunning || isSavingConfig}
+                    >
+                      {t(locale, "action.remove")}
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+            <p className="mode-help">{t(locale, "settings.contextWindows.fallbackHint")}</p>
+          </section>
+
+          <section
+            className="settings-card vision-settings-card"
+            role="tabpanel"
+            id="settings-panel-vision"
+            aria-labelledby="settings-tab-vision"
+            aria-label={t(locale, "settings.vision.title")}
+            hidden={settingsTab !== "vision"}
+          >
+            <p className="panel-title">{t(locale, "settings.vision.title")}</p>
+            <p className="mode-help">{t(locale, "settings.vision.hint")}</p>
+            <div className="resilience-toggle-row">
+              <div>
+                <span className="field-label">{t(locale, "field.visionDelegateEnabled")}</span>
+                <p className="mode-help">{t(locale, "field.visionDelegateEnabledHint")}</p>
+              </div>
+              <button
+                type="button"
+                className={`browser-toggle${visionDelegate.enabled ? " on" : ""}`}
+                aria-label={t(locale, "field.visionDelegateEnabled")}
+                aria-pressed={visionDelegate.enabled}
+                onClick={() => setVisionDelegate((current) => ({ ...current, enabled: !current.enabled }))}
+                disabled={anySessionRunning || isSavingConfig}
+              >
+                <span className="browser-toggle-knob" />
+              </button>
+            </div>
+            <div className="resilience-setting-grid">
+              <label htmlFor="vision-delegate-provider">
+                <span className="field-label">{t(locale, "field.visionDelegateProvider")}</span>
+                <select
+                  id="vision-delegate-provider"
+                  value={visionDelegate.providerId}
+                  onChange={(event) => setVisionDelegate((current) => ({ ...current, providerId: event.target.value }))}
+                  disabled={anySessionRunning || isSavingConfig}
+                >
+                  <option value="">{t(locale, "field.visionDelegateProviderUnset")}</option>
+                  {providers.map((item) => (
+                    <option value={item.id} key={item.id}>
+                      {item.name.trim() || "Provider"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label htmlFor="vision-delegate-model">
+                <span className="field-label">{t(locale, "field.visionDelegateModel")}</span>
+                <input
+                  id="vision-delegate-model"
+                  value={visionDelegate.model}
+                  onChange={(event) => setVisionDelegate((current) => ({ ...current, model: event.target.value }))}
+                  disabled={anySessionRunning || isSavingConfig}
+                  spellCheck={false}
+                  placeholder={t(locale, "field.visionDelegateModelPlaceholder")}
+                />
+              </label>
+              <label htmlFor="vision-delegate-timeout">
+                <span className="field-label">{t(locale, "field.visionDelegateTimeout")}</span>
+                <input
+                  id="vision-delegate-timeout"
+                  type="number"
+                  min={MIN_VISION_TIMEOUT_SECS}
+                  max={MAX_VISION_TIMEOUT_SECS}
+                  step={1}
+                  value={visionDelegate.timeoutSeconds}
+                  onChange={(event) => setVisionDelegate((current) => ({
+                    ...current,
+                    timeoutSeconds: normalizeBoundedInteger(
+                      Number(event.target.value),
+                      DEFAULT_VISION_TIMEOUT_SECS,
+                      MIN_VISION_TIMEOUT_SECS,
+                      MAX_VISION_TIMEOUT_SECS,
+                    ),
+                  }))}
+                  disabled={anySessionRunning || isSavingConfig}
+                />
+              </label>
+            </div>
+            <p className="mode-help">{t(locale, "settings.vision.capabilityHint")}</p>
+          </section>
+
+          <section
+            className="settings-card settings-defaults-card"
+            role="tabpanel"
+            id="settings-panel-defaults"
+            aria-labelledby="settings-tab-defaults"
+            aria-label={t(locale, "aria.workspaceDefaults")}
+            hidden={settingsTab !== "defaults"}
+          >
             <p className="panel-title">{t(locale, "field.defaults")}</p>
             <label className="field-label" htmlFor="settings-workspace">{t(locale, "field.workspace")}</label>
             <input
@@ -3682,6 +4463,9 @@ export function App() {
                 <div className="message-bubble">
                   <div className="message-body">{message.role === "assistant" ? <AssistantMessageBody content={message.content} onOpenLink={openAssistantLink} /> : message.content}</div>
                 </div>
+                {message.role === "assistant" ? (
+                  <InlineActivityList items={inlineActivityBuckets.get(message.id) || []} locale={locale} />
+                ) : null}
                 {elapsed ? <p className="message-completed-elapsed">{t(locale, "run.processed", { elapsed })}</p> : null}
                 {message.role === "assistant" ? (
                   <div className="message-meta">
@@ -3702,6 +4486,7 @@ export function App() {
               </article>
             );
           })}
+          {pendingInlineActivity.length > 0 ? <InlineActivityList items={pendingInlineActivity} locale={locale} /> : null}
           {runStatus ? (
             <details
               className={`run-status run-status-${runStatus.phase}`}
@@ -4102,7 +4887,7 @@ export function App() {
                     title={t(locale, "action.steerHelp")}
                   >
                     {t(locale, "action.steerMode")}
-                    <kbd>Ctrl</kbd>
+                    <kbd>Ctrl+Shift</kbd>
                   </button>
                 </div>
               ) : null}
@@ -4146,7 +4931,12 @@ export function App() {
         locale={locale}
         open={rightPanelOpen}
         tab={rightPanelTab}
+        sessionKey={activeSessionStateKey}
         browserNavigation={browserNavigation}
+        browserState={browserState}
+        onBrowserStateChange={(next) => {
+          setBrowserStateBySession((current) => ({ ...current, [activeSessionStateKey]: next }));
+        }}
         onTabChange={(next) => setRightPanelState(true, next)}
         onClose={() => setRightPanelState(false)}
         workspaceRoot={workspaceRoot}

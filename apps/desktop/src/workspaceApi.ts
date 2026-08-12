@@ -58,8 +58,14 @@ export type BrowserBounds = {
 };
 
 export type BrowserNavigatedEvent = {
+  session: string;
   url: string;
   title: string;
+};
+
+export type BrowserEnsureResult = {
+  created: boolean;
+  url: string | null;
 };
 
 export async function fetchGitEnvironment(
@@ -130,11 +136,13 @@ export async function openExternalUrl(url: string): Promise<void> {
 }
 
 export async function browserEnsure(
+  session: string,
   bounds: BrowserBounds,
   url?: string | null,
   userAgent?: string | null,
-): Promise<void> {
-  await invoke("browser_ensure", {
+): Promise<BrowserEnsureResult> {
+  return invoke<BrowserEnsureResult>("browser_ensure", {
+    session,
     x: bounds.x,
     y: bounds.y,
     width: bounds.width,
@@ -144,8 +152,9 @@ export async function browserEnsure(
   });
 }
 
-export async function browserSetBounds(bounds: BrowserBounds): Promise<void> {
+export async function browserSetBounds(session: string, bounds: BrowserBounds): Promise<void> {
   await invoke("browser_set_bounds", {
+    session,
     x: bounds.x,
     y: bounds.y,
     width: bounds.width,
@@ -153,63 +162,70 @@ export async function browserSetBounds(bounds: BrowserBounds): Promise<void> {
   });
 }
 
-export async function browserNavigate(url: string): Promise<void> {
-  await invoke("browser_navigate", { url });
+export async function browserNavigate(session: string, url: string): Promise<void> {
+  await invoke("browser_navigate", { session, url });
 }
 
-export async function browserReload(): Promise<void> {
-  await invoke("browser_reload");
+export async function browserReload(session: string): Promise<void> {
+  await invoke("browser_reload", { session });
 }
 
-export async function browserBack(): Promise<void> {
-  await invoke("browser_back");
+export async function browserBack(session: string): Promise<void> {
+  await invoke("browser_back", { session });
 }
 
-export async function browserForward(): Promise<void> {
-  await invoke("browser_forward");
+export async function browserForward(session: string): Promise<void> {
+  await invoke("browser_forward", { session });
 }
 
-export async function browserShow(): Promise<void> {
-  await invoke("browser_show");
+export async function browserShow(session: string): Promise<void> {
+  await invoke("browser_show", { session });
 }
 
-export async function browserHide(): Promise<void> {
-  await invoke("browser_hide");
+export async function browserHide(session: string): Promise<void> {
+  await invoke("browser_hide", { session });
 }
 
-export async function browserClose(): Promise<void> {
-  await invoke("browser_close");
+export async function browserClose(session: string): Promise<void> {
+  await invoke("browser_close", { session });
 }
 
-export async function browserSetUserAgent(userAgent?: string | null): Promise<void> {
-  await invoke("browser_set_user_agent", { userAgent: userAgent ?? null });
+// Promoting a draft task keeps its live page: the webview is remapped, not rebuilt.
+export async function browserAdoptSession(from: string, to: string): Promise<void> {
+  await invoke("browser_adopt_session", { from, to });
 }
 
-export async function browserSetZoom(scaleFactor: number): Promise<void> {
-  await invoke("browser_set_zoom", { scaleFactor });
+export async function browserSetUserAgent(session: string, userAgent?: string | null): Promise<void> {
+  await invoke("browser_set_user_agent", { session, userAgent: userAgent ?? null });
 }
 
-export async function browserPrint(): Promise<void> {
-  await invoke("browser_print");
+export async function browserSetZoom(session: string, scaleFactor: number): Promise<void> {
+  await invoke("browser_set_zoom", { session, scaleFactor });
 }
 
-export async function browserClearData(): Promise<void> {
-  await invoke("browser_clear_data");
+export async function browserPrint(session: string): Promise<void> {
+  await invoke("browser_print", { session });
 }
 
-export async function browserCurrentUrl(): Promise<string | null> {
-  return invoke<string | null>("browser_current_url");
+export async function browserClearData(session: string): Promise<void> {
+  await invoke("browser_clear_data", { session });
 }
 
-export async function browserEval(script: string): Promise<void> {
-  await invoke("browser_eval", { script });
+export async function browserCurrentUrl(session: string): Promise<string | null> {
+  return invoke<string | null>("browser_current_url", { session });
+}
+
+export async function browserEval(session: string, script: string): Promise<void> {
+  await invoke("browser_eval", { session, script });
 }
 
 export async function browserFind(
+  session: string,
   query: string,
   options?: { forward?: boolean; matchCase?: boolean },
 ): Promise<void> {
   await invoke("browser_find", {
+    session,
     query,
     forward: options?.forward ?? true,
     matchCase: options?.matchCase ?? false,
@@ -220,8 +236,8 @@ export async function browserDownloadDir(): Promise<string> {
   return invoke<string>("browser_download_dir");
 }
 
-export async function browserScreenshot(): Promise<string> {
-  return invoke<string>("browser_save_snapshot");
+export async function browserScreenshot(session: string): Promise<string> {
+  return invoke<string>("browser_save_snapshot", { session });
 }
 
 

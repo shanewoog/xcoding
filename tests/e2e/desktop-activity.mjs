@@ -134,6 +134,17 @@ async function main() {
     appSource.includes('setRunStatusExpanded(false);') && appSource.includes('if (payload.type === "error")'),
     "provider errors must collapse the process details by default",
   );
+  assert.match(
+    appSource,
+    /setSessionRunStatus\(sid, \{ startedAt: Date\.now\(\), phase: "thinking" \}\);\s+if \(touchesActive\(sid\)\) \{\s+commitStreamedAssistant\(sid\);\s+setActivity\(\[\]\);/,
+    "continuing a session must clear stale activity from the previous cancelled run",
+  );
+  assert.ok(
+    appSource.includes('type === "session_cancelled" || type === "task_completed" || type === "error"') &&
+      appSource.includes("activityEvents = detail.events.slice(previousRunEnd + 1)") &&
+      appSource.includes("setActivity(buildActivity(activityEvents, locale))"),
+    "rehydrating a running session must not restore activity from an earlier cancelled run",
+  );
   assert.ok(cssSource.includes(".run-status-dots.failed"), "failed run status should use a static error indicator");
   assert.ok(
     appSource.includes("function completedRunElapsedByMessageId(messages: Message[]): Record<string, string>"),
@@ -158,6 +169,32 @@ async function main() {
   assert.ok(appSource.includes('className="scroll-to-bottom-button"'), "a jump-to-latest control should be rendered above the composer");
   assert.ok(cssSource.includes(".scroll-to-bottom-button"), "jump-to-latest control should be styled");
   assert.ok(i18nSource.includes('"run.scrollBottom"'), "jump-to-latest control should be localized");
+  assert.ok(i18nSource.includes('"activity.fileCreateFailed": "Create failed"'), "failed file creation should be localized in English");
+  assert.ok(i18nSource.includes('"activity.fileEditFailed": "Edit failed"'), "failed file editing should be localized in English");
+  assert.ok(i18nSource.includes('"activity.fileCreateFailed": "创建失败"'), "failed file creation should be localized in Chinese");
+  assert.ok(i18nSource.includes('"activity.fileEditFailed": "编辑失败"'), "failed file editing should be localized in Chinese");
+  assert.ok(appSource.includes('function inlineActivityLabel('), "failed inline file actions should use a distinct label");
+  assert.ok(appSource.includes('entry.fileExisted ? "activity.fileEditFailed" : "activity.fileCreateFailed"'), "failed inline file labels should distinguish edits from creates");
+  assert.ok(appSource.includes('label: inlineActivityLabel(existing, event.success ? "done" : "failed", locale)'), "session replay should show failed file labels");
+  assert.ok(appSource.includes('label: inlineActivityLabel(next, state, locale)'), "live activity updates should show failed file labels");
+  const inlineActivityListSource = appSource.match(/function InlineActivityList[\s\S]*?\n}\n\ntype SettingsTab/)?.[0] ?? "";
+  assert.ok(inlineActivityListSource, "App.tsx should define InlineActivityList");
+  assert.ok(
+    inlineActivityListSource.includes("<details className={`inline-activity-group ${groupState}`}>") &&
+      !inlineActivityListSource.includes("<details className={`inline-activity-group ${groupState}`} open"),
+    "inline tool activity groups should be collapsed by default",
+  );
+  assert.ok(
+    inlineActivityListSource.includes('className="inline-activity-group-summary"'),
+    "inline tool activity groups should expose a clickable summary",
+  );
+  assert.ok(
+    inlineActivityListSource.includes('t(locale, "activity.toolCalls", { count: items.length })'),
+    "inline tool activity summaries should show the item count",
+  );
+  assert.ok(cssSource.includes(".inline-activity-group[open]"), "expanded inline tool activity groups should be styled");
+  assert.ok(i18nSource.includes('"activity.toolCalls": "Tool calls: {count}"'), "tool activity count should be localized in English");
+  assert.ok(i18nSource.includes('"activity.toolCalls": "工具调用 {count} 项"'), "tool activity count should be localized in Chinese");
 
   assert.ok(
     i18nSource.includes("allowlisted safe commands") || configSource.includes("allowlisted safe commands"),
@@ -250,4 +287,3 @@ main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
-

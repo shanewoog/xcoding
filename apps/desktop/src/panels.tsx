@@ -1,3 +1,7 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { t, type Locale } from "./i18n";
@@ -30,7 +34,6 @@ import {
   openPath,
   queryGitNexus,
   impactGitNexus,
-  runTerminalCommand,
   type DirEntryInfo,
   type GitEnvironment,
   type GitNexusCommandResult,
@@ -41,6 +44,18 @@ import {
 export type ToolPanelTab = "review" | "browser" | "files" | "code";
 export type PanelTarget = "terminal" | ToolPanelTab;
 export type BrowserNavigationRequest = { url: string; id: number };
+export type BrowserTabState = {
+  id: string;
+  title: string;
+  url: string;
+  input: string;
+};
+export type BrowserSessionState = {
+  tabs: BrowserTabState[];
+  activeTabId: string;
+  // Last assistant-link request already opened, so returning to a task does not replay it.
+  handledNavigationId: number | null;
+};
 
 export type SourceItem = {
   id: string;
@@ -70,11 +85,21 @@ type TerminalBottomPanelProps = {
   workspaceRoot: string;
 };
 
+type TerminalOutputMessage =
+  | { kind: "Chunk"; data: string }
+  | { kind: "Exit"; data: { code: number | null } }
+  | { kind: "Error"; data: string };
+
+type TerminalStartResult = { sessionId: string };
+
 type RightToolsPanelProps = {
   locale: Locale;
   open: boolean;
   tab: ToolPanelTab;
+  sessionKey: string;
   browserNavigation: BrowserNavigationRequest | null;
+  browserState: BrowserSessionState | null;
+  onBrowserStateChange: (state: BrowserSessionState) => void;
   onTabChange: (tab: ToolPanelTab) => void;
   onClose: () => void;
   workspaceRoot: string;
@@ -304,44 +329,19 @@ export function TerminalBottomPanel({
   onClose,
   workspaceRoot,
 }: TerminalBottomPanelProps) {
-  const [terminalLines, setTerminalLines] = useState<string[]>([]);
-  const [terminalInput, setTerminalInput] = useState("");
-  const [terminalBusy, setTerminalBusy] = useState(false);
-  const terminalEndRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const seedRef = useRef<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    hasSelection: boolean;
+  } | null>(null);
 
   const cwdLabel = useMemo(
     () => workspaceRoot.trim() || t(locale, "composer.chooseWorkspace"),
     [workspaceRoot, locale],
-  );
-
-  const appendTerminal = useCallback((chunk: string) => {
-    setTerminalLines((current) => {
-      const next = [...current, ...chunk.replace(/\r\n/g, "\n").split("\n")];
-      return next.slice(-400);
-    });
-  }, []);
-
-  const runCommand = useCallback(
-    async (command: string) => {
-      const trimmed = command.trim();
-      if (!trimmed || !workspaceRoot.trim() || terminalBusy) return;
-      setTerminalBusy(true);
-      appendTerminal(`PS ${cwdLabel}> ${trimmed}`);
-      try {
-        const result = await runTerminalCommand(workspaceRoot.trim(), trimmed);
-        if (result.stdout.trim()) appendTerminal(result.stdout.replace(/\s+$/, ""));
-        if (result.stderr.trim()) appendTerminal(result.stderr.replace(/\s+$/, ""));
-        if (result.exit_code !== null && result.exit_code !== 0) {
-          appendTerminal(t(locale, "terminal.exitCode", { code: String(result.exit_code) }));
-        }
-      } catch (cause) {
-        appendTerminal(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        setTerminalBusy(false);
-      }
-    },
-    [appendTerminal, cwdLabel, locale, terminalBusy, workspaceRoot],
   );
 
   useEffect(() => {
@@ -349,7 +349,6 @@ export function TerminalBottomPanel({
       const detail = (event as CustomEvent<string>).detail;
       if (typeof detail === "string" && detail.trim()) {
         seedRef.current = detail.trim();
-        setTerminalInput(detail.trim());
       }
     };
     window.addEventListener("xcoding-terminal-seed", handler as EventListener);
@@ -358,37 +357,266 @@ export function TerminalBottomPanel({
 
   useEffect(() => {
     if (!open) return;
-    if (terminalLines.length === 0 && workspaceRoot.trim()) {
-      appendTerminal(t(locale, "terminal.ready", { cwd: workspaceRoot.trim() }));
+    const container = containerRef.current;
+    const root = workspaceRoot.trim();
+    if (!container || !root) return;
+
+    let disposed = false;
+    let sessionId: string | null = null;
+    let ownedSessionId: string | null = null;
+    // The shell asks for the cursor position (ESC[6n) as soon as it starts,
+    // before terminal_start resolves and sessionId is known. xterm replies
+    // through onData; dropping that reply leaves ConPTY blocked waiting on DSR,
+    // so buffer input until the session id is available and flush it then.
+    const pendingInput: string[] = [];
+
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: 'Consolas, "Cascadia Mono", ui-monospace, monospace',
+      theme: {
+        background: "#0a0c0f",
+        foreground: "#cfd8e3",
+        cursor: "#e2b93d",
+        selectionBackground: "#3b4b5c",
+      },
+      scrollback: 4000,
+    });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    terminalRef.current = term;
+    try {
+      fitAddon.fit();
+    } catch {
+      // Container is not measurable yet; ResizeObserver will retry.
     }
+
+    // WebView2 drops keystrokes unless xterm's hidden textarea owns focus.
+    // Focus it right away, retry once layout settles, re-focus when the
+    // session becomes ready, and steal focus back whenever the user clicks
+    // into the terminal (xterm does not focus itself on click).
+    const focusTerminal = () => {
+      if (disposed) return;
+      const textarea = term.textarea;
+      if (textarea) {
+        textarea.tabIndex = 0;
+        try {
+          textarea.focus({ preventScroll: true });
+        } catch {
+          textarea.focus();
+        }
+      }
+      if (document.activeElement !== textarea) {
+        term.focus();
+      }
+    };
+    focusTerminal();
+    const focusRaf = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (!disposed) focusTerminal();
+      });
+    });
+    container.tabIndex = -1;
+    const onPointerDown = () => focusTerminal();
+    const onFocusIn = (event: FocusEvent) => {
+      if (disposed) return;
+      const target = event.target as Node | null;
+      if (target && container.contains(target) && target !== term.textarea) {
+        focusTerminal();
+      }
+    };
+    container.addEventListener("pointerdown", onPointerDown);
+    container.addEventListener("focusin", onFocusIn);
+
+    const channel = new Channel<TerminalOutputMessage>();
+    channel.onmessage = (message) => {
+      if (disposed) return;
+      switch (message.kind) {
+        case "Chunk":
+          term.write(message.data);
+          break;
+        case "Exit":
+          term.write(
+            `\r\n\x1b[90m[process exited with code ${message.data.code ?? "?"}]\x1b[0m\r\n`,
+          );
+          break;
+        case "Error":
+          term.write(`\r\n\x1b[91m${message.data}\x1b[0m\r\n`);
+          break;
+      }
+    };
+
+    const sendInput = (data: string) => {
+      if (disposed) return;
+      if (!sessionId) {
+        pendingInput.push(data);
+        return;
+      }
+      void invoke("terminal_input", { sessionId, input: data }).catch((cause) => {
+        if (!disposed) {
+          term.write(
+            `\r\n\x1b[91m${cause instanceof Error ? cause.message : String(cause)}\x1b[0m\r\n`,
+          );
+        }
+      });
+    };
+    term.onData(sendInput);
+
+    const resize = () => {
+      try {
+        fitAddon.fit();
+      } catch {
+        return;
+      }
+      if (sessionId) {
+        void invoke("terminal_resize", { sessionId, cols: term.cols, rows: term.rows }).catch(
+          () => {},
+        );
+      }
+    };
+
     const seed = seedRef.current;
-    if (seed) {
-      seedRef.current = null;
-      void runCommand(seed);
-    }
-  }, [open, terminalLines.length, workspaceRoot, appendTerminal, locale, runCommand]);
+    seedRef.current = null;
+    void invoke("terminal_start", {
+      workspaceRoot: root,
+      seedCommand: seed,
+      channel,
+    })
+      .then((result) => {
+        const start = result as TerminalStartResult;
+        if (!start.sessionId) {
+          throw new Error("terminal_start returned an invalid session id");
+        }
+        ownedSessionId = start.sessionId;
+        if (disposed) {
+          void invoke("terminal_stop", { sessionId: start.sessionId });
+          return;
+        }
+        sessionId = start.sessionId;
+        resize();
+        while (pendingInput.length > 0) {
+          const data = pendingInput.shift();
+          if (data) sendInput(data);
+        }
+        focusTerminal();
+      })
+      .catch((cause: unknown) => {
+        pendingInput.length = 0;
+        if (!disposed) {
+          term.write(
+            `\r\n\x1b[91m${cause instanceof Error ? cause.message : String(cause)}\x1b[0m\r\n`,
+          );
+        }
+      });
+
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+
+    return () => {
+      disposed = true;
+      setContextMenu(null);
+      if (terminalRef.current === term) {
+        terminalRef.current = null;
+      }
+      window.cancelAnimationFrame(focusRaf);
+      container.removeEventListener("pointerdown", onPointerDown);
+      container.removeEventListener("focusin", onFocusIn);
+      observer.disconnect();
+      term.dispose();
+      if (ownedSessionId) {
+        void invoke("terminal_stop", { sessionId: ownedSessionId });
+      }
+    };
+  }, [open, workspaceRoot]);
 
   useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ block: "end" });
-  }, [terminalLines, terminalBusy]);
+    if (!contextMenu) return;
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target || !contextMenuRef.current?.contains(target)) {
+        setContextMenu(null);
+      }
+    };
+    const closeMenu = () => setContextMenu(null);
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    window.addEventListener("blur", closeMenu);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+      window.removeEventListener("blur", closeMenu);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const term = terminalRef.current;
+    if (!term) return;
+
+    const margin = 8;
+    const menuWidth = 168;
+    const menuHeight = 148;
+    setContextMenu({
+      x: Math.max(margin, Math.min(event.clientX, window.innerWidth - menuWidth - margin)),
+      y: Math.max(margin, Math.min(event.clientY, window.innerHeight - menuHeight - margin)),
+      hasSelection: term.hasSelection(),
+    });
+  };
+
+  const copyTerminalSelection = async () => {
+    const term = terminalRef.current;
+    const selection = term?.getSelection() ?? "";
+    setContextMenu(null);
+    if (!term || !selection) return;
+    try {
+      await navigator.clipboard.writeText(selection);
+    } catch {
+      // Clipboard access can be unavailable when the WebView is not focused.
+    }
+    term.focus();
+  };
+
+  const pasteIntoTerminal = async () => {
+    const term = terminalRef.current;
+    setContextMenu(null);
+    if (!term) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && terminalRef.current === term) {
+        term.paste(text);
+      }
+    } catch {
+      // Clipboard access can be unavailable when the WebView is not focused.
+    }
+    term.focus();
+  };
+
+  const selectAllTerminal = () => {
+    const term = terminalRef.current;
+    setContextMenu(null);
+    if (!term) return;
+    term.selectAll();
+    term.focus();
+  };
+
+  const clearTerminal = () => {
+    const term = terminalRef.current;
+    setContextMenu(null);
+    if (!term) return;
+    term.clear();
+    term.focus();
+  };
 
   if (!open) return null;
-
-  const onTerminalSubmit = (event: FormEvent) => {
-    event.preventDefault();
-    const command = terminalInput;
-    setTerminalInput("");
-    void runCommand(command);
-  };
-
-  const onTerminalKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      const command = terminalInput;
-      setTerminalInput("");
-      void runCommand(command);
-    }
-  };
 
   return (
     <section className="bottom-panel terminal-only" aria-label={t(locale, "panel.terminal")}>
@@ -405,39 +633,41 @@ export function TerminalBottomPanel({
               {cwdLabel}
             </span>
           </div>
-          <div className="bottom-terminal-output" aria-live="polite">
-            {terminalLines.map((line, index) => (
-              <div key={`${index}-${line.slice(0, 24)}`} className="bottom-terminal-line">
-                {line || " "}
-              </div>
-            ))}
-            <div ref={terminalEndRef} />
-          </div>
-          <form className="bottom-terminal-input-row" onSubmit={onTerminalSubmit}>
-            <span className="bottom-terminal-prompt">PS&gt;</span>
-            <input
-              value={terminalInput}
-              onChange={(event) => setTerminalInput(event.target.value)}
-              onKeyDown={onTerminalKeyDown}
-              disabled={!workspaceRoot.trim() || terminalBusy}
-              placeholder={t(locale, "terminal.placeholder")}
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </form>
+          <div className="bottom-terminal-xterm" ref={containerRef} onContextMenu={openContextMenu} />
         </div>
       </div>
+      {contextMenu ? (
+        <div
+          ref={contextMenuRef}
+          className="session-context-menu terminal-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          role="menu"
+          aria-label={t(locale, "terminal.contextMenu")}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!contextMenu.hasSelection}
+            onClick={() => void copyTerminalSelection()}
+          >
+            {t(locale, "action.copy")}
+          </button>
+          <button type="button" role="menuitem" onClick={() => void pasteIntoTerminal()}>
+            {t(locale, "action.paste")}
+          </button>
+          <button type="button" role="menuitem" onClick={selectAllTerminal}>
+            {t(locale, "action.selectAll")}
+          </button>
+          <button type="button" role="menuitem" onClick={clearTerminal}>
+            {t(locale, "action.clearTerminal")}
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }
 
-
-type BrowserTabState = {
-  id: string;
-  title: string;
-  url: string;
-  input: string;
-}
 
 type BrowserOpenTarget = "browser" | "system";
 type BrowserApprovals = "alwaysAsk" | "autoAllow";
@@ -598,14 +828,31 @@ const BROWSER_SCROLLBAR_STYLE = `
 function BuiltInBrowserPanel({
   locale,
   active,
+  sessionKey,
   navigation,
+  initialState,
+  onStateChange,
 }: {
   locale: Locale;
   active: boolean;
+  sessionKey: string;
   navigation: BrowserNavigationRequest | null;
+  initialState: BrowserSessionState | null;
+  onStateChange: (state: BrowserSessionState) => void;
 }) {
-  const [tabs, setTabs] = useState<BrowserTabState[]>(() => [createBrowserTab()]);
-  const [activeTabId, setActiveTabId] = useState(() => tabs[0]?.id || "");
+  const [tabs, setTabs] = useState<BrowserTabState[]>(() =>
+    initialState?.tabs.length
+      ? initialState.tabs.map((tab) => createBrowserTab(tab))
+      : [createBrowserTab()],
+  );
+  const [activeTabId, setActiveTabId] = useState(() =>
+    initialState?.activeTabId && tabs.some((tab) => tab.id === initialState.activeTabId)
+      ? initialState.activeTabId
+      : tabs[0]?.id || "",
+  );
+  const [handledNavigationId, setHandledNavigationId] = useState<number | null>(
+    initialState?.handledNavigationId ?? null,
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [error, setError] = useState<string | null>(null);
@@ -627,14 +874,20 @@ function BuiltInBrowserPanel({
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const lastUrlRef = useRef<string>("");
   const readyRef = useRef(false);
+  const mountedRef = useRef(true);
   const activeTabIdRef = useRef(activeTabId);
-  const handledNavigationIdRef = useRef<number | null>(null);
+  const onStateChangeRef = useRef(onStateChange);
   activeTabIdRef.current = activeTabId;
+  onStateChangeRef.current = onStateChange;
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0];
   const hasPage = Boolean(activeTab?.url);
   // The native child webview is always above the desktop DOM on Windows, so hide it while a DOM menu is open.
   const showWebview = active && hasPage && !settingsOpen && !menuOpen;
+
+  useEffect(() => {
+    onStateChangeRef.current({ tabs, activeTabId, handledNavigationId });
+  }, [activeTabId, handledNavigationId, tabs]);
 
   const updateSettings = useCallback((patch: Partial<BrowserSettingsState>) => {
     setSettings((current) => {
@@ -667,6 +920,19 @@ function BuiltInBrowserPanel({
     };
   }, [deviceHeight, deviceOpen, devicePreset, deviceScale, deviceWidth]);
 
+  // The task's webview stays loaded in the background, so trust the live page it
+  // still shows instead of forcing the stored URL back onto it.
+  const adoptLiveUrl = useCallback((liveUrl: string) => {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === activeTabIdRef.current && tab.url && tab.url !== liveUrl
+          ? { ...tab, url: liveUrl, input: liveUrl }
+          : tab,
+      ),
+    );
+    lastUrlRef.current = liveUrl;
+  }, []);
+
   const syncSurface = useCallback(
     async (options?: { url?: string | null; show?: boolean; hide?: boolean }) => {
       const bounds = readBounds();
@@ -674,31 +940,52 @@ function BuiltInBrowserPanel({
       const selectedDevicePreset = DEVICE_PRESETS.find((preset) => preset.id === devicePreset) || DEVICE_PRESETS[0];
       try {
         if (!readyRef.current) {
-          await browserEnsure(bounds, options?.url || activeTab?.url || "about:blank", selectedDevicePreset.userAgent);
+          // Ensure only creates or re-places this task's webview; it never navigates,
+          // so returning to a task cannot reload the page it already had open.
+          const ensured = await browserEnsure(
+            sessionKey,
+            bounds,
+            options?.url || activeTab?.url || "about:blank",
+            selectedDevicePreset.userAgent,
+          );
           readyRef.current = true;
+          if (!ensured.created && ensured.url) {
+            adoptLiveUrl(ensured.url);
+          } else if (options?.url) {
+            lastUrlRef.current = options.url;
+          }
         } else {
-          await browserSetBounds(bounds);
+          await browserSetBounds(sessionKey, bounds);
           if (options?.url) {
-            await browserNavigate(options.url);
+            await browserNavigate(sessionKey, options.url);
             lastUrlRef.current = options.url;
           }
         }
+        // Switching tasks unmounts this panel mid-await; a late show would leave
+        // this task's page floating over the next task's chat.
+        if (!mountedRef.current) {
+          await browserHide(sessionKey);
+          return;
+        }
         if (options?.hide || !showWebview) {
-          await browserHide();
+          await browserHide(sessionKey);
         } else if (options?.show || showWebview) {
-          await browserShow();
+          await browserShow(sessionKey);
         }
         setError(null);
       } catch (cause) {
+        if (!mountedRef.current) return;
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [activeTab?.url, devicePreset, readBounds, showWebview],
+    [activeTab?.url, adoptLiveUrl, devicePreset, readBounds, sessionKey, showWebview],
   );
 
   const applyBrowserScrollbarStyle = useCallback(async () => {
     const css = JSON.stringify(BROWSER_SCROLLBAR_STYLE);
-    await browserEval(`
+    await browserEval(
+      sessionKey,
+      `
       (() => {
         const id = "xcoding-browser-scrollbar-style";
         let style = document.getElementById(id);
@@ -710,12 +997,15 @@ function BuiltInBrowserPanel({
         }
         style.textContent = ${css};
       })();
-    `);
-  }, []);
+    `,
+    );
+  }, [sessionKey]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void onBrowserNavigated((payload) => {
+      // Background tasks keep loading pages; only follow this task's webview.
+      if (payload.session && payload.session !== sessionKey) return;
       const nextUrl = payload.url || "";
       if (!nextUrl || nextUrl === "about:blank") return;
       const currentId = activeTabIdRef.current;
@@ -739,15 +1029,17 @@ function BuiltInBrowserPanel({
     return () => {
       unlisten?.();
     };
-  }, [applyBrowserScrollbarStyle]);
+  }, [applyBrowserScrollbarStyle, sessionKey]);
 
   useEffect(() => {
     // RightToolsPanel removes this component when the side panel closes.
     // Hide the native child webview too, otherwise it stays above the desktop DOM.
+    mountedRef.current = true;
     return () => {
-      void browserHide().catch(() => undefined);
+      mountedRef.current = false;
+      void browserHide(sessionKey).catch(() => undefined);
     };
-  }, []);
+  }, [sessionKey]);
 
   useEffect(() => {
     void browserDownloadDir()
@@ -773,11 +1065,11 @@ function BuiltInBrowserPanel({
 
   useEffect(() => {
     if (!active) {
-      void browserHide().catch(() => undefined);
+      void browserHide(sessionKey).catch(() => undefined);
       return;
     }
     void syncSurface({ show: showWebview, hide: !showWebview });
-  }, [active, showWebview, syncSurface]);
+  }, [active, sessionKey, showWebview, syncSurface]);
 
   useEffect(() => {
     if (!active || !showWebview) return;
@@ -848,10 +1140,10 @@ function BuiltInBrowserPanel({
   );
 
   useEffect(() => {
-    if (!active || !navigation || handledNavigationIdRef.current === navigation.id) return;
-    handledNavigationIdRef.current = navigation.id;
+    if (!active || !navigation || handledNavigationId === navigation.id) return;
+    setHandledNavigationId(navigation.id);
     void openUrl(navigation.url, { forceEmbedded: true });
-  }, [active, navigation, openUrl]);
+  }, [active, handledNavigationId, navigation, openUrl]);
 
   const onSubmit = useCallback(
     (event: FormEvent) => {
@@ -867,8 +1159,8 @@ function BuiltInBrowserPanel({
     setActiveTabId(tab.id);
     setSettingsOpen(false);
     setFindOpen(false);
-    void browserHide().catch(() => undefined);
-  }, [locale]);
+    void browserHide(sessionKey).catch(() => undefined);
+  }, [locale, sessionKey]);
 
   const closeTab = useCallback(
     (id: string) => {
@@ -877,7 +1169,7 @@ function BuiltInBrowserPanel({
           const fresh = createBrowserTab({ title: t(locale, "browser.newTab") });
           setActiveTabId(fresh.id);
           lastUrlRef.current = "";
-          void browserHide().catch(() => undefined);
+          void browserHide(sessionKey).catch(() => undefined);
           return [fresh];
         }
         const index = current.findIndex((tab) => tab.id === id);
@@ -886,48 +1178,54 @@ function BuiltInBrowserPanel({
           const fallback = next[Math.max(0, index - 1)] || next[0];
           setActiveTabId(fallback.id);
           if (fallback.url) void syncSurface({ url: fallback.url, show: true });
-          else void browserHide().catch(() => undefined);
+          else void browserHide(sessionKey).catch(() => undefined);
         }
         return next;
       });
     },
-    [locale, syncSurface],
+    [locale, sessionKey, syncSurface],
   );
 
   const selectTab = useCallback(
     (id: string) => {
+      // Re-clicking the open tab must not reload the page it already shows.
+      if (id === activeTabIdRef.current) {
+        setSettingsOpen(false);
+        void syncSurface({ show: true });
+        return;
+      }
       setActiveTabId(id);
       setSettingsOpen(false);
       const tab = tabs.find((item) => item.id === id);
       if (tab?.url) void syncSurface({ url: tab.url, show: true });
-      else void browserHide().catch(() => undefined);
+      else void browserHide(sessionKey).catch(() => undefined);
     },
-    [syncSurface, tabs],
+    [sessionKey, syncSurface, tabs],
   );
 
   const changeZoom = useCallback(async (next: number) => {
     const clamped = Math.min(3, Math.max(0.5, Math.round(next * 10) / 10));
     setZoom(clamped);
     try {
-      await browserSetZoom(clamped);
+      await browserSetZoom(sessionKey, clamped);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [sessionKey]);
 
   const runFind = useCallback(
     async (forward = true) => {
       const query = findQuery.trim();
       if (!query || !hasPage) return;
       try {
-        await browserFind(query, { forward });
+        await browserFind(sessionKey, query, { forward });
         setError(null);
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     },
-    [findQuery, hasPage],
+    [findQuery, hasPage, sessionKey],
   );
 
   const onFindKeyDown = useCallback(
@@ -948,13 +1246,13 @@ function BuiltInBrowserPanel({
     setMenuOpen(false);
     try {
       await syncSurface({ show: true });
-      const saved = await browserScreenshot();
+      const saved = await browserScreenshot(sessionKey);
       setStatus(t(locale, "browser.screenshotSaved", { path: saved }));
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [hasPage, locale, syncSurface]);
+  }, [hasPage, locale, sessionKey, syncSurface]);
 
   const openDownloads = useCallback(async () => {
     setMenuOpen(false);
@@ -973,27 +1271,27 @@ function BuiltInBrowserPanel({
   const clearBrowsingData = useCallback(async () => {
     setMenuOpen(false);
     try {
-      await browserClearData();
+      await browserClearData(sessionKey);
       setStatus(t(locale, "browser.clearData"));
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [locale]);
+  }, [locale, sessionKey]);
 
   const openSettings = useCallback((section: BrowserSettingsSection = "general") => {
     setMenuOpen(false);
     setSettingsSection(section);
     setSettingsOpen(true);
     setFindOpen(false);
-    void browserHide().catch(() => undefined);
-  }, []);
+    void browserHide(sessionKey).catch(() => undefined);
+  }, [sessionKey]);
 
   const applyDevicePreset = useCallback(async (presetId: DevicePresetId) => {
     const preset = DEVICE_PRESETS.find((item) => item.id === presetId) || DEVICE_PRESETS[0];
     try {
       // Wry applies a user agent at webview creation, so switching profiles recreates the current page.
-      await browserSetUserAgent(preset.userAgent);
+      await browserSetUserAgent(sessionKey, preset.userAgent);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1003,7 +1301,7 @@ function BuiltInBrowserPanel({
       setDeviceWidth(preset.width);
       setDeviceHeight(preset.height);
     }
-  }, []);
+  }, [sessionKey]);
 
   const markUnavailable = useCallback(() => {
     setMenuOpen(false);
@@ -1049,7 +1347,7 @@ function BuiltInBrowserPanel({
             title={t(locale, "browser.back")}
             aria-label={t(locale, "browser.back")}
             disabled={!hasPage || settingsOpen}
-            onClick={() => void browserBack().catch((cause) => setError(String(cause)))}
+            onClick={() => void browserBack(sessionKey).catch((cause) => setError(String(cause)))}
           >
             ←
           </button>
@@ -1059,7 +1357,7 @@ function BuiltInBrowserPanel({
             title={t(locale, "browser.forward")}
             aria-label={t(locale, "browser.forward")}
             disabled={!hasPage || settingsOpen}
-            onClick={() => void browserForward().catch((cause) => setError(String(cause)))}
+            onClick={() => void browserForward(sessionKey).catch((cause) => setError(String(cause)))}
           >
             →
           </button>
@@ -1069,7 +1367,7 @@ function BuiltInBrowserPanel({
             title={t(locale, "browser.reload")}
             aria-label={t(locale, "browser.reload")}
             disabled={!hasPage || settingsOpen}
-            onClick={() => void browserReload().catch((cause) => setError(String(cause)))}
+            onClick={() => void browserReload(sessionKey).catch((cause) => setError(String(cause)))}
           >
             ↻
           </button>
@@ -1114,7 +1412,7 @@ function BuiltInBrowserPanel({
                 disabled={!hasPage || settingsOpen}
                 onClick={() => {
                   setMenuOpen(false);
-                  void browserPrint().catch((cause) => setError(String(cause)));
+                  void browserPrint(sessionKey).catch((cause) => setError(String(cause)));
                 }}
               >
                 {t(locale, "browser.print")}
@@ -1233,7 +1531,7 @@ function BuiltInBrowserPanel({
               onChange={(event) => {
                 const width = Number(event.target.value) || 120;
                 if (devicePreset !== "responsive") {
-                  void browserSetUserAgent(null).catch((cause) => {
+                  void browserSetUserAgent(sessionKey, null).catch((cause) => {
                     setError(cause instanceof Error ? cause.message : String(cause));
                   });
                   setDevicePreset("responsive");
@@ -1254,7 +1552,7 @@ function BuiltInBrowserPanel({
               onChange={(event) => {
                 const height = Number(event.target.value) || 120;
                 if (devicePreset !== "responsive") {
-                  void browserSetUserAgent(null).catch((cause) => {
+                  void browserSetUserAgent(sessionKey, null).catch((cause) => {
                     setError(cause instanceof Error ? cause.message : String(cause));
                   });
                   setDevicePreset("responsive");
@@ -1792,7 +2090,10 @@ export function RightToolsPanel({
   locale,
   open,
   tab,
+  sessionKey,
   browserNavigation,
+  browserState,
+  onBrowserStateChange,
   onTabChange,
   onClose,
   workspaceRoot,
@@ -1907,7 +2208,16 @@ export function RightToolsPanel({
           </div>
         ) : null}
 
-        {tab === "browser" ? <BuiltInBrowserPanel locale={locale} active={open && tab === "browser"} navigation={browserNavigation} /> : null}
+        {tab === "browser" ? (
+          <BuiltInBrowserPanel
+            locale={locale}
+            active={open && tab === "browser"}
+            sessionKey={sessionKey}
+            navigation={browserNavigation}
+            initialState={browserState}
+            onStateChange={onBrowserStateChange}
+          />
+        ) : null}
 
         {tab === "code" ? <GitNexusPanel locale={locale} active={open && tab === "code"} workspaceRoot={workspaceRoot} /> : null}
 

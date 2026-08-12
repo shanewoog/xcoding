@@ -6,7 +6,9 @@ use std::path::Path;
 
 use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
+/// Re-exported so downstream crates can name the `ProviderError::HttpStatus` field type.
+pub use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -14,13 +16,14 @@ use xcoding_protocol::{
     CloudProviderConfig, ListModelsResult, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
     MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
     MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
-    MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS, MAX_NON_STREAM_TIMEOUT_SECS,
-    MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS,
-    MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_FAILURE_THRESHOLD,
-    MIN_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
-    MIN_CIRCUIT_RECOVERY_WAIT_SECS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
-    MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS,
-    ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
+    MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS,
+    MAX_NON_STREAM_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+    MAX_STREAM_IDLE_TIMEOUT_SECS, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
+    MIN_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_MIN_REQUEST_COUNT,
+    MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
+    MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
+    MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+    MIN_STREAM_IDLE_TIMEOUT_SECS, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
 
 pub type ProviderEventStream =
@@ -202,6 +205,16 @@ impl ProviderError {
             | Self::InvalidToolCall(_) => false,
         }
     }
+
+    /// Request was rejected for exceeding the model context window. Unlike
+    /// `is_retryable`, resending the same body is guaranteed to fail again:
+    /// the caller must shrink the history before it retries.
+    pub fn is_context_overflow(&self) -> bool {
+        let Self::HttpStatus { status, body } = self else {
+            return false;
+        };
+        *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body)
+    }
 }
 
 /// Initial attempt + this many retries (Codex-style: retry up to 5 times).
@@ -282,18 +295,32 @@ fn format_stream_body_sample(sample: &[u8], truncated: bool) -> String {
 fn format_http_status_message(status: &StatusCode, body: &str) -> String {
     let truncated = truncate_provider_body(body, 280);
     if *status == StatusCode::UNAUTHORIZED || *status == StatusCode::FORBIDDEN {
-        format!(
+        return format!(
             "Cloud provider authentication failed (HTTP {}). Check OPENAI_API_KEY and XCODING_OPENAI_BASE_URL. Provider response: {}",
             status.as_u16(),
             truncated
-        )
-    } else {
-        format!(
-            "Cloud provider request failed (HTTP {}). Check OPENAI_API_KEY and XCODING_OPENAI_BASE_URL if this looks like an auth or endpoint issue. Provider response: {}",
-            status.as_u16(),
-            truncated
-        )
+        );
     }
+    if *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body) {
+        return format!(
+            "Context window exceeded (HTTP 400): conversation history is too long for this model. History will be trimmed before retrying. Provider response: {}",
+            truncated
+        );
+    }
+    format!(
+        "Cloud provider request failed (HTTP {}). Check OPENAI_API_KEY and XCODING_OPENAI_BASE_URL if this looks like an auth or endpoint issue. Provider response: {}",
+        status.as_u16(),
+        truncated
+    )
+}
+
+fn body_indicates_context_overflow(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("context window")
+        || lower.contains("context length")
+        || lower.contains("maximum context")
+        || lower.contains("too many tokens")
+        || (lower.contains("exceeds") && (lower.contains("token") || lower.contains("context")))
 }
 
 fn truncate_provider_body(body: &str, max_chars: usize) -> String {
@@ -394,6 +421,18 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
     config.circuit_min_request_count = config
         .circuit_min_request_count
         .clamp(MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT);
+    config.model_context_windows = config
+        .model_context_windows
+        .into_iter()
+        .map(|(model, window)| (model.trim().to_ascii_lowercase(), window))
+        .filter(|(model, _)| !model.is_empty())
+        .map(|(model, window)| {
+            (
+                model,
+                window.clamp(MIN_CONTEXT_WINDOW_TOKENS, MAX_CONTEXT_WINDOW_TOKENS),
+            )
+        })
+        .collect();
     if let Some(key) = config.api_key.as_mut() {
         let trimmed = key.trim().to_owned();
         if trimmed.is_empty() {
@@ -759,30 +798,7 @@ impl OpenAiCompatibleProvider {
         tools: &[ToolDefinition],
         reasoning_effort: Option<&str>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        let mut body = json!({
-            "model": model,
-            "messages": messages,
-            "stream": true
-        });
-        if let Some(effort) = reasoning_effort
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            body["reasoning_effort"] = json!(effort);
-        }
-        if !tools.is_empty() {
-            body["tools"] = Value::Array(
-                tools
-                    .iter()
-                    .map(|tool| {
-                        json!({
-                            "type": "function",
-                            "function": tool
-                        })
-                    })
-                    .collect(),
-            );
-        }
+        let body = chat_completions_request_body(model, messages, tools, reasoning_effort);
 
         // The agent owns retry scheduling so it can report each reconnect attempt to
         // the UI. This provider opens one SSE response per call.
@@ -941,6 +957,43 @@ impl OpenAiCompatibleProvider {
 
         Ok(Box::pin(stream))
     }
+}
+
+fn chat_completions_request_body(
+    model: &str,
+    messages: Vec<ChatMessage>,
+    tools: &[ToolDefinition],
+    reasoning_effort: Option<&str>,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true
+    });
+    if let Some(effort) = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body["reasoning_effort"] = json!(effort);
+    }
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "function": tool
+                    })
+                })
+                .collect(),
+        );
+        // Mirrors the Responses path so both wire APIs let the model batch
+        // independent tool calls into one round trip.
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(true);
+    }
+    body
 }
 
 fn responses_request_body(
@@ -1509,6 +1562,47 @@ mod tests {
     }
 
     #[test]
+    fn chat_completions_request_body_enables_parallel_tool_calls() {
+        let body = chat_completions_request_body(
+            "gpt-test",
+            vec![ChatMessage::user("List the workspace files.")],
+            &[ToolDefinition {
+                name: "list_dir".to_owned(),
+                description: "List one directory".to_owned(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            }],
+            Some("high"),
+        );
+
+        assert_eq!(body["model"], "gpt-test");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "list_dir");
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn chat_completions_request_body_omits_tool_fields_without_tools() {
+        let body = chat_completions_request_body(
+            "gpt-test",
+            vec![ChatMessage::user("Say hello.")],
+            &[],
+            None,
+        );
+
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn parses_responses_stream_events() {
         match parse_responses_event(r#"{"type":"response.output_text.delta","delta":"Hello"}"#)
             .expect("text event parses")
@@ -1710,6 +1804,64 @@ mod tests {
     }
 
     #[test]
+    fn context_overflow_detected_from_bad_request_body() {
+        let overflow = ProviderError::HttpStatus {
+            status: StatusCode::BAD_REQUEST,
+            body: r#"{"error":{"message":"Input exceeds the model's context window. Please shorten your input and try again.","type":"invalid_request_error"}}"#.to_owned(),
+        };
+        assert!(overflow.is_context_overflow());
+        // Resending the same oversized payload cannot succeed, so plain retry stays off.
+        assert!(!overflow.is_retryable());
+
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::BAD_REQUEST,
+                body: "maximum context length is 128000 tokens".to_owned(),
+            }
+            .is_context_overflow()
+        );
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::BAD_REQUEST,
+                body: "too many tokens in request".to_owned(),
+            }
+            .is_context_overflow()
+        );
+    }
+
+    #[test]
+    fn ordinary_bad_request_is_not_context_overflow() {
+        assert!(
+            !ProviderError::HttpStatus {
+                status: StatusCode::BAD_REQUEST,
+                body: r#"{"error":{"message":"unsupported model"}}"#.to_owned(),
+            }
+            .is_context_overflow()
+        );
+        // Same body, wrong status: only 400 carries the overflow contract.
+        assert!(
+            !ProviderError::HttpStatus {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: "input exceeds the model's context window".to_owned(),
+            }
+            .is_context_overflow()
+        );
+        assert!(!ProviderError::MissingApiKey.is_context_overflow());
+    }
+
+    #[test]
+    fn context_overflow_message_does_not_blame_credentials() {
+        let message = ProviderError::HttpStatus {
+            status: StatusCode::BAD_REQUEST,
+            body: "Input exceeds the model's context window. Please shorten your input and try again.".to_owned(),
+        }
+        .to_string();
+        assert!(message.contains("Context window exceeded (HTTP 400)"));
+        assert!(!message.contains("OPENAI_API_KEY"));
+        assert!(!message.contains("XCODING_OPENAI_BASE_URL"));
+    }
+
+    #[test]
     fn inspect_auth_reports_missing_key() {
         // Cannot safely clear process env for concurrent tests; assert shape via mask helper.
         assert_eq!(mask_api_key("abcd"), "****");
@@ -1826,6 +1978,28 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_model_context_window_overrides() {
+        let mut windows = BTreeMap::new();
+        windows.insert("  GPT-5.5  ".to_owned(), 1usize);
+        windows.insert("gemini-2.5-pro".to_owned(), MAX_CONTEXT_WINDOW_TOKENS + 1);
+        windows.insert("".to_owned(), 200_000);
+        let normalized = normalize_user_config(UserConfig {
+            model_context_windows: windows,
+            ..UserConfig::default()
+        });
+        assert_eq!(normalized.model_context_windows.len(), 2);
+        assert_eq!(
+            normalized.model_context_windows["gpt-5.5"],
+            MIN_CONTEXT_WINDOW_TOKENS
+        );
+        assert_eq!(
+            normalized.model_context_windows["gemini-2.5-pro"],
+            MAX_CONTEXT_WINDOW_TOKENS
+        );
+        assert!(!normalized.model_context_windows.contains_key(""));
+    }
+
+    #[test]
     fn user_config_roundtrip_under_temp_home() {
         let temp = std::env::temp_dir().join(format!("xcoding-user-config-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp);
@@ -1845,10 +2019,14 @@ mod tests {
         config.base_url = "https://example.test/v1".to_owned();
         config.api_key = Some("sk-test-key-1234".to_owned());
         config.last_workspace_root = Some("D:\\work\\demo".to_owned());
+        config
+            .model_context_windows
+            .insert("gpt-test".to_owned(), 272_000);
         save_user_config(&config).expect("save");
         let loaded = load_user_config();
         assert_eq!(loaded.locale, "zh-CN");
         assert_eq!(loaded.model, "gpt-test");
+        assert_eq!(loaded.model_context_windows["gpt-test"], 272_000);
         assert_eq!(loaded.reasoning_effort, "high");
         assert_eq!(loaded.stream_first_event_timeout_secs, 120);
         assert_eq!(loaded.stream_idle_timeout_secs, 180);

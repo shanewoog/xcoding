@@ -371,6 +371,14 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    /// Flip any `Running` sessions left over from a previous process to `Cancelled`.
+    /// Must be called once at process startup, before any chat turn can execute.
+    pub fn reconcile_interrupted_sessions(&self) -> Result<usize, CoreError> {
+        self.store
+            .reconcile_interrupted_sessions()
+            .map_err(CoreError::from)
+    }
+
     pub fn delete_session(&self, session_id: uuid::Uuid) -> Result<(), CoreError> {
         let deleted = self
             .store
@@ -871,6 +879,30 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                 steps.push(ReplayStep {
                     kind: "error".to_owned(),
                     summary: message.clone(),
+                    tool_name: None,
+                    success: Some(false),
+                });
+            }
+            SessionEvent::VisionDelegateStart { image_count, delegate_model, .. } => {
+                steps.push(ReplayStep {
+                    kind: "vision_delegate_start".to_owned(),
+                    summary: format!("使用 {} 分析 {} 张图片", delegate_model, image_count),
+                    tool_name: None,
+                    success: None,
+                });
+            }
+            SessionEvent::VisionDelegateSuccess { image_count, description_length, .. } => {
+                steps.push(ReplayStep {
+                    kind: "vision_delegate_success".to_owned(),
+                    summary: format!("✓ 已生成图片描述（{} 张，{} 字符）", image_count, description_length),
+                    tool_name: None,
+                    success: Some(true),
+                });
+            }
+            SessionEvent::VisionDelegateFailed { image_count, error, .. } => {
+                steps.push(ReplayStep {
+                    kind: "vision_delegate_failed".to_owned(),
+                    summary: format!("✗ 视觉分析失败（{} 张图片）: {}", image_count, error),
                     tool_name: None,
                     success: Some(false),
                 });

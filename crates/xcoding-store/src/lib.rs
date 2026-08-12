@@ -544,6 +544,23 @@ impl SessionStore {
         self.get_session(id)
     }
 
+    /// Startup reconciliation for zombie rows. The chat turn runs inside a blocking invoke, so a
+    /// `Running` row can never outlive the process that owned it. Anything still marked running
+    /// when we open the database belongs to a previous process and will never emit another event,
+    /// so flip it to `Cancelled` — a status the UI treats as continuable.
+    pub fn reconcile_interrupted_sessions(&self) -> Result<usize, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE status = ?3",
+            params![
+                serde_json::to_string(&SessionStatus::Cancelled)?,
+                Utc::now().to_rfc3339(),
+                serde_json::to_string(&SessionStatus::Running)?,
+            ],
+        )?;
+
+        Ok(changed)
+    }
+
     pub fn set_session_title(
         &self,
         id: Uuid,
@@ -940,7 +957,10 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
         | SessionEvent::TaskCompleted { session_id, .. }
         | SessionEvent::Retrying { session_id, .. }
         | SessionEvent::ModelCall { session_id, .. }
-        | SessionEvent::Error { session_id, .. } => *session_id,
+        | SessionEvent::Error { session_id, .. }
+        | SessionEvent::VisionDelegateStart { session_id, .. }
+        | SessionEvent::VisionDelegateSuccess { session_id, .. }
+        | SessionEvent::VisionDelegateFailed { session_id, .. } => *session_id,
     }
 }
 
@@ -1008,6 +1028,52 @@ mod tests {
 
         assert_eq!(messages, vec![message]);
         assert_eq!(running.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn reconcile_interrupted_sessions_flips_running_to_cancelled() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+
+        // One session ends up Running (zombie from a previous process).
+        let zombie = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session saves");
+        store
+            .set_session_status(zombie.id, SessionStatus::Running)
+            .expect("status updates");
+
+        // One session is legitimately Done — must not be touched.
+        let done = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session saves");
+        store
+            .set_session_status(done.id, SessionStatus::Done)
+            .expect("status updates");
+
+        let changed = store
+            .reconcile_interrupted_sessions()
+            .expect("reconcile succeeds");
+        assert_eq!(changed, 1, "only the Running session should be flipped");
+
+        let sessions = store
+            .list_sessions(Some("D:/work/demo"))
+            .expect("sessions load");
+        let after_zombie = sessions.iter().find(|s| s.id == zombie.id).unwrap();
+        let after_done = sessions.iter().find(|s| s.id == done.id).unwrap();
+        assert_eq!(after_zombie.status, SessionStatus::Cancelled);
+        assert_eq!(after_done.status, SessionStatus::Done);
     }
 
     #[test]

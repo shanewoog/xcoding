@@ -39,6 +39,9 @@ const MAX_SKILL_DESCRIPTION_CHARS: usize = 240;
 const MAX_SEARCH_CANDIDATES: usize = 500;
 const DEFAULT_GIT_LOG_COUNT: usize = 20;
 const MAX_GIT_LOG_COUNT: usize = 50;
+/// Aggregate byte budget for a structured tool payload (a JSON array of items).
+/// Mirrors the cap applied to raw command output by [`truncate_output`].
+const MAX_TOOL_JSON_BYTES: usize = 32 * 1024;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -819,15 +822,16 @@ impl ToolRegistry {
                 .then_with(|| left.result.path.cmp(&right.result.path))
                 .then_with(|| left.result.line.cmp(&right.result.line))
         });
-        let truncated = candidates.len() >= candidate_cap || candidates.len() > limit;
+        let over_limit = candidates.len() >= candidate_cap || candidates.len() > limit;
         let results: Vec<SearchResult> = candidates
             .into_iter()
             .take(limit)
             .map(|hit| hit.result)
             .collect();
+        let (results, over_budget) = cap_json_items(results);
 
         Ok(ToolExecution {
-            output: json!({ "results": results, "truncated": truncated }),
+            output: json!({ "results": results, "truncated": over_limit || over_budget }),
             summary: format!("Searched for {:?}", args.query),
         })
     }
@@ -991,7 +995,10 @@ impl ToolRegistry {
             .arg("status")
             .arg("--porcelain=v1")
             .arg("--branch")
-            .arg("--untracked-files=all")
+            // `normal` collapses an untracked directory into a single entry.
+            // `all` expands every file inside it, which dominates the payload in
+            // workspaces with build output or vendored trees.
+            .arg("--untracked-files=normal")
             .current_dir(&self.workspace_root)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1019,11 +1026,13 @@ impl ToolRegistry {
             .iter()
             .find_map(|entry| entry.get("branch").and_then(Value::as_str))
             .map(str::to_owned);
+        let (entries, truncated) = cap_json_items(entries);
         Ok(ToolExecution {
             output: json!({
                 "path": pathspec.unwrap_or("."),
                 "branch": branch,
                 "entries": entries,
+                "truncated": truncated,
                 "raw": truncate_output(&stdout),
             }),
             summary: format!("Git status for {}", pathspec.unwrap_or(".")),
@@ -2064,6 +2073,29 @@ fn truncate_output(value: &str) -> String {
     }
 }
 
+/// Keeps the leading items that fit inside [`MAX_TOOL_JSON_BYTES`] once serialized,
+/// so a single tool call cannot flood the conversation with a multi-hundred-kilobyte
+/// payload that every later request has to resend. Returns the retained items and
+/// whether anything was dropped. The first item is always kept so callers still see
+/// a sample when one item alone exceeds the budget.
+fn cap_json_items<T: Serialize>(items: Vec<T>) -> (Vec<T>, bool) {
+    let mut used = 0usize;
+    let mut kept = Vec::with_capacity(items.len());
+    let mut dropped = false;
+    for item in items {
+        let size = serde_json::to_string(&item)
+            .map(|text| text.len())
+            .unwrap_or(0);
+        if !kept.is_empty() && used + size > MAX_TOOL_JSON_BYTES {
+            dropped = true;
+            break;
+        }
+        used += size;
+        kept.push(item);
+    }
+    (kept, dropped)
+}
+
 fn parse_arguments<T: DeserializeOwned>(arguments: &Value) -> Result<T, ToolError> {
     serde_json::from_value(arguments.clone())
         .map_err(|error| ToolError::InvalidArguments(error.to_string()))
@@ -2359,6 +2391,144 @@ mod tests {
     }
 
     #[test]
+    fn search_code_caps_total_result_bytes() {
+        let root = workspace();
+        let wide_line = format!("match_token {}\n", "x".repeat(1500));
+        let mut wide = String::new();
+        for _ in 0..DEFAULT_SEARCH_RESULTS {
+            wide.push_str(&wide_line);
+        }
+        fs::write(root.join("wide.rs"), &wide).expect("wide file writes");
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+
+        let search = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "search_bytes".to_owned(),
+                    name: ToolName::SearchCode,
+                    arguments: json!({ "query": "match_token" }),
+                },
+            )
+            .expect("search runs");
+
+        let results = search.output["results"].as_array().expect("results array");
+        assert!(!results.is_empty(), "expected at least one retained result");
+        assert!(
+            results.len() < DEFAULT_SEARCH_RESULTS,
+            "expected byte cap to drop results, kept {}",
+            results.len()
+        );
+        assert_eq!(search.output["truncated"], json!(true));
+        let encoded = serde_json::to_string(&search.output["results"]).expect("results serialize");
+        assert!(
+            encoded.len() <= MAX_TOOL_JSON_BYTES + 4096,
+            "results payload {} exceeded budget",
+            encoded.len()
+        );
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn git_status_collapses_untracked_directories() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let init = git_command()
+            .args(["init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git init runs");
+        assert!(init.success());
+        let nested = root.join("build/artifacts");
+        fs::create_dir_all(&nested).expect("nested dirs create");
+        for index in 0..25 {
+            fs::write(nested.join(format!("out{index}.bin")), "x\n").expect("artifact writes");
+        }
+
+        let status = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "status_collapse".to_owned(),
+                    name: ToolName::GitStatus,
+                    arguments: json!({}),
+                },
+            )
+            .expect("git status runs");
+
+        let entries = status.output["entries"].as_array().expect("entries array");
+        let untracked: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.get("worktree_status").and_then(Value::as_str) == Some("?"))
+            .filter_map(|entry| entry.get("path").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            untracked,
+            vec!["build/"],
+            "expected the untracked tree to collapse into one entry"
+        );
+        assert!(
+            !status.output["raw"]
+                .as_str()
+                .expect("raw text")
+                .contains("out0.bin")
+        );
+        assert_eq!(status.output["truncated"], json!(false));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn git_status_caps_total_entry_bytes() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let init = git_command()
+            .args(["init"])
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git init runs");
+        assert!(init.success());
+        let file_count = 300usize;
+        for index in 0..file_count {
+            let name = format!("{index:04}_{}.txt", "n".repeat(100));
+            fs::write(root.join(&name), "x\n").expect("untracked file writes");
+        }
+
+        let status = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "status_bytes".to_owned(),
+                    name: ToolName::GitStatus,
+                    arguments: json!({}),
+                },
+            )
+            .expect("git status runs");
+
+        let entries = status.output["entries"].as_array().expect("entries array");
+        assert!(!entries.is_empty(), "expected at least one retained entry");
+        assert!(
+            entries.len() < file_count,
+            "expected byte cap to drop entries, kept {}",
+            entries.len()
+        );
+        assert_eq!(status.output["truncated"], json!(true));
+        let encoded = serde_json::to_string(&status.output["entries"]).expect("entries serialize");
+        assert!(
+            encoded.len() <= MAX_TOOL_JSON_BYTES + 4096,
+            "entries payload {} exceeded budget",
+            encoded.len()
+        );
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
     fn search_code_supports_case_glob_and_context() {
         let root = workspace();
         fs::create_dir_all(root.join("src")).expect("src creates");
@@ -2514,6 +2684,7 @@ mod tests {
         let raw = status.output["raw"].as_str().expect("raw status");
         assert!(raw.contains("hello.txt"), "{raw}");
         assert!(raw.contains("new.txt"), "{raw}");
+        assert_eq!(status.output["truncated"], json!(false));
 
         let diff = tools
             .execute(

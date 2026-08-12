@@ -4,6 +4,7 @@
 mod browser;
 mod gitnexus;
 mod projects;
+mod terminal;
 mod workspace_tools;
 
 use std::collections::{HashMap, HashSet};
@@ -404,9 +405,24 @@ fn main() {
                     return Err(error.into());
                 }
             }
+            // Flip any sessions left in Running state by a previous process to Cancelled.
+            // A blocking chat invoke cannot survive a process restart, so Running rows at
+            // startup are always zombie rows that would otherwise lock the composer in queue mode.
+            match database_path().and_then(|path| CoreService::open(path).map_err(|e| e.to_string())) {
+                Ok(core) => match core.reconcile_interrupted_sessions() {
+                    Ok(n) if n > 0 => boot_log(&format!("reconciled {n} interrupted session(s) to cancelled")),
+                    Ok(_) => {}
+                    Err(error) => boot_log(&format!("reconcile_interrupted_sessions failed (non-fatal): {error}")),
+                },
+                Err(error) => boot_log(&format!("open for reconciliation failed (non-fatal): {error}")),
+            }
             boot_log("setup end");
             Ok(())
         })
+        .manage(terminal::TerminalState {
+            session: std::sync::Mutex::new(None),
+        })
+        .manage(browser::BrowserRegistry::default())
         .invoke_handler(tauri::generate_handler![
             ping,
             show_main_window,
@@ -436,6 +452,10 @@ fn main() {
             workspace_tools::run_terminal_command,
             workspace_tools::open_path,
             workspace_tools::open_external_url,
+            terminal::terminal_start,
+            terminal::terminal_input,
+            terminal::terminal_resize,
+            terminal::terminal_stop,
             gitnexus::gitnexus_status,
             gitnexus::gitnexus_analyze,
             gitnexus::gitnexus_query,
@@ -450,6 +470,7 @@ fn main() {
             browser::browser_show,
             browser::browser_hide,
             browser::browser_close,
+            browser::browser_adopt_session,
             browser::browser_set_user_agent,
             browser::browser_set_zoom,
             browser::browser_print,
