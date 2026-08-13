@@ -17,11 +17,13 @@ use xcoding_protocol::{
     MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
     MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
     MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS,
+    MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
     MAX_NON_STREAM_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
     MAX_STREAM_IDLE_TIMEOUT_SECS, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
     MIN_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_MIN_REQUEST_COUNT,
     MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
     MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
+    MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
     MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS,
     MIN_STREAM_IDLE_TIMEOUT_SECS, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
@@ -219,10 +221,15 @@ impl ProviderError {
     /// `is_retryable`, resending the same body is guaranteed to fail again:
     /// the caller must shrink the history before it retries.
     pub fn is_context_overflow(&self) -> bool {
-        let Self::HttpStatus { status, body } = self else {
-            return false;
-        };
-        *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body)
+        match self {
+            Self::HttpStatus { status, body } => {
+                *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body)
+            }
+            // Responses API reports some request rejections as a successful SSE
+            // connection followed by `response.failed`, rather than HTTP 400.
+            Self::InvalidResponse(message) => body_indicates_context_overflow(message),
+            _ => false,
+        }
     }
 }
 
@@ -325,7 +332,8 @@ fn format_http_status_message(status: &StatusCode, body: &str) -> String {
 
 fn body_indicates_context_overflow(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    lower.contains("context window")
+    lower.contains("context_length_exceeded")
+        || lower.contains("context window")
         || lower.contains("context length")
         || lower.contains("maximum context")
         || lower.contains("too many tokens")
@@ -430,6 +438,12 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
     config.circuit_min_request_count = config
         .circuit_min_request_count
         .clamp(MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT);
+    config.context_compaction_threshold_percent = config
+        .context_compaction_threshold_percent
+        .clamp(
+            MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+            MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+        );
     config.model_context_windows = config
         .model_context_windows
         .into_iter()
@@ -1201,7 +1215,15 @@ fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderErr
                         .and_then(Value::as_str)
                 })
                 .unwrap_or("Responses API returned a failed response");
-            Ok(ResponsesParsedEvent::Failed(message.to_owned()))
+            let code = event
+                .pointer("/response/error/code")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
+            let message = match code {
+                Some(code) => format!("{code}: {message}"),
+                None => message.to_owned(),
+            };
+            Ok(ResponsesParsedEvent::Failed(message))
         }
         _ => Ok(ResponsesParsedEvent::Ignored),
     }
@@ -1684,11 +1706,25 @@ mod tests {
         ));
 
         match parse_responses_event(
-            r#"{"type":"response.failed","response":{"error":{"message":"upstream failed"}}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"upstream_error","message":"upstream failed"}}}"#,
         )
         .expect("failure event parses")
         {
-            ResponsesParsedEvent::Failed(message) => assert_eq!(message, "upstream failed"),
+            ResponsesParsedEvent::Failed(message) => {
+                assert_eq!(message, "upstream_error: upstream failed")
+            }
+            _ => panic!("expected failed event"),
+        }
+
+        match parse_responses_event(
+            r#"{"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}}"#,
+        )
+        .expect("context overflow event parses")
+        {
+            ResponsesParsedEvent::Failed(message) => {
+                assert!(message.starts_with("context_length_exceeded:"));
+                assert!(ProviderError::InvalidResponse(message).is_context_overflow());
+            }
             _ => panic!("expected failed event"),
         }
     }
@@ -1964,6 +2000,17 @@ mod tests {
             .is_context_overflow()
         );
         assert!(!ProviderError::MissingApiKey.is_context_overflow());
+        assert!(!ProviderError::InvalidResponse("upstream_error: request failed".to_owned())
+            .is_context_overflow());
+    }
+
+    #[test]
+    fn responses_context_overflow_is_not_retryable_without_trimming() {
+        let error = ProviderError::InvalidResponse(
+            "context_length_exceeded: Your input exceeds the context window".to_owned(),
+        );
+        assert!(error.is_context_overflow());
+        assert!(!error.is_retryable());
     }
 
     #[test]

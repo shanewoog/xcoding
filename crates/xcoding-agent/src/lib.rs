@@ -19,19 +19,23 @@ use xcoding_protocol::{
     LocalMemory, MAX_LOCAL_MEMORY_CHARS, ModelCapabilities, ProviderWireApi, ResolveActionParams,
     ResolveActionResult,
     RollbackRestorePointParams, RollbackRestorePointResult, Session, SessionEvent, SessionStatus,
-    ToolCall, ToolName, UserConfig,
+    ToolCall, ToolName, UserConfig, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+    MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
 };
+#[cfg(test)]
+use xcoding_protocol::DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT;
 use xcoding_providers::{
     ChatMessage, OpenAiCompatibleProvider, ProviderError, ProviderEvent, ProviderToolCall,
     ToolDefinition, load_user_config, provider_retry_delay,
 };
 use xcoding_tools::{ToolError, ToolExecution, ToolRegistry, is_local_api_request};
 
-const CONTEXT_COMPACTION_THRESHOLD: f64 = 0.75;
 const CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES: usize = 8;
-const SYSTEM_CONTEXT_TOKEN_RESERVE: usize = 4_000;
 const IMAGE_CONTEXT_TOKEN_ESTIMATE: usize = 2_000;
 const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
+const REQUEST_TOKEN_OVERHEAD: usize = 128;
+const MAX_TOOL_RESULT_CHARS: usize = 24_000;
+const TOOL_OUTPUT_TRUNCATION_MARKER: &str = "\n[tool output truncated by XCoding]";
 const MAX_CONTEXT_SUMMARY_CHARS: usize = 12_000;
 /// Per-message cap while building the compaction prompt. One huge tool output
 /// must never push the compaction request itself past the model window.
@@ -707,6 +711,7 @@ impl<'a> AgentService<'a> {
             Vec::new()
         };
         append_personalization(&mut system_prompt, &user_config, &injected_memories);
+        let definitions = tool_definitions_with_mcp(mcp.tools());
         let history = self.core.messages(session.id)?;
         let budget = self
             .maybe_compact_history(
@@ -716,6 +721,9 @@ impl<'a> AgentService<'a> {
                 stream_idle,
                 on_event,
                 &user_config.model_context_windows,
+                user_config.context_compaction_threshold_percent,
+                &system_prompt,
+                &definitions,
             )
             .await?;
         let compaction = budget.compaction;
@@ -779,7 +787,7 @@ impl<'a> AgentService<'a> {
             messages.push(ChatMessage::assistant_tool_calls(vec![provider_tool_call(
                 tool_call,
             )?]));
-            messages.push(ChatMessage::tool_result(&tool_call.id, output));
+            messages.push(bounded_tool_result(&tool_call.id, output));
         }
 
         self.emit(
@@ -806,7 +814,6 @@ impl<'a> AgentService<'a> {
             },
         );
 
-        let definitions = tool_definitions_with_mcp(mcp.tools());
         let mut last_partial = String::new();
         let mut model_incompatible_provider_ids = HashSet::new();
         // Tracks whether any MCP tool ran this turn, so `tool_memory_enabled`
@@ -815,6 +822,13 @@ impl<'a> AgentService<'a> {
         for tool_round_index in 0..max_tool_rounds {
             let tool_round = tool_round_index as u32 + 1;
             self.ensure_not_cancelled_preserving(session.id, &last_partial)?;
+            prepare_request_messages(
+                &mut messages,
+                &definitions,
+                &session.model,
+                &user_config.model_context_windows,
+                user_config.context_compaction_threshold_percent,
+            );
             let (content, tool_calls) = {
                 let mut failures = Vec::new();
                 let mut completed = None;
@@ -969,13 +983,18 @@ impl<'a> AgentService<'a> {
                                     && !visible_output_was_started(&failure)
                                     && retry_attempt < max_provider_retries
                                 {
-                                    let first_conv = messages
+                                    let conv_count = messages
                                         .iter()
-                                        .position(|m| m.role != "system")
-                                        .unwrap_or(messages.len());
-                                    let conv_count = messages.len().saturating_sub(first_conv);
+                                        .filter(|message| message.role != "system")
+                                        .count();
                                     if let Some(drop_count) = overflow_trim_drop_count(conv_count) {
-                                        messages.drain(first_conv..first_conv + drop_count);
+                                        let removed = trim_oldest_message_blocks(
+                                            &mut messages,
+                                            drop_count,
+                                        );
+                                        if removed == 0 {
+                                            break;
+                                        }
                                         retry_attempt += 1;
                                         self.emit(
                                             on_event,
@@ -985,7 +1004,7 @@ impl<'a> AgentService<'a> {
                                                 max_attempts: max_provider_attempts,
                                                 message: format!(
                                                     "Context window exceeded; trimmed {} message(s) and retrying.",
-                                                    drop_count
+                                                    removed
                                                 ),
                                             },
                                         );
@@ -1098,7 +1117,7 @@ impl<'a> AgentService<'a> {
                         // and let the next round retry.
                         let (id, output) =
                             self.record_rejected_tool_call(session, rejected, on_event)?;
-                        messages.push(ChatMessage::tool_result(&id, output));
+                        messages.push(bounded_tool_result(&id, &output));
                         continue;
                     }
                 };
@@ -1118,7 +1137,7 @@ impl<'a> AgentService<'a> {
                         );
                         let output =
                             self.record_tool_error(session, &tool_call, error, on_event)?;
-                        messages.push(ChatMessage::tool_result(&tool_call.id, output));
+                        messages.push(bounded_tool_result(&tool_call.id, &output));
                         continue;
                     }
                 };
@@ -1142,7 +1161,7 @@ impl<'a> AgentService<'a> {
                         let output = self
                             .execute_and_record(session, &tools, &tool_call, &mut mcp, on_event)
                             .await?;
-                        messages.push(ChatMessage::tool_result(&tool_call.id, output));
+                        messages.push(bounded_tool_result(&tool_call.id, &output));
                     }
                     PermissionDecision::AskUser => {
                         if tool_call.name == ToolName::ApplyPatch {
@@ -1157,7 +1176,7 @@ impl<'a> AgentService<'a> {
                                 Err(error) => {
                                     let output = self
                                         .record_tool_error(session, &tool_call, error, on_event)?;
-                                    messages.push(ChatMessage::tool_result(&tool_call.id, output));
+                                    messages.push(bounded_tool_result(&tool_call.id, &output));
                                     continue;
                                 }
                             }
@@ -1186,7 +1205,7 @@ impl<'a> AgentService<'a> {
                             ToolError::PermissionDenied,
                             on_event,
                         )?;
-                        messages.push(ChatMessage::tool_result(&tool_call.id, output));
+                        messages.push(bounded_tool_result(&tool_call.id, &output));
                     }
                 }
             }
@@ -1203,6 +1222,9 @@ impl<'a> AgentService<'a> {
         stream_idle: Duration,
         on_event: &mut F,
         model_context_windows: &BTreeMap<String, usize>,
+        compaction_threshold_percent: u32,
+        system_prompt: &str,
+        definitions: &[ToolDefinition],
     ) -> Result<HistoryBudget, AgentError>
     where
         F: FnMut(SessionEvent),
@@ -1212,7 +1234,14 @@ impl<'a> AgentService<'a> {
             .map(|item| item.compacted_message_count)
             .unwrap_or(0);
         let Some(target_count) =
-            context_compaction_target_count(&session.model, history, model_context_windows)
+            context_compaction_target_count_with_request(
+                &session.model,
+                history,
+                model_context_windows,
+                compaction_threshold_percent,
+                system_prompt,
+                definitions,
+            )
         else {
             return Ok(HistoryBudget::summarized(existing, existing_count));
         };
@@ -1242,10 +1271,13 @@ impl<'a> AgentService<'a> {
                     "context compaction failed for session {}: {error}",
                     session.id
                 );
-                let truncated_count = hard_truncation_target_count(
+                let truncated_count = hard_truncation_target_count_with_threshold(
                     &session.model,
                     history,
                     model_context_windows,
+                    compaction_threshold_percent,
+                    system_prompt,
+                    definitions,
                 )
                 .max(existing_count);
                 return Ok(HistoryBudget {
@@ -2536,19 +2568,41 @@ impl HistoryBudget {
     }
 }
 
+#[cfg(test)]
 fn context_compaction_target_count(
     model: &str,
     history: &[Message],
     model_context_windows: &BTreeMap<String, usize>,
 ) -> Option<usize> {
+    context_compaction_target_count_with_request(
+        model,
+        history,
+        model_context_windows,
+        DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+        "",
+        &[],
+    )
+}
+
+fn context_compaction_target_count_with_request(
+    model: &str,
+    history: &[Message],
+    model_context_windows: &BTreeMap<String, usize>,
+    compaction_threshold_percent: u32,
+    system_prompt: &str,
+    definitions: &[ToolDefinition],
+) -> Option<usize> {
     if history.len() <= CONTEXT_COMPACTION_KEEP_RECENT_MESSAGES {
         return None;
     }
-    let used_tokens =
-        SYSTEM_CONTEXT_TOKEN_RESERVE + history.iter().map(estimate_message_tokens).sum::<usize>();
-    let threshold = (context_window_for_model(model, model_context_windows) as f64
-        * CONTEXT_COMPACTION_THRESHOLD)
-        .ceil() as usize;
+    let used_tokens = estimate_text_tokens(system_prompt)
+        + estimate_tool_definitions_tokens(definitions)
+        + history.iter().map(estimate_message_tokens).sum::<usize>();
+    let threshold = context_budget_tokens(
+        model,
+        model_context_windows,
+        compaction_threshold_percent,
+    );
     if used_tokens < threshold {
         return None;
     }
@@ -2557,10 +2611,29 @@ fn context_compaction_target_count(
 
 /// Oldest-message count to drop when compaction failed, so the request still
 /// fits the model window instead of failing with a context-length error.
+#[cfg(test)]
 fn hard_truncation_target_count(
     model: &str,
     history: &[Message],
     model_context_windows: &BTreeMap<String, usize>,
+) -> usize {
+    hard_truncation_target_count_with_threshold(
+        model,
+        history,
+        model_context_windows,
+        DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+        "",
+        &[],
+    )
+}
+
+fn hard_truncation_target_count_with_threshold(
+    model: &str,
+    history: &[Message],
+    model_context_windows: &BTreeMap<String, usize>,
+    compaction_threshold_percent: u32,
+    system_prompt: &str,
+    definitions: &[ToolDefinition],
 ) -> usize {
     let keep_floor = history
         .len()
@@ -2568,10 +2641,9 @@ fn hard_truncation_target_count(
     if keep_floor == 0 {
         return 0;
     }
-    let budget = ((context_window_for_model(model, model_context_windows) as f64
-        * CONTEXT_COMPACTION_THRESHOLD)
-        .ceil() as usize)
-        .saturating_sub(SYSTEM_CONTEXT_TOKEN_RESERVE);
+    let budget = context_budget_tokens(model, model_context_windows, compaction_threshold_percent)
+        .saturating_sub(estimate_text_tokens(system_prompt))
+        .saturating_sub(estimate_tool_definitions_tokens(definitions));
     let mut used = 0usize;
     let mut kept = 0usize;
     for message in history.iter().rev() {
@@ -2738,6 +2810,147 @@ fn estimate_message_tokens(message: &Message) -> usize {
         }
         _ => estimate_text_tokens(&message.content),
     }
+}
+
+fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
+    let mut tokens = estimate_text_tokens(&message.role).saturating_add(REQUEST_TOKEN_OVERHEAD);
+    if let Some(content) = &message.content {
+        tokens = tokens.saturating_add(match content {
+            xcoding_providers::ChatMessageContent::Text(text) => estimate_text_tokens(text),
+            xcoding_providers::ChatMessageContent::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    xcoding_providers::ChatContentPart::Text { text } => estimate_text_tokens(text),
+                    xcoding_providers::ChatContentPart::ImageUrl { .. } => IMAGE_CONTEXT_TOKEN_ESTIMATE,
+                })
+                .sum(),
+        });
+    }
+    if let Some(tool_calls) = &message.tool_calls {
+        for call in tool_calls {
+            tokens = tokens
+                .saturating_add(estimate_text_tokens(&call.id))
+                .saturating_add(estimate_text_tokens(&call.kind))
+                .saturating_add(estimate_text_tokens(&call.function.name))
+                .saturating_add(estimate_text_tokens(&call.function.arguments));
+        }
+    }
+    tokens.saturating_add(
+        message
+            .tool_call_id
+            .as_deref()
+            .map(estimate_text_tokens)
+            .unwrap_or(0),
+    )
+}
+
+fn estimate_tool_definitions_tokens(definitions: &[ToolDefinition]) -> usize {
+    definitions
+        .iter()
+        .map(|definition| {
+            estimate_text_tokens(&definition.name)
+                + estimate_text_tokens(&definition.description)
+                + estimate_text_tokens(&definition.parameters.to_string())
+                + REQUEST_TOKEN_OVERHEAD
+        })
+        .sum()
+}
+
+fn context_budget_tokens(
+    model: &str,
+    model_context_windows: &BTreeMap<String, usize>,
+    threshold_percent: u32,
+) -> usize {
+    let threshold_percent = threshold_percent.clamp(
+        MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+        MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+    );
+    context_window_for_model(model, model_context_windows)
+        .saturating_mul(threshold_percent as usize)
+        / 100
+}
+
+fn bounded_tool_result(tool_call_id: &str, output: &str) -> ChatMessage {
+    let content = truncate_tool_output(output, MAX_TOOL_RESULT_CHARS);
+    ChatMessage::tool_result(tool_call_id, content)
+}
+
+fn truncate_tool_output(output: &str, max_chars: usize) -> String {
+    if output.chars().count() <= max_chars {
+        return output.to_owned();
+    }
+    let keep = max_chars.saturating_sub(TOOL_OUTPUT_TRUNCATION_MARKER.chars().count());
+    let prefix: String = output.chars().take(keep).collect();
+    format!("{prefix}{TOOL_OUTPUT_TRUNCATION_MARKER}")
+}
+
+/// Re-check the actual outbound request after every tool round. The system
+/// prompt and tool schemas are part of the same provider context budget, so
+/// trimming only persisted history is insufficient.
+fn prepare_request_messages(
+    messages: &mut Vec<ChatMessage>,
+    definitions: &[ToolDefinition],
+    model: &str,
+    model_context_windows: &BTreeMap<String, usize>,
+    threshold_percent: u32,
+) {
+    for message in messages.iter_mut() {
+        if message.role == "tool" {
+            if let Some(xcoding_providers::ChatMessageContent::Text(content)) = message.content.as_mut() {
+                *content = truncate_tool_output(content, MAX_TOOL_RESULT_CHARS);
+            }
+        }
+    }
+    let budget = context_budget_tokens(model, model_context_windows, threshold_percent);
+    while estimate_chat_request_tokens(messages, definitions) > budget {
+        if !messages.iter().any(|message| message.role != "system") {
+            break;
+        }
+        if trim_oldest_message_blocks(messages, 1) == 0 {
+            break;
+        }
+    }
+}
+
+/// Removes the requested number of oldest conversation blocks. A tool-call
+/// assistant message and its following tool results are one block, so retries
+/// never leave an unmatched provider tool call in the request.
+fn trim_oldest_message_blocks(messages: &mut Vec<ChatMessage>, block_count: usize) -> usize {
+    let mut removed = 0;
+    while removed < block_count {
+        let Some(start) = messages.iter().position(|message| message.role != "system") else {
+            break;
+        };
+        let end = context_block_end(messages, start);
+        if end <= start {
+            break;
+        }
+        messages.drain(start..end);
+        removed += 1;
+    }
+    removed
+}
+
+fn estimate_chat_request_tokens(messages: &[ChatMessage], definitions: &[ToolDefinition]) -> usize {
+    messages
+        .iter()
+        .map(estimate_chat_message_tokens)
+        .sum::<usize>()
+        .saturating_add(estimate_tool_definitions_tokens(definitions))
+}
+
+fn context_block_end(messages: &[ChatMessage], start: usize) -> usize {
+    let Some(message) = messages.get(start) else {
+        return start;
+    };
+    if message.role == "assistant" && message.tool_calls.is_some() {
+        let mut end = start + 1;
+        while messages.get(end).is_some_and(|item| item.role == "tool") {
+            end += 1;
+        }
+        return end;
+    }
+    start + 1
 }
 
 fn estimate_text_tokens(value: &str) -> usize {
@@ -3708,6 +3921,98 @@ mod tests {
         let round_trip = provider_tool_call(&protocol).expect("encode");
         assert_eq!(round_trip.function.name, "mcp__demo__echo");
         assert_eq!(round_trip.function.arguments, r#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn compaction_budget_counts_system_prompt_and_tool_definitions() {
+        let history = vec![test_message("user", "short history")];
+        let definitions = vec![ToolDefinition {
+            name: "large_tool".to_owned(),
+            description: "tool description ".repeat(2_000),
+            parameters: json!({"schema": "x".repeat(2_000)}),
+        }];
+        let no_reserve = context_compaction_target_count_with_request(
+            "unknown-model",
+            &history,
+            &empty_windows(),
+            80,
+            "short system",
+            &[],
+        );
+        let with_reserve = context_compaction_target_count_with_request(
+            "unknown-model",
+            &history,
+            &empty_windows(),
+            80,
+            &"large system ".repeat(30_000),
+            &definitions,
+        );
+        assert!(no_reserve.is_none());
+        assert_eq!(with_reserve, None, "one-message histories never compact");
+
+        let history = (0..9)
+            .map(|index| test_message("user", format!("turn-{index}")))
+            .collect::<Vec<_>>();
+        let without_definitions = context_compaction_target_count_with_request(
+            "unknown-model",
+            &history,
+            &empty_windows(),
+            80,
+            "system",
+            &[],
+        );
+        let with_definitions = context_compaction_target_count_with_request(
+            "unknown-model",
+            &history,
+            &empty_windows(),
+            80,
+            &"system ".repeat(400_000),
+            &definitions,
+        );
+        assert!(without_definitions.is_none());
+        assert_eq!(with_definitions, Some(1));
+    }
+
+    #[test]
+    fn request_preparation_truncates_tool_output_and_removes_complete_blocks() {
+        let call = ProviderToolCall {
+            id: "call_1".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "read_file".to_owned(),
+                arguments: "{}".to_owned(),
+            },
+            truncated: false,
+        };
+        let mut messages = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("old"),
+            ChatMessage::assistant_tool_calls(vec![call]),
+            ChatMessage::tool_result("call_1", "x".repeat(MAX_TOOL_RESULT_CHARS + 100)),
+            ChatMessage::user("latest"),
+        ];
+        let definitions = tool_definitions();
+        prepare_request_messages(
+            &mut messages,
+            &definitions,
+            "unknown-model",
+            &BTreeMap::from([("unknown-model".to_owned(), 1_024)]),
+            80,
+        );
+        assert!(messages.iter().all(|message| {
+            message.role != "tool"
+                || match &message.content {
+                    Some(xcoding_providers::ChatMessageContent::Text(text)) => {
+                        text.contains(TOOL_OUTPUT_TRUNCATION_MARKER)
+                            || text.chars().count() <= MAX_TOOL_RESULT_CHARS
+                    }
+                    _ => true,
+                }
+        }));
+        assert!(messages
+            .windows(2)
+            .all(|pair| !(pair[0].role == "assistant" && pair[0].tool_calls.is_some()
+                && pair[1].role != "tool")));
     }
 
     #[test]

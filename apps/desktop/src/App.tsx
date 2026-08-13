@@ -122,6 +122,9 @@ const MIN_CIRCUIT_MIN_REQUEST_COUNT = 1;
 const MAX_CIRCUIT_MIN_REQUEST_COUNT = 100;
 const MIN_CONTEXT_WINDOW_TOKENS = 1_024;
 const MAX_CONTEXT_WINDOW_TOKENS = 10_000_000;
+const DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT = 80;
+const MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT = 50;
+const MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT = 95;
 const DEFAULT_VISION_TIMEOUT_SECS = 30;
 const MIN_VISION_TIMEOUT_SECS = 5;
 const MAX_VISION_TIMEOUT_SECS = 300;
@@ -1126,6 +1129,7 @@ export function App() {
   const [uiFontSize, setUiFontSize] = useState(() => loadUiFontSize());
   const [workspaceHome, setWorkspaceHome] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState("");
+  const workspaceRootRef = useRef("");
   const [composerIntent, setComposerIntent] = useState<"chat" | "task">("task");
   const [diskProjects, setDiskProjects] = useState<ProjectDir[]>([]);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
@@ -1150,6 +1154,7 @@ export function App() {
   const [circuitRecoveryWaitSecs, setCircuitRecoveryWaitSecs] = useState(DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS);
   const [circuitErrorRateThresholdPercent, setCircuitErrorRateThresholdPercent] = useState(DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT);
   const [circuitMinRequestCount, setCircuitMinRequestCount] = useState(DEFAULT_CIRCUIT_MIN_REQUEST_COUNT);
+  const [contextCompactionThresholdPercent, setContextCompactionThresholdPercent] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT);
   const [modelContextWindowEntries, setModelContextWindowEntries] = useState<ModelContextWindowEntry[]>([]);
   const [visionDelegate, setVisionDelegate] = useState<VisionDelegateForm>(EMPTY_VISION_DELEGATE_FORM);
   // Kept verbatim so saving from Settings never drops hand-written entries.
@@ -1194,6 +1199,14 @@ export function App() {
   const drainFollowUpsBySessionRef = useRef<Set<string>>(new Set());
   const activeSessionIdRef = useRef<string | null>(null);
   const sessionsRef = useRef<Session[]>([]);
+  const workspaceModeRevisionRef = useRef(0);
+  const workspaceModeSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+
+  const updateWorkspaceRoot = useCallback((nextRoot: string): void => {
+    const normalized = nextRoot.trim();
+    workspaceRootRef.current = normalized;
+    setWorkspaceRoot(normalized);
+  }, []);
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamedText, setStreamedText] = useState("");
   const [streamedTextBySession, setStreamedTextBySession] = useState<Record<string, string>>({});
@@ -1505,6 +1518,7 @@ export function App() {
         setCircuitRecoveryWaitSecs(normalizeBoundedInteger(config.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
         setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(config.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
         setCircuitMinRequestCount(normalizeBoundedInteger(config.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
+        setContextCompactionThresholdPercent(normalizeBoundedInteger(config.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
         setModelContextWindowEntries(contextWindowEntriesFromMap(config.model_context_windows));
         setVisionDelegate(visionDelegateFormFromConfig(config.vision_delegate));
         setModelCapabilities(config.model_capabilities ?? {});
@@ -1527,7 +1541,7 @@ export function App() {
           setWorkspaceHome(config.workspace_home.trim());
         }
         if (config.last_workspace_root?.trim()) {
-          setWorkspaceRoot(config.last_workspace_root.trim());
+          updateWorkspaceRoot(config.last_workspace_root);
         }
         setHiddenProjectPaths(
           Array.isArray(config.hidden_project_paths)
@@ -1545,7 +1559,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [updateWorkspaceRoot]);
 
   const refreshProviderStatus = useCallback(async () => {
     if (!isTauriRuntime) return;
@@ -1669,15 +1683,19 @@ export function App() {
   const loadWorkspaceConfig = useCallback(async () => {
     const root = workspaceRoot.trim();
     if (!isTauriRuntime || !root) return;
+    const modeRevision = workspaceModeRevisionRef.current;
     try {
       const config = await invoke<WorkspaceConfig>("workspace_config", { workspaceRoot: root });
+      if (workspaceRootRef.current !== root || workspaceModeRevisionRef.current !== modeRevision) return;
       setMode(config.mode);
       // Model lives in the composer / user config. Workspace defaults must not overwrite it
       // (missing workspace rows synthesize model=gpt-5.5 and would pin the picker).
       setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
       setCommandDenylistText(formatCommandDenylistText(config.command_denylist));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (workspaceRootRef.current === root && workspaceModeRevisionRef.current === modeRevision) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     }
   }, [workspaceRoot]);
 
@@ -2166,7 +2184,7 @@ export function App() {
     const next = root.trim();
     if (!next) return;
     if (next !== workspaceRoot.trim()) {
-      setWorkspaceRoot(next);
+      updateWorkspaceRoot(next);
     }
     startNewTask();
     if (isTauriRuntime) {
@@ -2200,7 +2218,7 @@ export function App() {
     setComposerIntent("task");
     const root = session.workspace_root.trim();
     if (root && root !== workspaceRoot.trim()) {
-      setWorkspaceRoot(root);
+      updateWorkspaceRoot(root);
     }
   }
 
@@ -2471,6 +2489,40 @@ export function App() {
       }
     },
     [mode, workspaceRoot],
+  );
+
+  const persistWorkspaceMode = useCallback(
+    async (nextMode: Mode, previousMode: Mode): Promise<void> => {
+      if (!isTauriRuntime) return;
+      const root = workspaceRoot.trim();
+      if (!root) return;
+      const revision = ++workspaceModeRevisionRef.current;
+      const save = async (): Promise<void> => {
+        try {
+          const current = await invoke<WorkspaceConfig>("workspace_config", { workspaceRoot: root });
+          const saved = await invoke<WorkspaceConfig>("set_workspace_config", {
+            params: {
+              workspace_root: root,
+              mode: nextMode,
+              provider: current.provider,
+              model: current.model,
+            },
+          });
+          if (workspaceRootRef.current === root && workspaceModeRevisionRef.current === revision) {
+            setMode(saved.mode);
+          }
+        } catch (cause) {
+          if (workspaceRootRef.current === root && workspaceModeRevisionRef.current === revision) {
+            setMode(previousMode);
+            setError(cause instanceof Error ? cause.message : String(cause));
+          }
+        }
+      };
+      const queuedSave = workspaceModeSaveChainRef.current.then(save, save);
+      workspaceModeSaveChainRef.current = queuedSave.then(() => undefined, () => undefined);
+      await queuedSave;
+    },
+    [workspaceRoot],
   );
 
   async function sendChatMessage(
@@ -3149,7 +3201,7 @@ export function App() {
         resetComposerSession();
       }
       if (clearingCurrent) {
-        setWorkspaceRoot("");
+        updateWorkspaceRoot("");
       }
       await persistHiddenProjectPaths(
         nextHidden,
@@ -3192,7 +3244,7 @@ export function App() {
         params: { workspace_home: home, name },
       });
       const nextHidden = unhideProjectPath(result.project.path);
-      setWorkspaceRoot(result.project.path);
+      updateWorkspaceRoot(result.project.path);
       setCreateProjectOpen(false);
       setCreateProjectName("");
       startNewTask();
@@ -3240,7 +3292,7 @@ export function App() {
         !hiddenProjectSet.has(normalizeRoot(project.path)),
     );
     if (visible) {
-      setWorkspaceRoot(selected.trim());
+      updateWorkspaceRoot(selected);
       setCreateProjectOpen(false);
       setCreateProjectName("");
       startNewTask();
@@ -3270,7 +3322,7 @@ export function App() {
         },
       });
       const nextHidden = unhideProjectPath(result.project.path);
-      setWorkspaceRoot(result.project.path);
+      updateWorkspaceRoot(result.project.path);
       setCreateProjectOpen(false);
       setCreateProjectName("");
       startNewTask();
@@ -3355,6 +3407,7 @@ export function App() {
           circuit_recovery_wait_secs: normalizeBoundedInteger(circuitRecoveryWaitSecs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS),
           circuit_error_rate_threshold_percent: normalizeBoundedInteger(circuitErrorRateThresholdPercent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT),
           circuit_min_request_count: normalizeBoundedInteger(circuitMinRequestCount, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT),
+          context_compaction_threshold_percent: normalizeBoundedInteger(contextCompactionThresholdPercent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT),
           // Compatibility mirror for the current active provider.
           base_url: selectedProvider.base_url,
           api_key: selectedProvider.api_key,
@@ -3387,6 +3440,7 @@ export function App() {
       setCircuitRecoveryWaitSecs(normalizeBoundedInteger(savedUser.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
       setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(savedUser.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
       setCircuitMinRequestCount(normalizeBoundedInteger(savedUser.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
+      setContextCompactionThresholdPercent(normalizeBoundedInteger(savedUser.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
       setModelContextWindowEntries(contextWindowEntriesFromMap(savedUser.model_context_windows));
       setVisionDelegate(visionDelegateFormFromConfig(savedUser.vision_delegate));
       setModelCapabilities(savedUser.model_capabilities ?? {});
@@ -3982,6 +4036,21 @@ export function App() {
               </button>
             </div>
             <p className="mode-help">{t(locale, "settings.contextWindows.hint")}</p>
+            <div className="resilience-setting-grid">
+              <label htmlFor="context-compaction-threshold">
+                <span className="field-label">{t(locale, "field.contextCompactionThreshold")}</span>
+                <input
+                  id="context-compaction-threshold"
+                  type="number"
+                  min={MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT}
+                  max={MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT}
+                  step={1}
+                  value={contextCompactionThresholdPercent}
+                  onChange={(event) => setContextCompactionThresholdPercent(normalizeBoundedInteger(Number(event.target.value), DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT))}
+                  disabled={anySessionRunning || isSavingConfig}
+                />
+              </label>
+            </div>
             <div id="context-window-list" className="context-window-list">
               {modelContextWindowEntries.length === 0 ? (
                 <p className="mode-help">{t(locale, "settings.contextWindows.empty")}</p>
@@ -5026,7 +5095,12 @@ export function App() {
                 id="composer-mode"
                 className="composer-select mode"
                 value={mode}
-                onChange={(event) => setMode(event.target.value as Mode)}
+                onChange={(event) => {
+                  const nextMode = event.target.value as Mode;
+                  const previousMode = mode;
+                  setMode(nextMode);
+                  void persistWorkspaceMode(nextMode, previousMode);
+                }}
                 disabled={isRunning || isSavingConfig}
                 title={t(locale, "field.mode")}
                 aria-label={t(locale, "field.mode")}

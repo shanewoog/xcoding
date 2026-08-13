@@ -31,6 +31,9 @@ pub const MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 20;
 pub const DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 60;
 pub const MIN_CONTEXT_WINDOW_TOKENS: usize = 1_024;
 pub const MAX_CONTEXT_WINDOW_TOKENS: usize = 10_000_000;
+pub const DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT: u32 = 80;
+pub const MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT: u32 = 50;
+pub const MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT: u32 = 95;
 pub const MIN_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 30;
 pub const MAX_CIRCUIT_RECOVERY_WAIT_SECS: u64 = 120;
 pub const DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT: u32 = 60;
@@ -605,6 +608,9 @@ pub struct UserConfig {
     /// Per-model context window overrides keyed by normalized (trimmed, lowercased) model id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_context_windows: BTreeMap<String, usize>,
+    /// Percentage of the configured model context window at which pre-compaction starts.
+    #[serde(default = "default_context_compaction_threshold_percent")]
+    pub context_compaction_threshold_percent: u32,
     /// Vision delegate configuration for models without native vision support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_delegate: Option<VisionDelegateConfig>,
@@ -652,6 +658,7 @@ impl Default for UserConfig {
             hidden_project_paths: Vec::new(),
             skip_local_api_confirmation: false,
             model_context_windows: BTreeMap::new(),
+            context_compaction_threshold_percent: DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
             vision_delegate: None,
             model_capabilities: BTreeMap::new(),
         }
@@ -1029,6 +1036,10 @@ fn default_personality() -> String {
 
 fn default_tool_memory_enabled() -> bool {
     true
+}
+
+fn default_context_compaction_threshold_percent() -> u32 {
+    DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT
 }
 
 fn is_false(value: &bool) -> bool {

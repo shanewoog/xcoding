@@ -145,6 +145,8 @@ export interface UserConfig {
   skip_local_api_confirmation?: boolean;
   /** Per-model context window overrides keyed by normalized (trimmed, lowercased) model id. */
   model_context_windows?: Record<string, number>;
+  /** Percentage of the configured model context window at which pre-compaction starts. */
+  context_compaction_threshold_percent?: number;
   /** Describes images with a second model when the session model cannot read them. */
   vision_delegate?: VisionDelegateConfig;
   /** Per-model capability overrides keyed by normalized (trimmed, lowercased) model id. */

@@ -265,6 +265,10 @@ async function main() {
   assert.ok(appSource.includes("updateComposerModels: selectedProvider.id === activeProvider?.id"), "Fetching another provider must not replace composer models");
   assert.ok(appSource.includes('id="composer-model"'), "Composer must retain the model selector");
   assert.ok(appSource.includes("pendingConversationScrollTopRef"), "App should retain the conversation scroll offset while settings are open");
+  assert.ok(appSource.includes("persistWorkspaceMode"), "mode changes should persist to the active workspace config");
+  assert.ok(appSource.includes("workspaceRootRef"), "workspace mode saves should reject stale project callbacks");
+  assert.ok(appSource.includes("workspaceModeRevisionRef"), "workspace mode saves should reject stale mode callbacks");
+  assert.ok(appSource.includes("workspaceModeSaveChainRef"), "workspace mode saves should be serialized");
   assert.ok(appSource.includes("function openSettings(): void"), "Settings navigation should capture the conversation scroll offset");
   assert.ok(
     appSource.includes("pendingConversationScrollToBottomRef.current = conversationAtBottomRef.current"),
@@ -304,6 +308,7 @@ async function main() {
   const protocolSource = await readFile(resolve(repositoryRoot, "packages/protocol/src/index.ts"), "utf8");
   assert.ok(protocolSource.includes("hidden_project_paths"), "protocol missing hidden_project_paths");
   assert.ok(protocolSource.includes("model_context_windows"), "protocol missing model_context_windows");
+  assert.ok(protocolSource.includes("context_compaction_threshold_percent"), "protocol missing compaction threshold");
   assert.ok(protocolSource.includes("ImportProjectResult"), "protocol missing ImportProjectResult");
   const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
   assert.ok(apiSource.includes("includeBranches"), "git_environment should support includeBranches");
@@ -332,6 +337,7 @@ async function main() {
   assert.ok(cssSource.includes(".context-usage-popover") && cssSource.includes(".context-usage-meter"), "styles.css missing context usage popover styles");
   assert.ok(i18nSource.includes("context.title") && i18nSource.includes("context.estimated"), "i18n missing context usage copy");
   assert.ok(appSource.includes("model_context_windows"), "settings should persist model context window overrides");
+  assert.ok(appSource.includes("context_compaction_threshold_percent"), "settings should persist compaction threshold");
   assert.ok(appSource.includes("modelContextWindowEntries"), "settings should track model context window entries");
   assert.ok(appSource.includes("normalizeModelContextWindows") && appSource.includes("contextWindowMapFromEntries"), "settings should normalize model context window values");
   assert.ok(appSource.includes("context-windows-settings-card") && appSource.includes('id="context-window-list"') && appSource.includes("context-window-row"), "settings should render model context window controls");
