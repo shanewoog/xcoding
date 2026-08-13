@@ -15,6 +15,7 @@ import {
   browserEnsure,
   browserFind,
   browserForward,
+  browserForceReload,
   browserHide,
   browserNavigate,
   browserPrint,
@@ -854,6 +855,7 @@ function BuiltInBrowserPanel({
     initialState?.handledNavigationId ?? null,
   );
   const [menuOpen, setMenuOpen] = useState(false);
+  const [refreshMenuOpen, setRefreshMenuOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -871,6 +873,7 @@ function BuiltInBrowserPanel({
   const contentRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const refreshMenuRef = useRef<HTMLDivElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const lastUrlRef = useRef<string>("");
   const readyRef = useRef(false);
@@ -883,7 +886,7 @@ function BuiltInBrowserPanel({
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0];
   const hasPage = Boolean(activeTab?.url);
   // The native child webview is always above the desktop DOM on Windows, so hide it while a DOM menu is open.
-  const showWebview = active && hasPage && !settingsOpen && !menuOpen;
+  const showWebview = active && hasPage && !settingsOpen && !menuOpen && !refreshMenuOpen;
 
   useEffect(() => {
     onStateChangeRef.current({ tabs, activeTabId, handledNavigationId });
@@ -1048,12 +1051,19 @@ function BuiltInBrowserPanel({
   }, []);
 
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen && !refreshMenuOpen) return;
     const onPointerDown = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+      const target = event.target as Node;
+      if (!menuRef.current?.contains(target) && !refreshMenuRef.current?.contains(target)) {
+        setMenuOpen(false);
+        setRefreshMenuOpen(false);
+      }
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+        setRefreshMenuOpen(false);
+      }
     };
     window.addEventListener("mousedown", onPointerDown);
     window.addEventListener("keydown", onKeyDown);
@@ -1061,7 +1071,7 @@ function BuiltInBrowserPanel({
       window.removeEventListener("mousedown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [menuOpen]);
+  }, [menuOpen, refreshMenuOpen]);
 
   useEffect(() => {
     if (!active) {
@@ -1361,16 +1371,43 @@ function BuiltInBrowserPanel({
           >
             →
           </button>
-          <button
-            type="button"
-            className="browser-icon-button"
-            title={t(locale, "browser.reload")}
-            aria-label={t(locale, "browser.reload")}
-            disabled={!hasPage || settingsOpen}
-            onClick={() => void browserReload(sessionKey).catch((cause) => setError(String(cause)))}
+          <div
+            className="browser-reload-wrap"
+            ref={refreshMenuRef}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!hasPage || settingsOpen) return;
+              setMenuOpen(false);
+              setRefreshMenuOpen(true);
+            }}
           >
-            ↻
-          </button>
+            <button
+              type="button"
+              className="browser-icon-button"
+              title={t(locale, "browser.reload")}
+              aria-label={t(locale, "browser.reload")}
+              disabled={!hasPage || settingsOpen}
+              onClick={() => void browserReload(sessionKey).catch((cause) => setError(String(cause)))}
+            >
+              ↻
+            </button>
+            {refreshMenuOpen ? (
+              <div className="browser-menu browser-reload-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!hasPage || settingsOpen}
+                  onClick={() => {
+                    setRefreshMenuOpen(false);
+                    void browserForceReload(sessionKey).catch((cause) => setError(String(cause)));
+                  }}
+                >
+                  {t(locale, "browser.forceReload")}
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <form className="browser-url-form" onSubmit={onSubmit}>

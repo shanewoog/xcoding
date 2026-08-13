@@ -235,6 +235,20 @@ fn workspace_config(app: AppHandle, workspace_root: String) -> Result<WorkspaceC
 }
 
 #[tauri::command]
+fn count_local_memories(app: AppHandle, workspace_root: String) -> Result<usize, String> {
+    open_core(&app)?
+        .count_local_memories(&workspace_root)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_local_memories(app: AppHandle, workspace_root: String) -> Result<usize, String> {
+    open_core(&app)?
+        .clear_local_memories(&workspace_root)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_workspace_config(
     app: AppHandle,
     params: SetConfigParams,
@@ -349,15 +363,22 @@ fn prepare_webview_profile() {
     boot_log(&format!("webview profile={}", profile.display()));
 }
 
+fn window_title() -> String {
+    format!("XCoding v{}", env!("CARGO_PKG_VERSION"))
+}
+
 fn ensure_main_window(app: &tauri::App) -> Result<(), String> {
-    if app.get_webview_window("main").is_some() {
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_title(&window_title())
+            .map_err(|error| error.to_string())?;
         boot_log("main window exists from config and remains hidden until the UI is ready");
         return Ok(());
     }
 
     boot_log("main window missing; creating hidden");
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("XCoding")
+        .title(window_title())
         .inner_size(1510.0, 720.0)
         .min_inner_size(720.0, 540.0)
         .center()
@@ -441,6 +462,8 @@ fn main() {
             rename_session,
             workspace_config,
             set_workspace_config,
+            count_local_memories,
+            clear_local_memories,
             session_detail,
             session_replay,
             chat,
@@ -465,6 +488,7 @@ fn main() {
             browser::browser_set_bounds,
             browser::browser_navigate,
             browser::browser_reload,
+            browser::browser_force_reload,
             browser::browser_back,
             browser::browser_forward,
             browser::browser_show,

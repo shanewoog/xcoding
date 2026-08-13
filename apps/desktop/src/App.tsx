@@ -87,6 +87,9 @@ import {
 
 const defaultProvider = "openai";
 const DEFAULT_PROVIDER_BASE_URL = "https://ai.v58.dev";
+const DEFAULT_PERSONALITY = "default";
+const PERSONALITY_OPTIONS = ["default", "pragmatic", "friendly", "concise", "teaching"] as const;
+const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000;
 const DEFAULT_MAX_PROVIDER_RETRIES = 6;
 const MIN_MAX_PROVIDER_RETRIES = 0;
 const MAX_MAX_PROVIDER_RETRIES = 10;
@@ -131,6 +134,11 @@ function normalizeReasoningEffort(value: string | undefined | null): ReasoningEf
   return (REASONING_EFFORTS as readonly string[]).includes(trimmed)
     ? (trimmed as ReasoningEffort)
     : "high";
+}
+
+function normalizePersonality(value: string | undefined | null): string {
+  const trimmed = (value || "").trim().toLowerCase();
+  return (PERSONALITY_OPTIONS as readonly string[]).includes(trimmed) ? trimmed : DEFAULT_PERSONALITY;
 }
 
 function normalizeBoundedInteger(
@@ -1103,9 +1111,17 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
   );
 }
 
-type SettingsTab = "provider" | "resilience" | "context" | "vision" | "defaults";
+type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "defaults";
 
 export function App() {
+  useEffect(() => {
+    const preventDefaultContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+    document.addEventListener("contextmenu", preventDefaultContextMenu, true);
+    return () => document.removeEventListener("contextmenu", preventDefaultContextMenu, true);
+  }, []);
+
   const [locale, setLocale] = useState<Locale>(() => loadLocale());
   const [uiFontSize, setUiFontSize] = useState(() => loadUiFontSize());
   const [workspaceHome, setWorkspaceHome] = useState("");
@@ -1138,6 +1154,12 @@ export function App() {
   const [visionDelegate, setVisionDelegate] = useState<VisionDelegateForm>(EMPTY_VISION_DELEGATE_FORM);
   // Kept verbatim so saving from Settings never drops hand-written entries.
   const [modelCapabilities, setModelCapabilities] = useState<Record<string, ModelCapabilities>>({});
+  const [customInstructions, setCustomInstructions] = useState("");
+  const [personality, setPersonality] = useState(DEFAULT_PERSONALITY);
+  const [localMemoryEnabled, setLocalMemoryEnabled] = useState(false);
+  const [toolMemoryEnabled, setToolMemoryEnabled] = useState(true);
+  const [localMemoryCount, setLocalMemoryCount] = useState<number | null>(null);
+  const [isClearingMemories, setIsClearingMemories] = useState(false);
   const [availableModels, setAvailableModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -1486,6 +1508,10 @@ export function App() {
         setModelContextWindowEntries(contextWindowEntriesFromMap(config.model_context_windows));
         setVisionDelegate(visionDelegateFormFromConfig(config.vision_delegate));
         setModelCapabilities(config.model_capabilities ?? {});
+        setCustomInstructions(config.custom_instructions ?? "");
+        setPersonality(normalizePersonality(config.personality));
+        setLocalMemoryEnabled(config.local_memory_enabled === true);
+        setToolMemoryEnabled(config.tool_memory_enabled !== false);
         const hydratedProviders = hydrateProviders(config);
         setProviders(hydratedProviders.providers);
         setActiveProviderId(hydratedProviders.activeProviderId);
@@ -1655,7 +1681,23 @@ export function App() {
     }
   }, [workspaceRoot]);
 
+  const loadLocalMemoryCount = useCallback(async () => {
+    const root = workspaceRoot.trim();
+    if (!isTauriRuntime || !root) {
+      setLocalMemoryCount(null);
+      return;
+    }
+    try {
+      const count = await invoke<number>("count_local_memories", { workspaceRoot: root });
+      setLocalMemoryCount(count);
+    } catch (cause) {
+      console.error("Failed to load memory count:", cause);
+      setLocalMemoryCount(null);
+    }
+  }, [workspaceRoot]);
+
   const refreshDiskProjects = useCallback(async () => {
+    void 0;
     if (!isTauriRuntime) return;
     const home = workspaceHome.trim();
     if (!home) {
@@ -1698,6 +1740,12 @@ export function App() {
     }, 120);
     return () => window.clearTimeout(timer);
   }, [userConfigReady, refreshModels]);
+
+  useEffect(() => {
+    if (view === "settings" && settingsTab === "personalization") {
+      void loadLocalMemoryCount();
+    }
+  }, [view, settingsTab, workspaceRoot, loadLocalMemoryCount]);
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
@@ -3243,6 +3291,21 @@ export function App() {
     }
   }
 
+  async function clearWorkspaceMemories(): Promise<void> {
+    const root = workspaceRoot.trim();
+    if (!isTauriRuntime || !root || isClearingMemories) return;
+    setError(null);
+    setIsClearingMemories(true);
+    try {
+      await invoke<number>("clear_local_memories", { workspaceRoot: root });
+      setLocalMemoryCount(0);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsClearingMemories(false);
+    }
+  }
+
   async function saveAllSettings(): Promise<void> {
     if (isSavingConfig || anySessionRunning) return;
     if (!isTauriRuntime) {
@@ -3303,6 +3366,10 @@ export function App() {
           model_context_windows: contextWindowMapFromEntries(modelContextWindowEntries),
           vision_delegate: visionDelegateConfigFromForm(visionDelegate),
           model_capabilities: modelCapabilities,
+          custom_instructions: customInstructions.trim() || undefined,
+          personality,
+          local_memory_enabled: localMemoryEnabled,
+          tool_memory_enabled: toolMemoryEnabled,
         } satisfies UserConfig,
       });
       setWorkspaceHome((savedUser.workspace_home || "").trim());
@@ -3323,6 +3390,10 @@ export function App() {
       setModelContextWindowEntries(contextWindowEntriesFromMap(savedUser.model_context_windows));
       setVisionDelegate(visionDelegateFormFromConfig(savedUser.vision_delegate));
       setModelCapabilities(savedUser.model_capabilities ?? {});
+      setCustomInstructions(savedUser.custom_instructions ?? "");
+      setPersonality(normalizePersonality(savedUser.personality));
+      setLocalMemoryEnabled(savedUser.local_memory_enabled === true);
+      setToolMemoryEnabled(savedUser.tool_memory_enabled !== false);
       const hydratedProviders = hydrateProviders(savedUser);
       setProviders(hydratedProviders.providers);
       setActiveProviderId(hydratedProviders.activeProviderId);
@@ -3529,6 +3600,7 @@ export function App() {
       { id: "resilience", labelKey: "settings.tab.resilience" },
       { id: "context", labelKey: "settings.tab.context" },
       { id: "vision", labelKey: "settings.tab.vision" },
+      { id: "personalization", labelKey: "settings.tab.personalization" },
       { id: "defaults", labelKey: "settings.tab.defaults" },
     ];
     const focusSettingsTab = (tab: SettingsTab) => {
@@ -4036,6 +4108,109 @@ export function App() {
               </label>
             </div>
             <p className="mode-help">{t(locale, "settings.vision.capabilityHint")}</p>
+          </section>
+
+          <section
+            className="settings-card resilience-settings-card"
+            role="tabpanel"
+            id="settings-panel-personalization"
+            aria-labelledby="settings-tab-personalization"
+            aria-label={t(locale, "settings.personalization.title")}
+            hidden={settingsTab !== "personalization"}
+          >
+            <p className="panel-title">{t(locale, "settings.personalization.title")}</p>
+
+            <div className="resilience-setting-group">
+              <p className="resilience-setting-group-title">{t(locale, "settings.personalization.instructions")}</p>
+              <label htmlFor="custom-instructions">
+                <span className="field-label">{t(locale, "field.customInstructions")}</span>
+                <textarea
+                  id="custom-instructions"
+                  rows={6}
+                  value={customInstructions}
+                  maxLength={MAX_CUSTOM_INSTRUCTIONS_CHARS}
+                  onChange={(event) => setCustomInstructions(event.target.value)}
+                  disabled={anySessionRunning || isSavingConfig}
+                  placeholder={t(locale, "field.customInstructionsPlaceholder")}
+                />
+              </label>
+              <p className="mode-help">{t(locale, "field.customInstructionsHint")}</p>
+            </div>
+
+            <div className="resilience-setting-group">
+              <p className="resilience-setting-group-title">{t(locale, "settings.personalization.personality")}</p>
+              <label htmlFor="personality">
+                <span className="field-label">{t(locale, "field.personality")}</span>
+                <select
+                  id="personality"
+                  value={personality}
+                  onChange={(event) => setPersonality(normalizePersonality(event.target.value))}
+                  disabled={anySessionRunning || isSavingConfig}
+                >
+                  {PERSONALITY_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {t(locale, `field.personality.${option}` as MessageKey)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="mode-help">{t(locale, "field.personalityHint")}</p>
+            </div>
+
+            <div className="resilience-setting-group">
+              <p className="resilience-setting-group-title">{t(locale, "settings.personalization.memory")}</p>
+              <div className="resilience-toggle-row">
+                <div>
+                  <span className="field-label">{t(locale, "field.localMemory")}</span>
+                  <p className="mode-help">{t(locale, "field.localMemoryHint")}</p>
+                </div>
+                <button
+                  type="button"
+                  className={`browser-toggle${localMemoryEnabled ? " on" : ""}`}
+                  aria-label={t(locale, "field.localMemory")}
+                  aria-pressed={localMemoryEnabled}
+                  onClick={() => setLocalMemoryEnabled((enabled) => !enabled)}
+                  disabled={anySessionRunning || isSavingConfig}
+                >
+                  <span className="browser-toggle-knob" />
+                </button>
+              </div>
+              <div className="resilience-toggle-row">
+                <div>
+                  <span className="field-label">{t(locale, "field.toolMemory")}</span>
+                  <p className="mode-help">{t(locale, "field.toolMemoryHint")}</p>
+                </div>
+                <button
+                  type="button"
+                  className={`browser-toggle${toolMemoryEnabled ? " on" : ""}`}
+                  aria-label={t(locale, "field.toolMemory")}
+                  aria-pressed={toolMemoryEnabled}
+                  onClick={() => setToolMemoryEnabled((enabled) => !enabled)}
+                  disabled={anySessionRunning || isSavingConfig || !localMemoryEnabled}
+                >
+                  <span className="browser-toggle-knob" />
+                </button>
+              </div>
+              <div className="resilience-toggle-row">
+                <div>
+                  <span className="field-label">{t(locale, "field.storedMemories")}</span>
+                  <p className="mode-help">
+                    {localMemoryCount === null
+                      ? t(locale, "field.storedMemoriesUnknown")
+                      : `${localMemoryCount}`}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => void clearWorkspaceMemories()}
+                  disabled={anySessionRunning || isSavingConfig || isClearingMemories || !workspaceRoot.trim() || localMemoryCount === 0}
+                >
+                  {t(locale, "action.clearMemories")}
+                </button>
+              </div>
+              <p className="mode-help">{t(locale, "field.storedMemoriesHint")}</p>
+            </div>
           </section>
 
           <section

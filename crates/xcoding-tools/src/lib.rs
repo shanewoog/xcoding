@@ -7,8 +7,12 @@ use std::{
     io::Read,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -46,6 +50,177 @@ const MAX_TOOL_JSON_BYTES: usize = 32 * 1024;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Default wall-clock bound for one `run_command` call.
+/// Long builds legitimately run for minutes, so this only has to be low enough
+/// that a foreground resident service cannot hold a turn open indefinitely.
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Upper bound a caller may request through `timeout_seconds`.
+const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 3_600;
+
+/// How long to keep draining a child's pipes after the child itself has exited.
+/// A grandchild that inherited the pipe write handle (for example anything
+/// launched through `cmd /C start`) keeps the pipe open indefinitely, so reads
+/// must not be awaited without a bound or the tool call never returns.
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Streams a child pipe into a shared buffer so output stays readable even when
+/// the reader thread cannot finish. Returns the buffer plus a completion flag.
+fn drain_pipe<R>(mut pipe: R) -> (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>)
+where
+    R: Read + Send + 'static,
+{
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let finished = Arc::new(AtomicBool::new(false));
+    let writer = Arc::clone(&buffer);
+    let done = Arc::clone(&finished);
+    thread::spawn(move || {
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => {
+                    if let Ok(mut sink) = writer.lock() {
+                        sink.extend_from_slice(&chunk[..count]);
+                    } else {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        done.store(true, Ordering::SeqCst);
+    });
+    (buffer, finished)
+}
+
+/// Waits up to `grace` for both readers to hit end-of-pipe, then gives up.
+fn await_pipe_drain(flags: [&Arc<AtomicBool>; 2], grace: Duration) {
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if flags.iter().all(|flag| flag.load(Ordering::SeqCst)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn snapshot_pipe(buffer: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    buffer
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default()
+}
+
+/// Windows process-tree cleanup for one `run_command` call.
+///
+/// `Child::kill` only terminates the direct child, so a grandchild that was
+/// detached from it (anything spawned through `cmd /C start`, `subprocess.Popen`,
+/// `child_process.spawn`, ...) survives the tool call and keeps holding ports and
+/// file locks. A job object with `KILL_ON_JOB_CLOSE` makes the whole tree die
+/// with the guard, whether the call finished, timed out, or was cancelled.
+#[cfg(windows)]
+mod job_object {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    type Handle = *mut std::ffi::c_void;
+
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: u32 = 9;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectBasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectExtendedLimitInformation {
+        basic_limit_information: JobObjectBasicLimitInformation,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateJobObjectW(attributes: *mut std::ffi::c_void, name: *const u16) -> Handle;
+        fn SetInformationJobObject(
+            job: Handle,
+            info_class: u32,
+            info: *const std::ffi::c_void,
+            info_len: u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    /// Owns a kill-on-close job object; dropping it terminates every assigned process.
+    pub(super) struct ProcessTreeGuard {
+        job: Handle,
+    }
+
+    impl ProcessTreeGuard {
+        /// Returns `None` when the job object cannot be created or configured, in
+        /// which case the caller keeps the previous direct-child-only behaviour.
+        pub(super) fn new() -> Option<Self> {
+            let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+            if job.is_null() {
+                return None;
+            }
+            let mut limits = JobObjectExtendedLimitInformation::default();
+            limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let assigned = unsafe {
+                SetInformationJobObject(
+                    job,
+                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                    (&raw const limits).cast(),
+                    size_of::<JobObjectExtendedLimitInformation>() as u32,
+                )
+            };
+            if assigned == 0 {
+                unsafe { CloseHandle(job) };
+                return None;
+            }
+            Some(Self { job })
+        }
+
+        pub(super) fn adopt(&self, child: &Child) -> bool {
+            unsafe { AssignProcessToJobObject(self.job, child.as_raw_handle().cast()) != 0 }
+        }
+    }
+
+    impl Drop for ProcessTreeGuard {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.job) };
+        }
+    }
+}
+
 /// Creates Git processes without a visible console on Windows.
 /// Git is invoked by the task-summary worker as well as user-requested Git tools.
 fn git_command() -> Command {
@@ -55,7 +230,7 @@ fn git_command() -> Command {
 /// Creates workspace child processes without a visible console on Windows.
 /// This keeps PowerShell and other command-line tools from flashing a console when
 /// an approved tool call is executed from the Desktop app.
-fn workspace_command(executable: &str) -> Command {
+fn workspace_command(executable: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(executable);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -878,7 +1053,36 @@ impl ToolRegistry {
         // Never inherit the server RPC stdin pipe: some tools (notably git on
         // Windows) can hang when stdin is an open parent pipe still owned by the
         // JSON-RPC loop.
-        let mut child = workspace_command(&args.executable)
+        // A relative executable path is resolved against the workspace root here
+        // because `current_dir` does not affect how the OS looks up the program.
+        let program = self.resolve_executable(&args.executable)?;
+
+        // Background launch: the caller wants the process to outlive this call, so
+        // it is neither awaited nor bound to the job object. Output goes to null
+        // because nobody stays behind to drain a pipe, and a full pipe buffer
+        // would eventually block the service itself.
+        if args.background {
+            let child = workspace_command(&program)
+                .args(&args.args)
+                .current_dir(&self.workspace_root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            let pid = child.id();
+            return Ok(ToolExecution {
+                output: json!({
+                    "executable": args.executable,
+                    "args": args.args,
+                    "success": true,
+                    "background": true,
+                    "pid": pid,
+                }),
+                summary: format!("Started in background with pid {pid}"),
+            });
+        }
+
+        let mut child = workspace_command(&program)
             .args(&args.args)
             .current_dir(&self.workspace_root)
             .stdin(Stdio::null())
@@ -889,40 +1093,58 @@ impl ToolRegistry {
             .env("PAGER", "cat")
             .spawn()?;
 
-        let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
-        let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
-        let stdout_handle = thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = stdout_pipe.read_to_end(&mut buffer);
-            buffer
-        });
-        let stderr_handle = thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = stderr_pipe.read_to_end(&mut buffer);
-            buffer
-        });
+        // Bind the whole spawned tree to this call. Without it, a grandchild that
+        // detached from the direct child (`cmd /C start`, `subprocess.Popen`, ...)
+        // outlives the tool call and keeps holding ports and file locks.
+        #[cfg(windows)]
+        let _process_tree = {
+            let guard = job_object::ProcessTreeGuard::new();
+            if let Some(guard) = &guard {
+                // A failed adopt is not fatal: cleanup then degrades to the
+                // previous direct-child-only behaviour.
+                let _ = guard.adopt(&child);
+            }
+            guard
+        };
 
+        let stdout_pipe = child.stdout.take().expect("stdout pipe");
+        let stderr_pipe = child.stderr.take().expect("stderr pipe");
+        let (stdout_buffer, stdout_done) = drain_pipe(stdout_pipe);
+        let (stderr_buffer, stderr_done) = drain_pipe(stderr_pipe);
+
+        let timeout = args.effective_timeout();
+        let deadline = Instant::now() + timeout;
+        let mut timed_out = false;
         let status = loop {
             if is_cancelled() {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
+                await_pipe_drain([&stdout_done, &stderr_done], PIPE_DRAIN_GRACE);
                 return Err(ToolError::Cancelled);
             }
             match child.try_wait()? {
                 Some(status) => break status,
-                None => thread::sleep(Duration::from_millis(50)),
+                None => {
+                    if Instant::now() >= deadline {
+                        // A foreground resident service never exits on its own, so
+                        // report the output captured so far instead of holding the
+                        // turn open until the model or the user gives up.
+                        timed_out = true;
+                        let _ = child.kill();
+                        break child.wait()?;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
             }
         };
 
-        let stdout = truncate_output(&String::from_utf8_lossy(
-            &stdout_handle.join().unwrap_or_default(),
-        ));
-        let stderr = truncate_output(&String::from_utf8_lossy(
-            &stderr_handle.join().unwrap_or_default(),
-        ));
-        let success = status.success();
+        // The child is gone, so anything still holding the pipes is a surviving
+        // grandchild. Wait only briefly for trailing output, then report what we
+        // have instead of blocking the turn forever.
+        await_pipe_drain([&stdout_done, &stderr_done], PIPE_DRAIN_GRACE);
+        let stdout = truncate_output(&String::from_utf8_lossy(&snapshot_pipe(&stdout_buffer)));
+        let stderr = truncate_output(&String::from_utf8_lossy(&snapshot_pipe(&stderr_buffer)));
+        let success = status.success() && !timed_out;
         Ok(ToolExecution {
             output: json!({
                 "executable": args.executable,
@@ -931,8 +1153,11 @@ impl ToolRegistry {
                 "exit_code": status.code(),
                 "stdout": stdout,
                 "stderr": stderr,
+                "timed_out": timed_out,
             }),
-            summary: if success {
+            summary: if timed_out {
+                format!("Command timed out after {}s and was terminated", timeout.as_secs())
+            } else if success {
                 "Command completed".to_owned()
             } else {
                 "Command failed".to_owned()
@@ -1571,6 +1796,28 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Resolve the `run_command` program for spawning.
+    ///
+    /// Bare command names are left untouched so the OS resolves them through
+    /// `PATH`. Relative paths (already restricted by command policy to `./` and
+    /// `target/` prefixes) are anchored to the workspace root, because the OS
+    /// resolves a relative program against the parent process directory rather
+    /// than the child's `current_dir`.
+    fn resolve_executable(&self, executable: &str) -> Result<PathBuf, ToolError> {
+        if !executable.contains('/') && !executable.contains('\\') {
+            return Ok(PathBuf::from(executable));
+        }
+        let requested = checked_relative_path(executable)?;
+        let target = self.workspace_root.join(requested);
+        let canonical = target.canonicalize().map_err(|error| {
+            ToolError::InvalidCommand(format!("executable `{executable}` not found: {error}"))
+        })?;
+        if !canonical.starts_with(&self.workspace_root) {
+            return Err(ToolError::PathOutsideWorkspace(executable.to_owned()));
+        }
+        Ok(canonical)
+    }
+
     fn resolve_writable(&self, requested_path: &str) -> Result<PathBuf, ToolError> {
         let requested = checked_relative_path(requested_path)?;
         let target = self.workspace_root.join(requested);
@@ -1647,6 +1894,23 @@ struct RunCommandArgs {
     executable: String,
     #[serde(default)]
     args: Vec<String>,
+    /// Optional wall-clock bound in seconds, clamped to
+    /// `1..=MAX_COMMAND_TIMEOUT_SECONDS`; defaults to [`DEFAULT_COMMAND_TIMEOUT`].
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    /// Launch and return immediately, leaving the process running after the call.
+    /// Intended for a project's own background service during local testing.
+    #[serde(default)]
+    background: bool,
+}
+
+impl RunCommandArgs {
+    fn effective_timeout(&self) -> Duration {
+        match self.timeout_seconds {
+            Some(seconds) => Duration::from_secs(seconds.clamp(1, MAX_COMMAND_TIMEOUT_SECONDS)),
+            None => DEFAULT_COMMAND_TIMEOUT,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -3727,5 +3991,288 @@ mod tests {
         assert_eq!(loaded.output["title"], "Docs");
         assert_eq!(loaded.output["visible"], true);
         assert!(loaded.summary.contains("example.test/docs"));
+    }
+
+    #[test]
+    fn resolves_relative_executables_against_the_workspace_root() {
+        let root = workspace();
+        let build_dir = root.join("target/release");
+        fs::create_dir_all(&build_dir).expect("build dir creates");
+        let binary = build_dir.join(if cfg!(windows) {
+            "demo-tool.exe"
+        } else {
+            "demo-tool"
+        });
+        fs::write(&binary, b"binary").expect("binary writes");
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let expected = binary.canonicalize().expect("binary canonicalizes");
+
+        // Bare command names stay untouched so PATH lookup still applies.
+        assert_eq!(
+            tools.resolve_executable("cargo").expect("bare command"),
+            PathBuf::from("cargo")
+        );
+
+        let relative = if cfg!(windows) {
+            "target/release/demo-tool.exe"
+        } else {
+            "target/release/demo-tool"
+        };
+        assert_eq!(
+            tools.resolve_executable(relative).expect("target path"),
+            expected
+        );
+        assert_eq!(
+            tools
+                .resolve_executable(&format!("./{relative}"))
+                .expect("dot-slash path"),
+            expected
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            tools
+                .resolve_executable("target\\release\\demo-tool.exe")
+                .expect("backslash path"),
+            expected
+        );
+
+        let missing = tools
+            .resolve_executable("target/release/absent-tool")
+            .expect_err("missing executable");
+        assert!(matches!(missing, ToolError::InvalidCommand(_)));
+
+        let escaping = tools
+            .resolve_executable("../evil")
+            .expect_err("parent traversal");
+        assert!(matches!(escaping, ToolError::PathOutsideWorkspace(_)));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cmd_start_does_not_deadlock_on_inherited_pipes() {
+        use std::time::Instant;
+
+        let root = workspace();
+        // `start` is refused by policy at the tool-call boundary, so the leak is
+        // reproduced the way it actually reaches us in practice: inside a script.
+        // `ping` inherits the stdout pipe and outlives the `cmd` that launched it.
+        fs::write(
+            root.join("leak-pipe.cmd"),
+            "@echo off\r\nstart /B ping 127.0.0.1 -n 60\r\n",
+        )
+        .expect("script writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let start = Instant::now();
+        let result = tools.execute_authorized_cancellable(
+            &ToolCall {
+                id: "deadlock-check".to_owned(),
+                name: ToolName::RunCommand,
+                arguments: json!({
+                    "executable": "cmd",
+                    "args": ["/C", "leak-pipe.cmd"]
+                }),
+            },
+            &|| false,
+        );
+        let elapsed = start.elapsed();
+
+        // Before the bounded drain this call never returned: `start` hands the
+        // inherited pipe write handle to a process that outlives `cmd`, so reading
+        // to end blocked forever. The bound is deliberately loose because the
+        // regression being guarded is an unbounded hang, not slowness.
+        assert!(
+            elapsed.as_secs() < 15,
+            "cmd /C start deadlock: took {elapsed:?}"
+        );
+        assert!(
+            result.is_ok(),
+            "expected ok, got error: {result:?}"
+        );
+        // The call must finish on the child's own exit, not on the timeout path.
+        assert_eq!(result.unwrap().output["timed_out"], false);
+        // The job object kills `ping` as the call returns, but Windows releases
+        // its handle on the working directory a moment later, so the cleanup is
+        // retried instead of asserted on the first attempt.
+        for attempt in 0..25 {
+            if fs::remove_dir_all(&root).is_ok() {
+                break;
+            }
+            assert!(attempt < 24, "workspace removes");
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn terminates_a_command_that_never_exits() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let start = Instant::now();
+        let execution = tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "timeout-check".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: if cfg!(windows) {
+                        json!({
+                            "executable": "ping",
+                            "args": ["127.0.0.1", "-n", "120"],
+                            "timeout_seconds": 2
+                        })
+                    } else {
+                        json!({
+                            "executable": "sleep",
+                            "args": ["120"],
+                            "timeout_seconds": 2
+                        })
+                    },
+                },
+                &|| false,
+            )
+            .expect("timeout reports output instead of failing the call");
+        let elapsed = start.elapsed();
+
+        // A foreground resident process used to hold the turn open forever.
+        assert!(
+            elapsed.as_secs() < 20,
+            "timeout did not fire: took {elapsed:?}"
+        );
+        assert_eq!(execution.output["timed_out"], true);
+        assert_eq!(execution.output["success"], false);
+        assert!(execution.summary.contains("timed out"));
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn clamps_requested_timeouts_into_the_supported_range() {
+        let parse = |value: Value| {
+            parse_arguments::<RunCommandArgs>(&value)
+                .expect("args parse")
+                .effective_timeout()
+        };
+        assert_eq!(
+            parse(json!({ "executable": "cargo" })),
+            DEFAULT_COMMAND_TIMEOUT
+        );
+        assert_eq!(
+            parse(json!({ "executable": "cargo", "timeout_seconds": 30 })),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse(json!({ "executable": "cargo", "timeout_seconds": 0 })),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            parse(json!({ "executable": "cargo", "timeout_seconds": 99_999 })),
+            Duration::from_secs(MAX_COMMAND_TIMEOUT_SECONDS)
+        );
+    }
+
+    /// A grandchild that detached from the direct child used to survive the call
+    /// and keep holding its port; the job object must reap it with the guard.
+    #[test]
+    #[cfg(windows)]
+    fn reclaims_detached_grandchildren_when_the_call_returns() {
+        let root = workspace();
+        // The redirection and quoting live in a script so the tool still receives
+        // a plain argument vector.
+        fs::write(
+            root.join("spawn-grandchild.cmd"),
+            "@echo off\r\nstart /B cmd /C ping 127.0.0.1 -n 120 > marker.txt\r\n",
+        )
+        .expect("script writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+        tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "tree-check".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({
+                        "executable": "cmd",
+                        "args": ["/C", "spawn-grandchild.cmd"],
+                        "timeout_seconds": 5
+                    }),
+                },
+                &|| false,
+            )
+            .expect("spawn script runs");
+
+        // `ping` appends a line per second, so a surviving grandchild keeps growing
+        // the marker file after the tool call has already returned.
+        let marker = root.join("marker.txt");
+        let first = marker.metadata().map(|value| value.len()).unwrap_or(0);
+        thread::sleep(Duration::from_secs(4));
+        let second = marker.metadata().map(|value| value.len()).unwrap_or(0);
+        assert_eq!(
+            first, second,
+            "detached grandchild survived the call and kept writing ({first} -> {second} bytes)"
+        );
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn background_launch_survives_the_call_that_started_it() {
+        let root = workspace();
+        // Stands in for a project's own background service: keeps running and
+        // keeps writing after the launching tool call has returned.
+        fs::write(
+            root.join("bg-service.cmd"),
+            "@echo off\r\nping 127.0.0.1 -n 120 > marker.txt\r\n",
+        )
+        .expect("script writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let start = Instant::now();
+        let execution = tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "bg-check".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({
+                        "executable": "cmd",
+                        "args": ["/C", "bg-service.cmd"],
+                        "background": true
+                    }),
+                },
+                &|| false,
+            )
+            .expect("background launch runs");
+
+        // The call must not wait for the service to exit.
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "background launch blocked for {:?}",
+            start.elapsed()
+        );
+        assert_eq!(execution.output["background"], true);
+        let pid = execution.output["pid"].as_u64().expect("pid reported");
+
+        // `ping` appends a line per second, so a surviving service keeps growing
+        // the marker file after the call returned.
+        let marker = root.join("marker.txt");
+        thread::sleep(Duration::from_secs(2));
+        let first = marker.metadata().map(|value| value.len()).unwrap_or(0);
+        thread::sleep(Duration::from_secs(3));
+        let second = marker.metadata().map(|value| value.len()).unwrap_or(0);
+        assert!(
+            second > first,
+            "background service died with the call ({first} -> {second} bytes)"
+        );
+
+        // Nothing reclaims a background launch, so the test cleans up after itself.
+        let _ = workspace_command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        for attempt in 0..25 {
+            if fs::remove_dir_all(&root).is_ok() {
+                break;
+            }
+            assert!(attempt < 24, "workspace removes");
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 }

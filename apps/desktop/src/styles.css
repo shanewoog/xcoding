@@ -1841,12 +1841,13 @@ input.workspace-missing {
 }
 .settings-tabs-container {
   align-content: start;
+  align-items: start;
   display: grid;
   gap: 1rem;
   grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   overflow-y: auto;
-  padding-bottom: 0.5rem;
+  padding-bottom: 1.5rem;
 }
 .provider-settings-card,
 .resilience-settings-card,
@@ -2992,6 +2993,9 @@ body.is-resizing-right-panel .browser-surface-host {
   display: flex;
   gap: 0.1rem;
 }
+.browser-reload-wrap {
+  position: relative;
+}
 .browser-url-form {
   min-width: 0;
 }
@@ -3037,6 +3041,10 @@ body.is-resizing-right-panel .browser-surface-host {
 .browser-menu button:disabled {
   color: var(--text-muted);
   cursor: default;
+}
+.browser-reload-menu {
+  left: 0;
+  right: auto;
 }
 .browser-menu-zoom {
   align-items: center;

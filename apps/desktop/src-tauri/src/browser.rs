@@ -387,7 +387,9 @@ fn create_side_browser(
   let window = main_window(app)?;
   let parsed = parse_browser_url(url)?;
   let builder = attach_page_load(
-    WebviewBuilder::new(label, WebviewUrl::External(parsed)),
+    WebviewBuilder::new(label, WebviewUrl::External(parsed)).initialization_script_for_all_frames(
+      r#"document.addEventListener('contextmenu', function(event) { event.preventDefault(); }, true);"#,
+    ),
     session.to_owned(),
   );
   let builder = match user_agent.map(str::trim).filter(|value| !value.is_empty()) {
@@ -523,6 +525,14 @@ pub async fn browser_navigate(
 pub async fn browser_reload(app: AppHandle, session: Option<String>) -> Result<(), String> {
   let webview = require_browser(&app, &session_key(session))?;
   webview.reload().map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn browser_force_reload(app: AppHandle, session: Option<String>) -> Result<(), String> {
+  let webview = require_browser(&app, &session_key(session))?;
+  webview
+    .eval("window.location.reload(true)")
+    .map_err(map_err)
 }
 
 #[tauri::command]

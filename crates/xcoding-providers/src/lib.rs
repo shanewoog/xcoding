@@ -150,6 +150,11 @@ pub struct ProviderToolCall {
     #[serde(rename = "type")]
     pub kind: String,
     pub function: ProviderFunctionCall,
+    /// Set when the upstream stream stopped mid-arguments (for example
+    /// `finish_reason: "length"`), so `arguments` holds an incomplete JSON
+    /// fragment. Local-only: never sent to or read from a provider.
+    #[serde(default, skip)]
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -816,6 +821,8 @@ impl OpenAiCompatibleProvider {
             let mut body_sample = Vec::new();
             let mut body_sample_truncated = false;
             let mut emitted_event = false;
+            // Providers send finish_reason on a chunk before [DONE]; keep the last one.
+            let mut truncated_by_length = false;
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
@@ -831,7 +838,10 @@ impl OpenAiCompatibleProvider {
                     let data = data.trim();
 
                     if data == "[DONE]" {
-                        let completed_calls = completed_tool_calls(std::mem::take(&mut tool_calls))?;
+                        let completed_calls = completed_tool_calls(
+                            std::mem::take(&mut tool_calls),
+                            truncated_by_length,
+                        )?;
                         if !emitted_event && completed_calls.is_empty() {
                             Err::<(), ProviderError>(ProviderError::EmptyStream {
                                 status: response_status,
@@ -845,6 +855,9 @@ impl OpenAiCompatibleProvider {
                     }
 
                     let parsed = parse_chunk(data)?;
+                    if let Some(reason) = parsed.finish_reason.as_deref() {
+                        truncated_by_length = reason == "length";
+                    }
                     if let Some(content) = parsed.content.filter(|content| !content.trim().is_empty()) {
                         emitted_event = true;
                         yield ProviderEvent::TextDelta(content);
@@ -1173,6 +1186,8 @@ fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderErr
                         arguments.to_owned()
                     },
                 },
+                // Responses delivers finished function calls in one event.
+                truncated: false,
             }))
         }
         "response.completed" => Ok(ResponsesParsedEvent::Completed),
@@ -1200,6 +1215,10 @@ struct ChatCompletionChunk {
 #[derive(Deserialize)]
 struct ChatCompletionChoice {
     delta: ChatCompletionDelta,
+    /// `"length"` means the upstream hit its output cap; anything accumulated
+    /// so far may be an incomplete fragment.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -1228,6 +1247,7 @@ struct ToolFunctionDelta {
 struct ParsedChunk {
     content: Option<String>,
     tool_calls: Vec<ToolCallDelta>,
+    finish_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -1260,12 +1280,19 @@ impl ToolCallAccumulator {
         }
     }
 
-    fn finish(self) -> Result<ProviderToolCall, ProviderError> {
+    /// `truncated_by_length` carries the upstream `finish_reason: "length"`.
+    ///
+    /// Incomplete arguments are returned as-is instead of failing the stream:
+    /// the agent needs the call id to answer with a tool result, otherwise the
+    /// turn dies with an assistant tool call that has no matching result.
+    fn finish(self, truncated_by_length: bool) -> Result<ProviderToolCall, ProviderError> {
         let arguments = if self.arguments.trim().is_empty() {
             "{}".to_owned()
         } else {
             self.arguments
         };
+        let truncated = serde_json::from_str::<Value>(&arguments).is_err()
+            && (truncated_by_length || is_incomplete_json(&arguments));
         Ok(ProviderToolCall {
             id: self
                 .id
@@ -1277,7 +1304,17 @@ impl ToolCallAccumulator {
                 })?,
                 arguments,
             },
+            truncated,
         })
+    }
+}
+
+/// Distinguish "the stream stopped early" from "the model emitted broken JSON".
+/// Serde reports a premature end of input as `Category::Eof`.
+fn is_incomplete_json(arguments: &str) -> bool {
+    match serde_json::from_str::<Value>(arguments) {
+        Err(error) => error.classify() == serde_json::error::Category::Eof,
+        Ok(_) => false,
     }
 }
 
@@ -1440,22 +1477,24 @@ fn load_dotenv_files() {
 fn parse_chunk(data: &str) -> Result<ParsedChunk, ProviderError> {
     let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
     let mut choices = chunk.choices.into_iter();
-    let delta = choices
+    let (delta, finish_reason) = choices
         .next()
-        .map(|choice| choice.delta)
+        .map(|choice| (choice.delta, choice.finish_reason))
         .unwrap_or_default();
     Ok(ParsedChunk {
         content: delta.content,
         tool_calls: delta.tool_calls,
+        finish_reason,
     })
 }
 
 fn completed_tool_calls(
     tool_calls: BTreeMap<usize, ToolCallAccumulator>,
+    truncated_by_length: bool,
 ) -> Result<Vec<ProviderToolCall>, ProviderError> {
     tool_calls
         .into_values()
-        .map(ToolCallAccumulator::finish)
+        .map(|accumulator| accumulator.finish(truncated_by_length))
         .collect()
 }
 
@@ -1514,6 +1553,7 @@ mod tests {
                 name: "read_file".to_owned(),
                 arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
             },
+            truncated: false,
         };
         let body = responses_request_body(
             "gpt-test",
@@ -1629,6 +1669,7 @@ mod tests {
                         name: "read_file".to_owned(),
                         arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
                     },
+                    truncated: false,
                 }
             ),
             _ => panic!("expected tool call"),
@@ -1663,7 +1704,7 @@ mod tests {
         accumulator.merge(second.tool_calls.into_iter().next().expect("second call"));
 
         assert_eq!(
-            accumulator.finish().expect("tool call completes"),
+            accumulator.finish(false).expect("tool call completes"),
             ProviderToolCall {
                 id: "call_1".to_owned(),
                 kind: "function".to_owned(),
@@ -1671,6 +1712,7 @@ mod tests {
                     name: "read_file".to_owned(),
                     arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
                 },
+                truncated: false,
             }
         );
     }
@@ -1686,7 +1728,7 @@ mod tests {
         accumulator.merge(second.tool_calls.into_iter().next().expect("second call"));
 
         assert_eq!(
-            accumulator.finish().expect("tool call completes"),
+            accumulator.finish(false).expect("tool call completes"),
             ProviderToolCall {
                 id: "call_1".to_owned(),
                 kind: "function".to_owned(),
@@ -1694,6 +1736,7 @@ mod tests {
                     name: "list_dir".to_owned(),
                     arguments: r#"{"path":"."}"#.to_owned(),
                 },
+                truncated: false,
             }
         );
     }
@@ -1707,12 +1750,68 @@ mod tests {
 
         assert_eq!(
             accumulator
-                .finish()
+                .finish(false)
                 .expect("tool call completes")
                 .function
                 .arguments,
             "{}"
         );
+    }
+
+    // Regression: `mimo-v2.5-pro` stopped mid-arguments after 8 bytes, and the
+    // half-written fragment used to be handed on as a valid call.
+    #[test]
+    fn marks_tool_arguments_cut_off_mid_stream_as_truncated() {
+        let parsed = parse_chunk(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"apply_patch","arguments":"{\"path\":"}}]}}]}"#)
+            .expect("tool event parses");
+        let mut accumulator = ToolCallAccumulator::default();
+        accumulator.merge(parsed.tool_calls.into_iter().next().expect("tool call"));
+
+        let finished = accumulator.finish(false).expect("call keeps its id");
+        assert!(
+            finished.truncated,
+            "an unterminated fragment must be reported as truncated"
+        );
+        // The id has to survive so the agent can answer with a tool result.
+        assert_eq!(finished.id, "call_1");
+        assert_eq!(finished.function.arguments, r#"{"path":"#);
+    }
+
+    #[test]
+    fn reads_length_finish_reason_from_the_stream() {
+        let parsed = parse_chunk(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#)
+            .expect("finish chunk parses");
+        assert_eq!(parsed.finish_reason.as_deref(), Some("length"));
+
+        let normal = parse_chunk(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+            .expect("finish chunk parses");
+        assert_eq!(normal.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn syntax_errors_are_not_reported_as_truncation() {
+        let mut accumulator = ToolCallAccumulator::default();
+        accumulator.id = Some("call_1".to_owned());
+        accumulator.name = Some("read_file".to_owned());
+        // Balanced braces, still invalid JSON: the model wrote it wrong.
+        accumulator.arguments = r#"{"path":,}"#.to_owned();
+
+        let finished = accumulator.finish(false).expect("call completes");
+        assert!(
+            !finished.truncated,
+            "broken syntax is a model mistake, not a cut-off stream"
+        );
+    }
+
+    #[test]
+    fn length_finish_reason_marks_unparsable_arguments_as_truncated() {
+        let mut accumulator = ToolCallAccumulator::default();
+        accumulator.id = Some("call_1".to_owned());
+        accumulator.name = Some("apply_patch".to_owned());
+        accumulator.arguments = r#"{"path":"a.rs","new_text":"fn"#.to_owned();
+
+        let finished = accumulator.finish(true).expect("call completes");
+        assert!(finished.truncated);
     }
 
     #[test]

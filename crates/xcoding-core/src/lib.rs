@@ -14,7 +14,8 @@ use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, ContextCompaction,
     CreateSessionParams, CreateSessionResult, FileChangeKind, FileChangeSummary, GetConfigParams,
     GetConfigResult, GetSessionDetailParams, GetSessionDetailResult, JsonRpcRequest,
-    JsonRpcResponse, ListSessionsParams, ListSessionsResult, Message, MessageRole, PendingAction,
+    JsonRpcResponse, ListSessionsParams, ListSessionsResult, LocalMemory, Message, MessageRole,
+    PendingAction,
     PendingActionStatus, PersistedSessionEvent, PingResult, ReplaySessionParams,
     ReplaySessionResult, ReplayStep, RestorePoint, RpcError, Session, SessionDetail, SessionEvent,
     SessionStatus, SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName,
@@ -443,6 +444,38 @@ impl CoreService {
                 compacted_message_count,
                 updated_at: Utc::now(),
             })
+            .map_err(CoreError::from)
+    }
+
+    pub fn save_local_memory(
+        &self,
+        workspace_root: &str,
+        content: &str,
+    ) -> Result<Option<LocalMemory>, CoreError> {
+        self.store
+            .save_local_memory(workspace_root, content)
+            .map_err(CoreError::from)
+    }
+
+    pub fn local_memories(
+        &self,
+        workspace_root: &str,
+        limit: usize,
+    ) -> Result<Vec<LocalMemory>, CoreError> {
+        self.store
+            .list_local_memories(workspace_root, limit)
+            .map_err(CoreError::from)
+    }
+
+    pub fn count_local_memories(&self, workspace_root: &str) -> Result<usize, CoreError> {
+        self.store
+            .count_local_memories(workspace_root)
+            .map_err(CoreError::from)
+    }
+
+    pub fn clear_local_memories(&self, workspace_root: &str) -> Result<usize, CoreError> {
+        self.store
+            .clear_local_memories(workspace_root)
             .map_err(CoreError::from)
     }
 

@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_protocol::{
-    ContextCompaction, CreateSessionParams, Message, MessageRole, PendingAction,
+    ContextCompaction, CreateSessionParams, LocalMemory, Message, MessageRole, PendingAction,
     PendingActionStatus, PersistedSessionEvent, RestorePoint, Session, SessionEvent, SessionStatus,
     ToolCall, WorkspaceConfig,
 };
@@ -359,6 +359,83 @@ impl SessionStore {
             ],
         )?;
         Ok(compaction)
+    }
+
+    /// Store one durable fact for a workspace. Duplicate content is ignored, not duplicated.
+    pub fn save_local_memory(
+        &self,
+        workspace_root: &str,
+        content: &str,
+    ) -> Result<Option<LocalMemory>, StoreError> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "local memory content must not be empty".to_owned(),
+            ));
+        }
+        let memory = LocalMemory {
+            id: Uuid::new_v4(),
+            workspace_root: normalize_workspace_root(workspace_root),
+            content: trimmed.to_owned(),
+            created_at: Utc::now(),
+        };
+        let inserted = self.connection.execute(
+            "INSERT INTO local_memories (id, workspace_root, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(workspace_root, content) DO NOTHING",
+            params![
+                memory.id.to_string(),
+                memory.workspace_root,
+                memory.content,
+                memory.created_at.to_rfc3339(),
+            ],
+        )?;
+        if inserted == 0 {
+            return Ok(None);
+        }
+        Ok(Some(memory))
+    }
+
+    /// Oldest-first memories for a workspace, capped at `limit` most recent entries.
+    pub fn list_local_memories(
+        &self,
+        workspace_root: &str,
+        limit: usize,
+    ) -> Result<Vec<LocalMemory>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, workspace_root, content, created_at
+             FROM (
+                SELECT id, workspace_root, content, created_at
+                FROM local_memories
+                WHERE workspace_root = ?1
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?2
+             )
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = statement.query_map(
+            params![normalize_workspace_root(workspace_root), limit as i64],
+            Self::row_to_local_memory,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    }
+
+    pub fn count_local_memories(&self, workspace_root: &str) -> Result<usize, StoreError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM local_memories WHERE workspace_root = ?1",
+            params![normalize_workspace_root(workspace_root)],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Delete every memory for one workspace and report how many rows were removed.
+    pub fn clear_local_memories(&self, workspace_root: &str) -> Result<usize, StoreError> {
+        let removed = self.connection.execute(
+            "DELETE FROM local_memories WHERE workspace_root = ?1",
+            params![normalize_workspace_root(workspace_root)],
+        )?;
+        Ok(removed)
     }
 
     pub fn create_pending_action(
@@ -726,6 +803,14 @@ impl SessionStore {
                 compacted_message_count INTEGER NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS local_memories (
+                id TEXT PRIMARY KEY NOT NULL,
+                workspace_root TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (workspace_root, content)
             );",
         )?;
         self.ensure_column("restore_points", "applied_text", "TEXT")?;
@@ -769,6 +854,26 @@ impl SessionStore {
                 ))
             })?,
             updated_at: DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+        })
+    }
+
+    fn row_to_local_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalMemory> {
+        let id: String = row.get(0)?;
+        let created_at: String = row.get(3)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(LocalMemory {
+            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::Identifier(error)))?,
+            workspace_root: row.get(1)?,
+            content: row.get(2)?,
+            created_at: DateTime::parse_from_rfc3339(&created_at)
                 .map_err(|error| parse(StoreError::Timestamp(error)))?
                 .with_timezone(&Utc),
         })
@@ -1121,6 +1226,68 @@ mod tests {
             vec![original]
         );
     }
+
+    #[test]
+    fn scopes_local_memories_per_workspace_and_dedupes_content() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+
+        let saved = store
+            .save_local_memory("D:\\work\\demo", "  Uses pnpm workspaces.  ")
+            .expect("memory saves");
+        assert_eq!(
+            saved.map(|memory| memory.content),
+            Some("Uses pnpm workspaces.".to_owned())
+        );
+        // Same content under a differently spelled but equivalent root must not duplicate.
+        assert_eq!(
+            store
+                .save_local_memory("D:/WORK/demo/", "Uses pnpm workspaces.")
+                .expect("duplicate memory is ignored"),
+            None
+        );
+        store
+            .save_local_memory("D:\\work\\demo", "Tests run with cargo test.")
+            .expect("second memory saves");
+        store
+            .save_local_memory("D:\\work\\other", "Unrelated project fact.")
+            .expect("other workspace memory saves");
+
+        let demo = store
+            .list_local_memories("D:\\work\\demo", 10)
+            .expect("memories load");
+        assert_eq!(
+            demo.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+            vec!["Uses pnpm workspaces.", "Tests run with cargo test."]
+        );
+        assert_eq!(
+            store
+                .count_local_memories("D:\\work\\other")
+                .expect("count loads"),
+            1
+        );
+
+        assert_eq!(
+            store
+                .clear_local_memories("D:\\work\\demo")
+                .expect("memories clear"),
+            2
+        );
+        assert!(
+            store
+                .list_local_memories("D:\\work\\demo", 10)
+                .expect("memories reload")
+                .is_empty()
+        );
+        // Clearing one workspace must leave other workspaces intact.
+        assert_eq!(
+            store
+                .count_local_memories("D:\\work\\other")
+                .expect("other count loads"),
+            1
+        );
+        assert!(store.save_local_memory("D:\\work\\demo", "   ").is_err());
+    }
+
     #[test]
     fn updates_session_model_for_later_turns() {
         let store = SessionStore::in_memory().expect("store starts");

@@ -39,6 +39,17 @@ pub const MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT: u32 = 100;
 pub const DEFAULT_CIRCUIT_MIN_REQUEST_COUNT: u32 = 10;
 pub const MIN_CIRCUIT_MIN_REQUEST_COUNT: u32 = 1;
 pub const MAX_CIRCUIT_MIN_REQUEST_COUNT: u32 = 100;
+pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4_000;
+pub const MAX_LOCAL_MEMORY_CHARS: usize = 600;
+pub const DEFAULT_PERSONALITY: &str = "default";
+/// Reply tones accepted by `UserConfig::personality`.
+pub const PERSONALITY_OPTIONS: [&str; 5] = [
+    "default",
+    "pragmatic",
+    "friendly",
+    "concise",
+    "teaching",
+];
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct JsonRpcRequest {
@@ -419,6 +430,15 @@ pub struct ContextCompaction {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A durable fact distilled from a finished turn, scoped to one workspace.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct LocalMemory {
+    pub id: Uuid,
+    pub workspace_root: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ProviderAuthStatus {
     pub ready: bool,
@@ -505,6 +525,18 @@ pub struct UserConfig {
     pub locale: String,
     #[serde(default)]
     pub mode: Mode,
+    /// Extra instructions appended to the system prompt for every session on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_instructions: Option<String>,
+    /// Default reply tone: `default` | `pragmatic` | `friendly` | `concise` | `teaching`.
+    #[serde(default = "default_personality")]
+    pub personality: String,
+    /// Whether finished turns may distill durable facts into local memory.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub local_memory_enabled: bool,
+    /// Whether turns that called MCP tools may also produce local memory.
+    #[serde(default = "default_tool_memory_enabled")]
+    pub tool_memory_enabled: bool,
     /// Technical provider id used by sessions (currently always openai-compatible).
     #[serde(default = "default_provider")]
     pub provider: String,
@@ -593,6 +625,10 @@ impl Default for UserConfig {
         Self {
             locale: default_locale(),
             mode: Mode::default(),
+            custom_instructions: None,
+            personality: default_personality(),
+            local_memory_enabled: false,
+            tool_memory_enabled: default_tool_memory_enabled(),
             provider: default_provider(),
             model: default_model(),
             reasoning_effort: default_reasoning_effort(),
@@ -985,6 +1021,14 @@ fn default_base_url() -> String {
 
 fn default_locale() -> String {
     "en".to_owned()
+}
+
+fn default_personality() -> String {
+    DEFAULT_PERSONALITY.to_owned()
+}
+
+fn default_tool_memory_enabled() -> bool {
+    true
 }
 
 fn is_false(value: &bool) -> bool {

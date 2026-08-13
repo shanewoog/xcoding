@@ -30,6 +30,7 @@ pub enum CommandPolicyCode {
     DeniedGitMirrorPush,
     DeniedDestructiveDisk,
     DeniedWorkspaceDenylist,
+    DeniedDetachedWindow,
     HighRiskShell,
     HighRiskNetwork,
     HighRiskForcePush,
@@ -54,6 +55,7 @@ impl CommandPolicyCode {
             Self::DeniedGitMirrorPush => "denied_git_mirror_push",
             Self::DeniedDestructiveDisk => "denied_destructive_disk",
             Self::DeniedWorkspaceDenylist => "denied_workspace_denylist",
+            Self::DeniedDetachedWindow => "denied_detached_window",
             Self::HighRiskShell => "high_risk_shell",
             Self::HighRiskNetwork => "high_risk_network",
             Self::HighRiskForcePush => "high_risk_force_push",
@@ -161,10 +163,16 @@ pub fn assess_command_with_lists(
         );
     }
 
-    if executable.contains("..") || executable.contains('/') || executable.contains('\\') {
+    // Relative build-output paths are a normal local workflow, so allow `./x` and
+    // `target/x` while still rejecting absolute paths and upward traversal.
+    let normalized_executable = executable.replace('\\', "/");
+    let relative_prefix_allowed = normalized_executable.starts_with("./")
+        || normalized_executable.starts_with("target/");
+    let has_separator = executable.contains('/') || executable.contains('\\');
+    if executable.contains("..") || (has_separator && !relative_prefix_allowed) {
         return denied(
             CommandPolicyCode::PathSeparator,
-            "executable path separators are not allowed; use a bare command name",
+            "executable must be a bare command name or a relative path under ./ or target/",
         );
     }
 
@@ -267,6 +275,19 @@ pub fn assess_command_with_lists(
         return denied(
             CommandPolicyCode::DeniedWorkspaceDenylist,
             format!("command `{exe}` is blocked by workspace command denylist"),
+        );
+    }
+
+    // Tool calls must stay silent. `CREATE_NO_WINDOW` only covers the direct
+    // child, so a wrapper that hands the launch to the OS (`start`,
+    // `Start-Process`) pops a visible terminal or an error dialog that the tools
+    // layer cannot suppress, and detaches the payload from process-tree cleanup.
+    if let Some(token) = detached_window_request(&exe, &args_lower) {
+        return denied(
+            CommandPolicyCode::DeniedDetachedWindow,
+            format!(
+                "`{token}` detaches the program from the tool call and can open a console or an error dialog that cannot be suppressed; run the program directly instead"
+            ),
         );
     }
 
@@ -695,6 +716,57 @@ fn high_risk(code: CommandPolicyCode, reason: impl Into<String>) -> CommandAsses
     }
 }
 
+/// Detects wrappers that detach the payload from the tool call.
+///
+/// Returns the offending token so the denial message can name it. `cmd`'s `start`
+/// is refused in every form: even `start /B`, which asks for no new window, routes
+/// a failed launch through `ShellExecuteEx`, and that shows a modal "cannot find
+/// file" dialog inside the child. The tools layer cannot suppress that dialog, so
+/// the call would sit on a visible popup until it times out.
+///
+/// `Start-Process -NoNewWindow` is exempt because that switch is what turns
+/// `UseShellExecute` off, so a failed launch surfaces as a PowerShell error
+/// instead of a dialog.
+fn detached_window_request(exe: &str, args_lower: &[String]) -> Option<&'static str> {
+    if !matches!(exe, "cmd" | "powershell" | "pwsh") {
+        return None;
+    }
+    // Arguments arrive either as a vector or as one packed `/C` / `-Command`
+    // string, so flatten both shapes into comparable tokens.
+    let tokens: Vec<&str> = args_lower
+        .iter()
+        .flat_map(|arg| {
+            arg.split(|c: char| c.is_whitespace() || c == ';')
+                .map(|token| token.trim_matches('"'))
+                .filter(|token| !token.is_empty())
+        })
+        .collect();
+
+    if exe == "cmd" {
+        // `start` only launches a program from a command position: the first
+        // token after /C or /K, or right after a chain operator. This keeps
+        // `cmd /C echo start` from tripping the check.
+        let mut command_position = true;
+        for token in tokens {
+            match token {
+                "/c" | "/k" | "&&" | "||" | "&" | "|" => command_position = true,
+                "start" if command_position => return Some("start"),
+                _ if token.starts_with('/') => {}
+                _ => command_position = false,
+            }
+        }
+        return None;
+    }
+
+    if tokens.iter().any(|token| *token == "-nonewwindow") {
+        return None;
+    }
+    tokens
+        .iter()
+        .any(|token| matches!(*token, "start-process" | "saps"))
+        .then_some("Start-Process")
+}
+
 fn looks_absolute(executable: &str) -> bool {
     let path = std::path::Path::new(executable);
     path.is_absolute()
@@ -1088,5 +1160,82 @@ mod tests {
             CommandPolicyCode::DeniedWorkspaceDenylist.as_str(),
             "denied_workspace_denylist"
         );
+    }
+
+    #[test]
+    fn allows_relative_build_output_executables() {
+        for exe in [
+            "./my-app",
+            "target/release/etf-sentinel.exe",
+            r"target\release\etf-sentinel.exe",
+            r".\my-app.exe",
+        ] {
+            let assessment = assess_command(exe, &[]);
+            assert_eq!(
+                assessment.decision,
+                PermissionDecision::AskUser,
+                "{exe} should reach approval instead of a policy denial"
+            );
+            assert_eq!(assessment.code, CommandPolicyCode::RequiresApproval);
+        }
+
+        for exe in ["bin/tool", "../evil", r"..\evil", "target/../evil"] {
+            assert_eq!(
+                assess_command(exe, &[]).code,
+                CommandPolicyCode::PathSeparator,
+                "{exe} must stay denied"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_wrappers_that_request_a_detached_console() {
+        let denied: [(&str, &[&str]); 8] = [
+            ("cmd", &["/C", "start", "", "target\\release\\app.exe"]),
+            (
+                "cmd",
+                &["/C", "cd", "/D", "D:\\repo", "&&", "start", "", "app.exe"],
+            ),
+            ("cmd", &["/C", "start \"\" app.exe"]),
+            // `/B` asks for no new window, but a failed launch still lands on a
+            // modal ShellExecute dialog that hangs the call.
+            ("cmd", &["/C", "start", "/B", "app.exe"]),
+            ("cmd", &["/C", "start /B app.exe"]),
+            ("powershell", &["-Command", "Start-Process app.exe"]),
+            ("powershell", &["-Command", "saps app.exe"]),
+            ("pwsh", &["-Command", "Start-Process", "app.exe"]),
+        ];
+        for (exe, args) in denied {
+            let args: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
+            let assessment = assess_command(exe, &args);
+            assert_eq!(
+                assessment.decision,
+                PermissionDecision::Deny,
+                "{exe} {args:?} should be denied"
+            );
+            assert_eq!(
+                assessment.code,
+                CommandPolicyCode::DeniedDetachedWindow,
+                "{exe} {args:?} should be denied as a detached window request"
+            );
+        }
+
+        // `-NoNewWindow` turns off `UseShellExecute`, so failures surface as a
+        // PowerShell error; a literal `start` in a non-command position is not a
+        // launch request.
+        let allowed: [(&str, &[&str]); 3] = [
+            ("cmd", &["/C", "echo", "start"]),
+            ("powershell", &["-Command", "Start-Process -NoNewWindow app"]),
+            ("cmd", &["/C", "ver"]),
+        ];
+        for (exe, args) in allowed {
+            let args: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
+            let assessment = assess_command(exe, &args);
+            assert_ne!(
+                assessment.code,
+                CommandPolicyCode::DeniedDetachedWindow,
+                "{exe} {args:?} should not trip the detached window check"
+            );
+        }
     }
 }

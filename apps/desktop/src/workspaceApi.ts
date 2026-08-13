@@ -170,6 +170,10 @@ export async function browserReload(session: string): Promise<void> {
   await invoke("browser_reload", { session });
 }
 
+export async function browserForceReload(session: string): Promise<void> {
+  await invoke("browser_force_reload", { session });
+}
+
 export async function browserBack(session: string): Promise<void> {
   await invoke("browser_back", { session });
 }

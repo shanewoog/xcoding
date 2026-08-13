@@ -25,12 +25,40 @@ Ensure-PathPrefix "$env:APPDATA\npm"
 Ensure-PathPrefix "C:\Program Files\nodejs"
 
 $pnpm = if (Test-Path "D:\WORK\Npm\pnpm.cmd") { "D:\WORK\Npm\pnpm.cmd" } else { "pnpm" }
+$versionFile = Join-Path $Root "VERSION"
 $outDir = Join-Path $Root "dist\portable\XCoding"
 $frontendIndex = Join-Path $Root "apps\desktop\dist\index.html"
 $releaseCandidates = @(
   (Join-Path $Root "apps\desktop\src-tauri\target\release\xcoding-desktop.exe"),
   (Join-Path $Root "apps\desktop\src-tauri\target\release\XCoding.exe")
 )
+
+if (-not (Test-Path $versionFile)) {
+  throw "Version file missing: $versionFile"
+}
+$version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+if ($version -notmatch '^\d+\.\d+\.\d+$') {
+  throw "Invalid version in ${versionFile}: $version"
+}
+
+function Update-VersionField([string]$Path, [string]$Pattern, [string]$Version) {
+  $content = [System.IO.File]::ReadAllText($Path)
+  $matches = [regex]::Matches($content, $Pattern)
+  if ($matches.Count -ne 1) {
+    throw "Expected exactly one version field in $Path, found $($matches.Count)"
+  }
+  $updated = [regex]::Replace($content, $Pattern, {
+      param($match)
+      $match.Groups[1].Value + $Version + $match.Groups[2].Value
+    }, 1)
+  [System.IO.File]::WriteAllText($Path, $updated, [System.Text.UTF8Encoding]::new($false))
+}
+
+Update-VersionField (Join-Path $Root "apps\desktop\package.json") '(?m)^(\s*"version"\s*:\s*")[^"]+(".*)$' $version
+Update-VersionField (Join-Path $Root "package.json") '(?m)^(\s*"version"\s*:\s*")[^"]+(".*)$' $version
+Update-VersionField (Join-Path $Root "apps\desktop\src-tauri\Cargo.toml") '(?ms)\A(\[package\].*?^version\s*=\s*")[^"]+(".*)$' $version
+Update-VersionField (Join-Path $Root "apps\desktop\src-tauri\tauri.conf.json") '(?m)^(\s*"version"\s*:\s*")[^"]+(".*)$' $version
+Update-VersionField (Join-Path $Root "apps\desktop\src-tauri\Cargo.lock") '(?ms)(name = "xcoding-desktop"\r?\nversion = ")[^"]+(".*?dependencies = \[)' $version
 
 # Stop a running portable/desktop process so the release binary can be overwritten.
 Get-Process XCoding, xcoding-desktop -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -93,6 +121,8 @@ Set-Content -Path (Join-Path $outDir ".env.example") -Value $envExample -Encodin
 $readme = @"
 # XCoding Desktop (Portable / Green)
 
+Version: $version
+
 ## Run
 
 1. Copy this folder anywhere (USB / local disk).
@@ -127,4 +157,10 @@ Write-Host ""
 Write-Host "Portable package ready:"
 Write-Host "  $outDir"
 Write-Host "  $destExe"
+Write-Host "  Version: $version"
 Get-Item $destExe | Format-List Name, Length, FullName
+
+$parts = $version.Split('.')
+$nextVersion = "{0}.{1}.{2}" -f $parts[0], $parts[1], ([int]$parts[2] + 1)
+[System.IO.File]::WriteAllText($versionFile, "$nextVersion`n", [System.Text.UTF8Encoding]::new($false))
+Write-Host "  Next release version: $nextVersion"

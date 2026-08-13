@@ -1,4 +1,4 @@
-export const DEFAULT_UI_FONT_SIZE = 16;
+export const DEFAULT_UI_FONT_SIZE = 14;
 export const MIN_UI_FONT_SIZE = 14;
 export const MAX_UI_FONT_SIZE = 20;
 

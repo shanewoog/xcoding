@@ -93,6 +93,14 @@ export interface ModelCapabilities {
 export interface UserConfig {
   locale: string;
   mode: Mode;
+  /** Extra instructions appended to the system prompt on every turn. */
+  custom_instructions?: string;
+  /** Reply tone: default | pragmatic | friendly | concise | teaching. */
+  personality?: string;
+  /** Whether XCoding records short workspace facts after each turn. */
+  local_memory_enabled?: boolean;
+  /** Whether memory recording also runs on turns that used MCP tools. */
+  tool_memory_enabled?: boolean;
   /** Technical provider id used by sessions (currently always openai-compatible). */
   provider: string;
   model: string;

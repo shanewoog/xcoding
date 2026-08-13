@@ -1090,7 +1090,18 @@ impl<'a> AgentService<'a> {
             messages.push(ChatMessage::assistant_tool_calls(tool_calls.clone()));
             for provider_call in tool_calls {
                 self.ensure_not_cancelled_preserving(session.id, &last_partial)?;
-                let tool_call = protocol_tool_call(provider_call)?;
+                let tool_call = match protocol_tool_call(provider_call) {
+                    Ok(tool_call) => tool_call,
+                    Err(rejected) => {
+                        // A call we cannot decode is the model's problem to fix,
+                        // not a reason to end the session: hand the reason back
+                        // and let the next round retry.
+                        let (id, output) =
+                            self.record_rejected_tool_call(session, rejected, on_event)?;
+                        messages.push(ChatMessage::tool_result(&id, output));
+                        continue;
+                    }
+                };
                 if tool_call.name == ToolName::Mcp {
                     used_mcp_tool = true;
                 }
@@ -1790,6 +1801,45 @@ impl<'a> AgentService<'a> {
         );
         Ok(output)
     }
+
+    /// Record a call the provider asked for but we could not decode, and return
+    /// its id with the tool result so the caller keeps every queued tool call
+    /// paired with exactly one result.
+    ///
+    /// An unknown tool name has no `ToolCall` to put on screen, so it only gets
+    /// the transcript entry; a call whose arguments were unusable still shows a
+    /// failed card for the tool the model meant to run.
+    fn record_rejected_tool_call<F>(
+        &self,
+        session: &Session,
+        rejected: RejectedToolCall,
+        on_event: &mut F,
+    ) -> Result<(String, String), AgentError>
+    where
+        F: FnMut(SessionEvent),
+    {
+        let RejectedToolCall {
+            id,
+            tool_call,
+            reason,
+        } = rejected;
+        let error = ToolError::InvalidArguments(reason);
+        let Some(tool_call) = tool_call else {
+            let output = error.tool_result_value().to_string();
+            self.core.record_tool_message(session.id, &output)?;
+            return Ok((id, output));
+        };
+        self.emit(
+            on_event,
+            SessionEvent::ToolStart {
+                session_id: session.id,
+                summary: format!("Rejected {}", tool_call.name.as_str()),
+                tool_call: tool_call.clone(),
+            },
+        );
+        let output = self.record_tool_error(session, &tool_call, error, on_event)?;
+        Ok((id, output))
+    }
 }
 
 fn tool_execution_success(tool_call: &ToolCall, output: &Value) -> bool {
@@ -2129,8 +2179,8 @@ fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "run_command".to_owned(),
-            description: "Run an approved executable with an argument vector in the workspace root. Never use a shell.".to_owned(),
-            parameters: json!({ "type": "object", "properties": { "executable": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } } }, "required": ["executable"] }),
+            description: "Run an approved executable with an argument vector in the workspace root. Never use a shell, and never use `start` or `Start-Process` to detach a program: launch it directly instead. By default the call runs to completion, the whole spawned process tree is terminated when it returns, and a process that never exits is killed at the timeout with output=timed_out true plus whatever it printed. To start a project's own background service and keep it running, pass background=true: it returns immediately with the pid, is not terminated with the call, and produces no output.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "executable": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } }, "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock bound; defaults to 600. Ignored when background is true" }, "background": { "type": "boolean", "description": "Launch and return immediately, leaving the process running after the call; output is discarded. Defaults to false" } }, "required": ["executable"] }),
         },
         ToolDefinition {
             name: "git_status".to_owned(),
@@ -2220,18 +2270,65 @@ fn provider_tool_call(tool_call: &ToolCall) -> Result<ProviderToolCall, AgentErr
         id: tool_call.id.clone(),
         kind: "function".to_owned(),
         function: xcoding_providers::ProviderFunctionCall { name, arguments },
+        // Outbound direction: this call was already decoded, so nothing is cut off.
+        truncated: false,
     })
 }
 
-fn protocol_tool_call(provider_call: ProviderToolCall) -> Result<ToolCall, AgentError> {
-    let arguments = serde_json::from_str(&provider_call.function.arguments).map_err(|error| {
-        AgentError::InvalidProviderToolCall(format!(
-            "invalid tool arguments from provider: {error}"
-        ))
-    })?;
-    if let Some((server, tool)) = xcoding_mcp::decode_tool_name(&provider_call.function.name) {
+/// A provider tool call that could not be decoded.
+///
+/// The id is kept because the assistant tool-call message is already queued:
+/// a follow-up request where some call has no matching result is rejected by
+/// the provider, so every rejected call still owes one tool result.
+#[derive(Debug)]
+struct RejectedToolCall {
+    id: String,
+    /// Set when only the arguments were unusable, so the UI can still show a
+    /// card for the tool the model meant to run.
+    tool_call: Option<ToolCall>,
+    /// Why the call was rejected; becomes a `ToolError::InvalidArguments` when
+    /// recorded. Kept as a string so this stays small enough to return by value.
+    reason: String,
+}
+
+fn protocol_tool_call(provider_call: ProviderToolCall) -> Result<ToolCall, RejectedToolCall> {
+    let ProviderToolCall {
+        id,
+        function,
+        truncated,
+        ..
+    } = provider_call;
+    // Resolve the name first: a rejection that knows the tool can still be
+    // rendered, and only the arguments are usually at fault.
+    let mcp = xcoding_mcp::decode_tool_name(&function.name);
+    let name = match mcp {
+        Some(_) => Some(ToolName::Mcp),
+        None => serde_json::from_value(Value::String(function.name.clone())).ok(),
+    };
+    let Some(name) = name else {
+        return Err(RejectedToolCall {
+            id,
+            tool_call: None,
+            reason: format!("unsupported tool requested by provider: {}", function.name),
+        });
+    };
+    let arguments: Value = match serde_json::from_str(&function.arguments) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(RejectedToolCall {
+                tool_call: Some(ToolCall {
+                    id: id.clone(),
+                    name,
+                    arguments: json!({}),
+                }),
+                id,
+                reason: malformed_arguments_reason(&function.arguments, truncated, &error),
+            });
+        }
+    };
+    if let Some((server, tool)) = mcp {
         return Ok(ToolCall {
-            id: provider_call.id,
+            id,
             name: ToolName::Mcp,
             arguments: json!({
                 "server": server,
@@ -2240,17 +2337,31 @@ fn protocol_tool_call(provider_call: ProviderToolCall) -> Result<ToolCall, Agent
             }),
         });
     }
-    let name =
-        serde_json::from_value(Value::String(provider_call.function.name)).map_err(|error| {
-            AgentError::InvalidProviderToolCall(format!(
-                "unsupported tool requested by provider: {error}"
-            ))
-        })?;
     Ok(ToolCall {
-        id: provider_call.id,
+        id,
         name,
         arguments,
     })
+}
+
+/// Say whether the arguments were cut off upstream or simply written wrong, so
+/// the model retries the right way instead of hunting for a syntax mistake it
+/// never made.
+fn malformed_arguments_reason(
+    arguments: &str,
+    truncated: bool,
+    error: &serde_json::Error,
+) -> String {
+    if truncated {
+        return format!(
+            "cut off mid-stream after {} byte(s), so the JSON is incomplete. \
+             The upstream model stopped before it finished writing this call. \
+             Send the call again with a smaller payload, for example by splitting \
+             one large apply_patch into several smaller ones.",
+            arguments.len()
+        );
+    }
+    format!("not valid JSON: {error}")
 }
 
 fn execute_mcp_tool(
@@ -3586,6 +3697,7 @@ mod tests {
                 name: "mcp__demo__echo".to_owned(),
                 arguments: r#"{"text":"hi"}"#.to_owned(),
             },
+            truncated: false,
         };
         let protocol = protocol_tool_call(provider).expect("decode");
         assert_eq!(protocol.name, ToolName::Mcp);
@@ -3596,6 +3708,65 @@ mod tests {
         let round_trip = provider_tool_call(&protocol).expect("encode");
         assert_eq!(round_trip.function.name, "mcp__demo__echo");
         assert_eq!(round_trip.function.arguments, r#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn truncated_arguments_are_rejected_without_losing_the_call_id() {
+        let provider = ProviderToolCall {
+            id: "call_cut_off".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "apply_patch".to_owned(),
+                arguments: r#"{"path":"#.to_owned(),
+            },
+            truncated: true,
+        };
+        let rejected = protocol_tool_call(provider).expect_err("truncated call is rejected");
+        assert_eq!(rejected.id, "call_cut_off");
+        // The tool is known, so the UI still gets a card to fail.
+        let tool_call = rejected.tool_call.expect("known tool is still rendered");
+        assert_eq!(tool_call.name, ToolName::ApplyPatch);
+        assert_eq!(tool_call.id, "call_cut_off");
+        let message = rejected.reason;
+        assert!(message.contains("cut off mid-stream"), "{message}");
+        assert!(message.contains("8 byte(s)"), "{message}");
+        assert!(message.contains("apply_patch"), "{message}");
+    }
+
+    #[test]
+    fn malformed_arguments_are_not_blamed_on_truncation() {
+        let provider = ProviderToolCall {
+            id: "call_bad_json".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "read_file".to_owned(),
+                arguments: r#"{"path":,}"#.to_owned(),
+            },
+            truncated: false,
+        };
+        let rejected = protocol_tool_call(provider).expect_err("bad json is rejected");
+        assert!(rejected.tool_call.is_some());
+        let message = rejected.reason;
+        assert!(message.contains("not valid JSON"), "{message}");
+        assert!(!message.contains("cut off mid-stream"), "{message}");
+    }
+
+    #[test]
+    fn unknown_tool_names_are_rejected_without_a_tool_call() {
+        let provider = ProviderToolCall {
+            id: "call_unknown".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "teleport".to_owned(),
+                arguments: r#"{}"#.to_owned(),
+            },
+            truncated: false,
+        };
+        let rejected = protocol_tool_call(provider).expect_err("unknown tool is rejected");
+        assert_eq!(rejected.id, "call_unknown");
+        // `ToolName` cannot represent an unknown name, so there is no card to show.
+        assert!(rejected.tool_call.is_none());
+        assert!(rejected.reason.contains("teleport"), "{}", rejected.reason);
     }
 
     #[test]
