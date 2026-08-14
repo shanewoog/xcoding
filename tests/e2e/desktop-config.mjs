@@ -300,6 +300,14 @@ async function main() {
     /async fn import_project[\s\S]*?tauri::async_runtime::spawn_blocking/,
     "external project copies must run off the desktop event thread",
   );
+  assert.ok(desktopMainSource.includes("TrayIconBuilder"), "desktop should create a system tray icon");
+  assert.ok(desktopMainSource.includes('MenuItem::with_id(app, "show", "显示 XCoding"'), "tray should provide a show action");
+  assert.ok(desktopMainSource.includes('MenuItem::with_id(app, "quit", "退出"'), "tray should provide a quit action");
+  assert.ok(desktopMainSource.includes("show_menu_on_left_click(false)"), "tray left click should restore the window instead of opening the menu");
+  assert.ok(desktopMainSource.includes("WindowEvent::CloseRequested"), "main window close should be intercepted");
+  assert.ok(desktopMainSource.includes("api.prevent_close()"), "main window close should prevent process exit");
+  assert.ok(desktopMainSource.includes("restore_main_window"), "tray actions should restore the main window");
+  assert.ok(desktopMainSource.includes('"quit" => app.exit(0)'), "tray quit action should exit the process");
   const projectsSource = await readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/src/projects.rs"), "utf8");
   assert.ok(projectsSource.includes("pub fn import_project"), "projects.rs missing import_project");
   assert.ok(projectsSource.includes("copy_dir_recursive"), "projects.rs should copy external folders into workspace");

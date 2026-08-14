@@ -13,7 +13,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use xcoding_agent::AgentService;
 use xcoding_core::CoreService;
 use xcoding_protocol::{
@@ -403,6 +407,13 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn restore_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 fn main() {
     boot_log("main enter");
     std::panic::set_hook(Box::new(|info| {
@@ -426,6 +437,34 @@ fn main() {
                     return Err(error.into());
                 }
             }
+            let show_item = MenuItem::with_id(app, "show", "显示 XCoding", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let tray_icon = app
+                .default_window_icon()
+                .cloned()
+                .ok_or_else(|| "default window icon is unavailable".to_owned())?;
+            TrayIconBuilder::with_id("xcoding-tray")
+                .menu(&tray_menu)
+                .icon(tray_icon)
+                .tooltip("XCoding")
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => restore_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        restore_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             // Flip any sessions left in Running state by a previous process to Cancelled.
             // A blocking chat invoke cannot survive a process restart, so Running rows at
             // startup are always zombie rows that would otherwise lock the composer in queue mode.
@@ -439,6 +478,14 @@ fn main() {
             }
             boot_log("setup end");
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .manage(terminal::TerminalState {
             session: std::sync::Mutex::new(None),

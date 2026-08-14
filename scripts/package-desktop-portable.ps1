@@ -164,3 +164,56 @@ $parts = $version.Split('.')
 $nextVersion = "{0}.{1}.{2}" -f $parts[0], $parts[1], ([int]$parts[2] + 1)
 [System.IO.File]::WriteAllText($versionFile, "$nextVersion`n", [System.Text.UTF8Encoding]::new($false))
 Write-Host "  Next release version: $nextVersion"
+
+# Publish the release metadata and source changes, but never stage untracked files
+# such as local .env files or generated artifacts.
+$releaseGitPaths = @(
+  "VERSION",
+  "package.json",
+  "apps/desktop/package.json",
+  "apps/desktop/src-tauri/Cargo.toml",
+  "apps/desktop/src-tauri/Cargo.lock",
+  "apps/desktop/src-tauri/tauri.conf.json",
+  "apps/desktop/src-tauri/src/main.rs",
+  "tests/e2e/desktop-config.mjs",
+  "scripts/package-desktop-portable.ps1"
+)
+
+function Invoke-Git([string[]]$Arguments) {
+  & git @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "git $($Arguments -join ' ') failed with exit $LASTEXITCODE"
+  }
+}
+
+Invoke-Git @("diff", "--check", "--") + $releaseGitPaths
+Invoke-Git @("diff", "--cached", "--check", "--") + $releaseGitPaths
+
+$branch = (& git rev-parse --abbrev-ref HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch) -or $branch -eq "HEAD") {
+  throw "Cannot publish automatically from a detached HEAD"
+}
+& git remote get-url origin *> $null
+if ($LASTEXITCODE -ne 0) {
+  throw "Git remote 'origin' is not configured; release was not pushed"
+}
+
+Invoke-Git @("add", "--") + $releaseGitPaths
+Invoke-Git @("diff", "--cached", "--check", "--") + $releaseGitPaths
+
+$hasReleaseChanges = $false
+& git diff --quiet HEAD -- $releaseGitPaths
+if ($LASTEXITCODE -eq 1) {
+  $hasReleaseChanges = $true
+} elseif ($LASTEXITCODE -ne 0) {
+  throw "Could not determine release changes"
+}
+
+if ($hasReleaseChanges) {
+  Invoke-Git @("commit", "--only", "-m", "release: publish XCoding v$version", "--") + $releaseGitPaths
+} else {
+  Write-Host "No release file changes to commit."
+}
+
+Invoke-Git @("push", "origin", $branch)
+Write-Host "Published Git commit to origin/$branch"
