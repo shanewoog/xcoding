@@ -5361,6 +5361,9 @@ dependencies = [
 [[package]]
 name = "xcoding-context"
 version = "0.1.0"
+dependencies = [
+ "xcoding-mcp",
+]
 
 [[package]]
 name = "xcoding-core"
@@ -5377,7 +5380,7 @@ dependencies = [
 
 [[package]]
 name = "xcoding-desktop"
-version = "1.0.5"
+version = "1.0.9"
 dependencies = [
  "dotenvy",
  "pinyin",
@@ -5389,8 +5392,10 @@ dependencies = [
  "tauri-build",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
  "xcoding-agent",
  "xcoding-core",
+ "xcoding-mcp",
  "xcoding-protocol",
  "xcoding-providers",
 ]
@@ -5456,6 +5461,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "uuid",
+ "xcoding-mcp",
  "xcoding-policy",
  "xcoding-protocol",
 ]

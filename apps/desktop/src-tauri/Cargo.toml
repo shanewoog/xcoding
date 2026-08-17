@@ -1,6 +1,6 @@
 [package]
 name = "xcoding-desktop"
-version = "1.0.5"
+version = "1.0.9"
 description = "XCoding Desktop shell"
 authors = ["XCoding Contributors"]
 edition = "2024"
@@ -18,10 +18,12 @@ rfd = "0.15"
 tauri = { version = "2", features = ["unstable", "tray-icon"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 xcoding-agent = { path = "../../../crates/xcoding-agent" }
 xcoding-core = { path = "../../../crates/xcoding-core" }
 xcoding-protocol = { path = "../../../crates/xcoding-protocol" }
 xcoding-providers = { path = "../../../crates/xcoding-providers" }
+xcoding-mcp = { path = "../../../crates/xcoding-mcp" }
 
 [features]
 # Prefer production embedding by default. `tauri dev` disables this and uses devUrl.
