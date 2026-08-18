@@ -186,8 +186,11 @@ function Invoke-Git([string[]]$Arguments) {
   }
 }
 
-Invoke-Git @("diff", "--check", "--") + $releaseGitPaths
-Invoke-Git @("diff", "--cached", "--check", "--") + $releaseGitPaths
+# The release paths must reach git as part of one argument array. Writing
+# `Invoke-Git @(...) + $paths` binds only the literal array and discards the
+# rest, which drops the pathspec and lets git fall back to the whole worktree.
+Invoke-Git (@("diff", "--check", "--") + $releaseGitPaths)
+Invoke-Git (@("diff", "--cached", "--check", "--") + $releaseGitPaths)
 
 $branch = (& git rev-parse --abbrev-ref HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch) -or $branch -eq "HEAD") {
@@ -198,8 +201,8 @@ if ($LASTEXITCODE -ne 0) {
   throw "Git remote 'origin' is not configured; release was not pushed"
 }
 
-Invoke-Git @("add", "--") + $releaseGitPaths
-Invoke-Git @("diff", "--cached", "--check", "--") + $releaseGitPaths
+Invoke-Git (@("add", "--") + $releaseGitPaths)
+Invoke-Git (@("diff", "--cached", "--check", "--") + $releaseGitPaths)
 
 $hasReleaseChanges = $false
 & git diff --quiet HEAD -- $releaseGitPaths
@@ -210,7 +213,7 @@ if ($LASTEXITCODE -eq 1) {
 }
 
 if ($hasReleaseChanges) {
-  Invoke-Git @("commit", "--only", "-m", "release: publish XCoding v$version", "--") + $releaseGitPaths
+  Invoke-Git (@("commit", "--only", "-m", "release: publish XCoding v$version", "--") + $releaseGitPaths)
 } else {
   Write-Host "No release file changes to commit."
 }
