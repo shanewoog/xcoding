@@ -1,6 +1,6 @@
 {
   "name": "xcoding",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "private": true,
   "description": "Local-first AI coding agent platform",
   "packageManager": "pnpm@11.9.0",
@@ -10,7 +10,7 @@
     "cli": "node apps/cli/dist/index.js",
     "desktop": "pnpm --dir apps/desktop dev",
     "test:e2e": "node tests/e2e/run.mjs",
-    "verify:fast": "pnpm check && node tests/e2e/run.mjs --no-build desktop-review.mjs desktop-activity.mjs desktop-layout.mjs desktop-gitnexus.mjs desktop-config.mjs desktop-message-links.mjs task-summary.mjs surface-parity.mjs",
+    "verify:fast": "pnpm check && node tests/e2e/run.mjs --no-build desktop-review.mjs desktop-activity.mjs desktop-layout.mjs desktop-gitnexus.mjs desktop-config.mjs desktop-message-links.mjs desktop-theme.mjs task-summary.mjs surface-parity.mjs",
     "verify:affected": "node scripts/verify-affected.mjs",
     "verify:full": "pnpm check && node tests/e2e/run.mjs",
     "test:acceptance": "node tests/acceptance/run.mjs",
