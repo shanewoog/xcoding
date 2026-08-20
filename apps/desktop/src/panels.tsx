@@ -18,6 +18,12 @@ import {
   browserForceReload,
   browserHide,
   browserNavigate,
+  browserPasswordCapture,
+  browserPasswordDelete,
+  browserPasswordFill,
+  browserPasswordReveal,
+  browserPasswordSave,
+  browserPasswordsList,
   browserPrint,
   browserReload,
   browserScreenshot,
@@ -40,6 +46,7 @@ import {
   type GitNexusCommandResult,
   type GitNexusStatus,
   type GitNexusSymbol,
+  type BrowserPasswordEntry,
 } from "./workspaceApi";
 
 export type ToolPanelTab = "review" | "browser" | "files" | "code";
@@ -939,6 +946,12 @@ function BuiltInBrowserPanel({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<BrowserHistoryEntry[]>(() => loadBrowserHistory());
   const [historyQuery, setHistoryQuery] = useState("");
+  const [passwords, setPasswords] = useState<BrowserPasswordEntry[]>([]);
+  const [passwordOrigin, setPasswordOrigin] = useState("");
+  const [passwordUsername, setPasswordUsername] = useState("");
+  const [passwordValue, setPasswordValue] = useState("");
+  // Only the entry the user explicitly revealed keeps its plaintext, and only in memory.
+  const [revealedPassword, setRevealedPassword] = useState<{ id: string; value: string } | null>(null);
   const [downloadDir, setDownloadDir] = useState("");
   const contentRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -1448,6 +1461,96 @@ function BuiltInBrowserPanel({
     setStatus(t(locale, "browser.unavailable"));
   }, [locale]);
 
+  const refreshPasswords = useCallback(async () => {
+    try {
+      setPasswords(await browserPasswordsList());
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
+  const savePassword = useCallback(async () => {
+    try {
+      await browserPasswordSave(passwordOrigin, passwordUsername, passwordValue);
+      setPasswordValue("");
+      setStatus(t(locale, "browser.passwordSaved"));
+      await refreshPasswords();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [locale, passwordOrigin, passwordUsername, passwordValue, refreshPasswords]);
+
+  const removePassword = useCallback(
+    async (id: string) => {
+      try {
+        await browserPasswordDelete(id);
+        setRevealedPassword((current) => (current?.id === id ? null : current));
+        await refreshPasswords();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [refreshPasswords],
+  );
+
+  const togglePasswordReveal = useCallback(
+    async (id: string) => {
+      if (revealedPassword?.id === id) {
+        setRevealedPassword(null);
+        return;
+      }
+      try {
+        setRevealedPassword({ id, value: await browserPasswordReveal(id) });
+        setError(null);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [revealedPassword?.id],
+  );
+
+  const capturePassword = useCallback(async () => {
+    setMenuOpen(false);
+    try {
+      const captured = await browserPasswordCapture(sessionKey);
+      setStatus(t(locale, captured ? "browser.passwordCaptured" : "browser.passwordNoForm"));
+      setError(null);
+      if (captured) await refreshPasswords();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [locale, refreshPasswords, sessionKey]);
+
+  const fillPassword = useCallback(async () => {
+    setMenuOpen(false);
+    try {
+      const filled = await browserPasswordFill(sessionKey);
+      setStatus(t(locale, filled ? "browser.passwordFilled" : "browser.passwordNoMatch"));
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [locale, sessionKey]);
+
+  // Opening the section reloads the list and offers the page in view as the site,
+  // so adding the credential for the current login page takes one field less.
+  useEffect(() => {
+    if (!settingsOpen || settingsSection !== "autofill") {
+      setRevealedPassword(null);
+      return;
+    }
+    void refreshPasswords();
+    setPasswordOrigin((current) => {
+      if (current) return current;
+      try {
+        return activeTab?.url ? new URL(activeTab.url).origin : "";
+      } catch {
+        return "";
+      }
+    });
+  }, [activeTab?.url, refreshPasswords, settingsOpen, settingsSection]);
+
   const historyGroups = useMemo(() => {
     const needle = historyQuery.trim().toLowerCase();
     const groups: Array<{ key: string; label: string; entries: BrowserHistoryEntry[] }> = [];
@@ -1629,6 +1732,12 @@ function BuiltInBrowserPanel({
               <div className="browser-menu-divider" role="separator" />
               <button type="button" role="menuitem" onClick={markUnavailable}>
                 {t(locale, "browser.importCookies")}
+              </button>
+              <button type="button" role="menuitem" disabled={!hasPage} onClick={() => void capturePassword()}>
+                {t(locale, "browser.passwordCaptureMenu")}
+              </button>
+              <button type="button" role="menuitem" disabled={!hasPage} onClick={() => void fillPassword()}>
+                {t(locale, "browser.passwordFillMenu")}
               </button>
               <button type="button" role="menuitem" className="browser-menu-advance" onClick={() => openSettings("autofill")}>
                 <span>{t(locale, "browser.passwords")}</span>
@@ -1936,20 +2045,76 @@ function BuiltInBrowserPanel({
                         <div className="browser-settings-label">{t(locale, "browser.passwordManager")}</div>
                         <div className="browser-settings-help">{t(locale, "browser.passwordManagerHelp")}</div>
                       </div>
-                      <button type="button" className="quiet-button" disabled title={t(locale, "browser.unavailable")}>
-                        {t(locale, "browser.manage")}
+                      <button type="button" className="quiet-button" disabled={!hasPage} onClick={() => void capturePassword()}>
+                        {t(locale, "browser.passwordCapture")}
                       </button>
                     </div>
-                    <div className="browser-settings-row">
-                      <div>
-                        <div className="browser-settings-label">{t(locale, "browser.contactInfo")}</div>
-                        <div className="browser-settings-help">{t(locale, "browser.contactInfoHelp")}</div>
-                      </div>
-                      <button type="button" className="quiet-button" disabled title={t(locale, "browser.unavailable")}>
-                        {t(locale, "browser.manage")}
+                    <div className="browser-settings-row browser-password-form">
+                      <input
+                        value={passwordOrigin}
+                        onChange={(event) => setPasswordOrigin(event.target.value)}
+                        placeholder={t(locale, "browser.passwordSite")}
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                      <input
+                        value={passwordUsername}
+                        onChange={(event) => setPasswordUsername(event.target.value)}
+                        placeholder={t(locale, "browser.passwordUsername")}
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                      <input
+                        type="password"
+                        value={passwordValue}
+                        onChange={(event) => setPasswordValue(event.target.value)}
+                        placeholder={t(locale, "browser.passwordValue")}
+                        autoComplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        className="quiet-button"
+                        disabled={!passwordOrigin.trim() || !passwordValue}
+                        onClick={() => void savePassword()}
+                      >
+                        {t(locale, "browser.passwordAdd")}
                       </button>
                     </div>
                   </div>
+
+                  {passwords.length === 0 ? (
+                    <div className="browser-settings-card">
+                      <div className="browser-settings-empty">{t(locale, "browser.passwordEmpty")}</div>
+                    </div>
+                  ) : (
+                    <div className="browser-settings-card">
+                      {passwords.map((entry) => (
+                        <div key={entry.id} className="browser-settings-row">
+                          <div>
+                            <div className="browser-settings-label">{entry.origin}</div>
+                            <div className="browser-settings-help">
+                              {entry.username || t(locale, "browser.passwordNoUsername")}
+                              {revealedPassword?.id === entry.id ? ` · ${revealedPassword.value}` : " · ••••••••"}
+                            </div>
+                          </div>
+                          <div className="browser-password-actions">
+                            <button type="button" className="quiet-button" onClick={() => void togglePasswordReveal(entry.id)}>
+                              {t(locale, revealedPassword?.id === entry.id ? "browser.passwordHide" : "browser.passwordShow")}
+                            </button>
+                            <button
+                              type="button"
+                              className="browser-icon-button"
+                              title={t(locale, "browser.passwordRemove")}
+                              aria-label={t(locale, "browser.passwordRemove")}
+                              onClick={() => void removePassword(entry.id)}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : null}
 

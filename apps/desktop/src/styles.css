@@ -3041,6 +3041,29 @@ body.is-resizing-right-panel .browser-surface-host {
   padding: 0.9rem;
 }
 
+.browser-settings-row.browser-password-form {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.browser-password-form input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  flex: 1 1 8rem;
+  font: inherit;
+  min-width: 0;
+  padding: 0.32rem 0.5rem;
+}
+
+.browser-password-actions {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.35rem;
+}
+
 .browser-settings-risk {
   color: var(--amber);
   font-size: 0.75rem;

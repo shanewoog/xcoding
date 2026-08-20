@@ -240,6 +240,47 @@ export async function browserDownloadDir(): Promise<string> {
   return invoke<string>("browser_download_dir");
 }
 
+export type BrowserPasswordEntry = {
+  id: string;
+  origin: string;
+  username: string;
+  updatedAt: number;
+};
+
+export type BrowserCapturedPassword = {
+  origin: string;
+  username: string;
+};
+
+export async function browserPasswordsList(): Promise<BrowserPasswordEntry[]> {
+  return invoke<BrowserPasswordEntry[]>("browser_passwords_list");
+}
+
+export async function browserPasswordSave(
+  origin: string,
+  username: string,
+  password: string,
+): Promise<BrowserPasswordEntry> {
+  return invoke<BrowserPasswordEntry>("browser_password_save", { origin, username, password });
+}
+
+export async function browserPasswordDelete(id: string): Promise<boolean> {
+  return invoke<boolean>("browser_password_delete", { id });
+}
+
+// The plaintext only travels for an explicit reveal, so callers must not store it.
+export async function browserPasswordReveal(id: string): Promise<string> {
+  return invoke<string>("browser_password_reveal", { id });
+}
+
+export async function browserPasswordCapture(session: string): Promise<BrowserCapturedPassword | null> {
+  return invoke<BrowserCapturedPassword | null>("browser_password_capture", { session });
+}
+
+export async function browserPasswordFill(session: string): Promise<boolean> {
+  return invoke<boolean>("browser_password_fill", { session });
+}
+
 export async function browserScreenshot(session: string): Promise<string> {
   return invoke<string>("browser_save_snapshot", { session });
 }

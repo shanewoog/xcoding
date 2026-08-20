@@ -709,6 +709,82 @@ pub async fn browser_download_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn browser_passwords_list() -> Result<Vec<crate::passwords::PasswordEntry>, String> {
+  Ok(crate::passwords::list(&crate::passwords::store_path()))
+}
+
+#[tauri::command]
+pub async fn browser_password_save(
+  origin: String,
+  username: String,
+  password: String,
+) -> Result<crate::passwords::PasswordEntry, String> {
+  crate::passwords::save(
+    &crate::passwords::store_path(),
+    &origin,
+    &username,
+    &password,
+  )
+}
+
+#[tauri::command]
+pub async fn browser_password_delete(id: String) -> Result<bool, String> {
+  crate::passwords::delete(&crate::passwords::store_path(), &id)
+}
+
+#[tauri::command]
+pub async fn browser_password_reveal(id: String) -> Result<String, String> {
+  crate::passwords::reveal(&crate::passwords::store_path(), &id)
+}
+
+/// Reads the sign-in form the page currently shows and stores what it finds.
+/// The reply never carries the password itself.
+#[tauri::command]
+pub async fn browser_password_capture(
+  app: AppHandle,
+  session: Option<String>,
+) -> Result<Option<crate::passwords::CapturedPassword>, String> {
+  let webview = require_browser(&app, &session_key(session))?;
+  let (tx, rx) = mpsc::channel();
+  webview
+    .eval_with_callback(crate::passwords::capture_script(), move |raw| {
+      let _ = tx.send(raw);
+    })
+    .map_err(map_err)?;
+  let raw = rx
+    .recv_timeout(std::time::Duration::from_secs(5))
+    .map_err(|_| "the page did not answer in time".to_owned())?;
+  let Some((captured, password)) = crate::passwords::parse_capture(&raw) else {
+    return Ok(None);
+  };
+  crate::passwords::save(
+    &crate::passwords::store_path(),
+    &captured.origin,
+    &captured.username,
+    &password,
+  )?;
+  Ok(Some(captured))
+}
+
+/// Writes the credential saved for the page's origin into its sign-in form.
+#[tauri::command]
+pub async fn browser_password_fill(
+  app: AppHandle,
+  session: Option<String>,
+) -> Result<bool, String> {
+  let webview = require_browser(&app, &session_key(session))?;
+  let url = webview.url().map_err(map_err)?.to_string();
+  let Some((username, password)) =
+    crate::passwords::credential_for(&crate::passwords::store_path(), &url)?
+  else {
+    return Ok(false);
+  };
+  let script = crate::passwords::fill_script(&username, &password)?;
+  webview.eval(script).map_err(map_err)?;
+  Ok(true)
+}
+
+#[tauri::command]
 pub async fn browser_save_snapshot(
   app: AppHandle,
   session: Option<String>,

@@ -18,7 +18,11 @@ rfd = "0.15"
 tauri = { version = "2", features = ["unstable", "tray-icon"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+  "Win32_System_Threading",
+] }
 xcoding-agent = { path = "../../../crates/xcoding-agent" }
 xcoding-core = { path = "../../../crates/xcoding-core" }
 xcoding-protocol = { path = "../../../crates/xcoding-protocol" }

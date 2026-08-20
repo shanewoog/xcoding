@@ -3,6 +3,7 @@
 
 mod browser;
 mod gitnexus;
+mod passwords;
 mod projects;
 mod terminal;
 mod workspace_tools;
@@ -900,7 +901,13 @@ fn main() {
             browser::browser_eval,
             browser::browser_find,
             browser::browser_download_dir,
-            browser::browser_save_snapshot
+            browser::browser_save_snapshot,
+            browser::browser_passwords_list,
+            browser::browser_password_save,
+            browser::browser_password_delete,
+            browser::browser_password_reveal,
+            browser::browser_password_capture,
+            browser::browser_password_fill
         ])
         .run(tauri::generate_context!());
 
