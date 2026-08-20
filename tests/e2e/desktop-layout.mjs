@@ -238,6 +238,18 @@ assert.ok(panelsSource.includes("browserFind") && apiSource.includes("browserFin
 assert.ok(panelsSource.includes("browserScreenshot") && apiSource.includes("browserScreenshot"), "browser screenshot wiring missing");
 assert.ok(panelsSource.includes("browser-settings") && panelsSource.includes("xcoding.browserSettings.v1"), "browser settings panel missing");
 assert.ok(panelsSource.includes("browser-devicebar") && panelsSource.includes("deviceToolbar"), "browser device toolbar missing");
+assert.ok(
+  panelsSource.includes("xcoding.browserHistory.v1") &&
+    panelsSource.includes('className="browser-history"') &&
+    panelsSource.includes("recordHistory(nextUrl"),
+  "browser history panel must persist visits recorded from navigation events",
+);
+assert.ok(
+  panelsSource.includes("const overlayOpen = settingsOpen || historyOpen") &&
+    panelsSource.includes("!overlayOpen && !menuOpen && !refreshMenuOpen"),
+  "history panel must hide the native webview like the settings panel does",
+);
+assert.ok(cssSource.includes(".browser-history"), "browser history styles missing");
 assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser-settings"), "browser extra styles missing");
   assert.ok(cssSource.includes("--right-panel-width"), "right panel width CSS variable missing");
   assert.ok(cssSource.includes(".right-panel-resizer"), "right panel resizer styles missing");

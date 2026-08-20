@@ -27,6 +27,7 @@ import type {
   CreateProjectResult,
   ImportProjectResult,
   ListModelsResult,
+  LocalPluginItem,
   ProjectDir,
   ProviderAuthStatus,
   ProviderModel,
@@ -60,7 +61,17 @@ import {
   sessionMetaLine,
   sessionStateKey,
 } from "./layout";
-import { applyUiFontSize, loadUiFontSize, saveUiFontSize } from "./appearance";
+import {
+  applyTheme,
+  applyUiFontSize,
+  loadTheme,
+  loadUiFontSize,
+  normalizeTheme,
+  saveTheme,
+  saveUiFontSize,
+  THEMES,
+  type Theme,
+} from "./appearance";
 import { isLocale, loadLocale, saveLocale, t, type Locale, type MessageKey } from "./i18n";
 import {
   EmptyQuickActions,
@@ -952,7 +963,27 @@ function renderInlineMarkdown(
       }
       cursor = end;
     } else if (code) {
-      parts.push(<code key={`${keyBase}-code-${key}`}>{code}</code>);
+      // A model may still fence a URL in backticks. Keep the monospace look but
+      // make it open like any other link instead of rendering dead text.
+      const fenced = splitLinkPunctuation(code.trim());
+      if (BARE_URL_PATTERN.test(fenced.url) && !fenced.suffix) {
+        const url = fenced.url;
+        parts.push(
+          <a
+            key={`${keyBase}-code-link-${key}`}
+            className="assistant-message-link"
+            href={url}
+            onClick={(event) => {
+              event.preventDefault();
+              onOpenLink(url);
+            }}
+          >
+            <code>{url}</code>
+          </a>,
+        );
+      } else {
+        parts.push(<code key={`${keyBase}-code-${key}`}>{code}</code>);
+      }
       cursor = end;
     } else if (bold) {
       parts.push(
@@ -1046,6 +1077,8 @@ function renderMarkdownBlocks(content: string, onOpenLink: (url: string) => void
 }
 
 const INLINE_TOKEN_PATTERN = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\r\n]+)`|\*\*([^*\r\n]+)\*\*|(https?:\/\/[^\s<>()\]]+)/g;
+// Anchored and non-global on purpose: a /g regex keeps lastIndex between tests.
+const BARE_URL_PATTERN = /^https?:\/\/[^\s<>()\]]+$/;
 const UNORDERED_ITEM_PATTERN = /^\s*[-*]\s+(.*)$/;
 const ORDERED_ITEM_PATTERN = /^\s*\d+[.)]\s+(.*)$/;
 
@@ -1114,7 +1147,7 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
   );
 }
 
-type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "defaults";
+type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults";
 
 export function App() {
   useEffect(() => {
@@ -1127,6 +1160,7 @@ export function App() {
 
   const [locale, setLocale] = useState<Locale>(() => loadLocale());
   const [uiFontSize, setUiFontSize] = useState(() => loadUiFontSize());
+  const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [workspaceHome, setWorkspaceHome] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const workspaceRootRef = useRef("");
@@ -1175,6 +1209,7 @@ export function App() {
   const [commandDenylistText, setCommandDenylistText] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const autoRestoredSessionRef = useRef(false);
   const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
   const [followUpQueue, setFollowUpQueue] = useState<Array<{ id: string; sessionId: string; text: string; images: ChatImageAttachment[] }>>([]);
@@ -1242,6 +1277,16 @@ export function App() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
+  const [pluginItems, setPluginItems] = useState<LocalPluginItem[]>([]);
+  const [pluginFilter, setPluginFilter] = useState<"all" | "mcp" | "skill">("all");
+  const [pluginSearch, setPluginSearch] = useState("");
+  const [pluginLoading, setPluginLoading] = useState(false);
+  const [pluginNotice, setPluginNotice] = useState<string | null>(null);
+  const [pluginEditorOpen, setPluginEditorOpen] = useState(false);
+  const [mcpName, setMcpName] = useState("");
+  const [mcpCommand, setMcpCommand] = useState("");
+  const [mcpArgs, setMcpArgs] = useState("");
+  const [mcpEnv, setMcpEnv] = useState("");
   const [userConfigReady, setUserConfigReady] = useState(false); // used to delay hydration
   const conversationRef = useRef<HTMLDivElement | null>(null);
   const conversationAtBottomRef = useRef(true);
@@ -1410,6 +1455,15 @@ export function App() {
     };
   }, [composerImages.length, messages, model, modelContextWindows, prompt, streamedText]);
 
+  const filteredPluginItems = useMemo(() => {
+    const query = pluginSearch.trim().toLowerCase();
+    return pluginItems.filter((item) => {
+      if (pluginFilter !== "all" && item.kind !== pluginFilter) return false;
+      if (!query) return true;
+      return `${item.name} ${item.description} ${item.source}`.toLowerCase().includes(query);
+    });
+  }, [pluginFilter, pluginItems, pluginSearch]);
+
   useEffect(() => {
     followUpQueueRef.current = followUpQueue;
   }, [followUpQueue]);
@@ -1423,6 +1477,11 @@ export function App() {
     applyUiFontSize(uiFontSize);
     saveUiFontSize(uiFontSize);
   }, [uiFontSize]);
+
+  useEffect(() => {
+    applyTheme(theme);
+    saveTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1714,6 +1773,102 @@ export function App() {
     }
   }, [workspaceRoot]);
 
+  const loadLocalPlugins = useCallback(async () => {
+    if (!isTauriRuntime) {
+      setPluginItems([]);
+      return;
+    }
+    setPluginLoading(true);
+    setPluginNotice(null);
+    try {
+      const items = await invoke<LocalPluginItem[]>("list_local_plugins", {
+        workspaceRoot: workspaceRoot.trim() || null,
+      });
+      setPluginItems(items);
+    } catch (cause) {
+      setPluginNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPluginLoading(false);
+    }
+  }, [workspaceRoot]);
+
+  const toggleLocalPlugin = useCallback(async (item: LocalPluginItem) => {
+    if (!isTauriRuntime) return;
+    setPluginNotice(null);
+    try {
+      await invoke("set_plugin_enabled", {
+        kind: item.kind,
+        source: item.source,
+        name: item.name,
+        enabled: !item.enabled,
+      });
+      setPluginItems((current) => current.map((entry) =>
+        entry.id === item.id
+          ? { ...entry, enabled: !item.enabled, status: !item.enabled ? "enabled" : "disabled" }
+          : entry,
+      ));
+      setPluginNotice(t(locale, "settings.plugins.nextTurn"));
+    } catch (cause) {
+      setPluginNotice(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [locale]);
+
+  const importLocalSkill = useCallback(async () => {
+    if (!isTauriRuntime) {
+      setPluginNotice(t(locale, "error.tauriOnly"));
+      return;
+    }
+    setPluginNotice(null);
+    try {
+      const sourcePath = await invoke<string | null>("pick_directory", {
+        title: t(locale, "settings.plugins.skillFolder"),
+      });
+      if (!sourcePath?.trim()) return;
+      await invoke("import_local_skill", { sourcePath: sourcePath.trim() });
+      await loadLocalPlugins();
+      setPluginNotice(t(locale, "settings.plugins.nextTurn"));
+    } catch (cause) {
+      setPluginNotice(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [loadLocalPlugins, locale]);
+
+  const saveLocalMcp = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!isTauriRuntime) {
+      setPluginNotice(t(locale, "error.tauriOnly"));
+      return;
+    }
+    const args = mcpArgs.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    const env: Record<string, string> = {};
+    for (const line of mcpEnv.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+      const separator = line.indexOf("=");
+      const key = separator > 0 ? line.slice(0, separator).trim() : "";
+      if (separator <= 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        setPluginNotice(t(locale, "settings.plugins.invalidEnv"));
+        return;
+      }
+      env[key] = line.slice(separator + 1);
+    }
+    setPluginNotice(null);
+    try {
+      await invoke("add_local_mcp", {
+        name: mcpName.trim(),
+        command: mcpCommand.trim(),
+        args,
+        env,
+      });
+      setMcpName("");
+      setMcpCommand("");
+      setMcpArgs("");
+      setMcpEnv("");
+      setPluginEditorOpen(false);
+      await loadLocalPlugins();
+      setPluginNotice(t(locale, "settings.plugins.nextTurn"));
+    } catch (cause) {
+      setPluginNotice(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [loadLocalPlugins, locale, mcpArgs, mcpCommand, mcpEnv, mcpName]);
+
   const refreshDiskProjects = useCallback(async () => {
     void 0;
     if (!isTauriRuntime) return;
@@ -1730,11 +1885,17 @@ export function App() {
     }
   }, [workspaceHome]);
 
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(async (options: { autoRestore?: boolean } = {}) => {
     if (!isTauriRuntime) return;
     try {
       const nextSessions = await invoke<Session[]>("list_sessions", { workspaceRoot: null });
       setSessions(nextSessions);
+      if (options.autoRestore && !autoRestoredSessionRef.current) {
+        autoRestoredSessionRef.current = true;
+        if (nextSessions.length > 0) {
+          setActiveSessionId(nextSessions[0].id);
+        }
+      }
     } catch {
       // Keep the last known session list if refresh fails.
     }
@@ -1743,7 +1904,7 @@ export function App() {
 
   const refreshWorkspace = useCallback(async () => {
     await refreshDiskProjects();
-    await Promise.all([refreshSessions(), loadWorkspaceConfig(), refreshProviderStatus()]);
+    await Promise.all([refreshSessions({ autoRestore: true }), loadWorkspaceConfig(), refreshProviderStatus()]);
   }, [loadWorkspaceConfig, refreshDiskProjects, refreshProviderStatus, refreshSessions]);
 
   useEffect(() => {
@@ -1764,6 +1925,12 @@ export function App() {
       void loadLocalMemoryCount();
     }
   }, [view, settingsTab, workspaceRoot, loadLocalMemoryCount]);
+
+  useEffect(() => {
+    if (view === "settings" && settingsTab === "plugins") {
+      void loadLocalPlugins();
+    }
+  }, [view, settingsTab, loadLocalPlugins]);
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
@@ -3655,6 +3822,7 @@ export function App() {
       { id: "context", labelKey: "settings.tab.context" },
       { id: "vision", labelKey: "settings.tab.vision" },
       { id: "personalization", labelKey: "settings.tab.personalization" },
+      { id: "plugins", labelKey: "settings.tab.plugins" },
       { id: "defaults", labelKey: "settings.tab.defaults" },
     ];
     const focusSettingsTab = (tab: SettingsTab) => {
@@ -3742,6 +3910,21 @@ export function App() {
               >
                 {Array.from({ length: 7 }, (_, index) => 14 + index).map((size) => (
                   <option key={size} value={size}>{size}px</option>
+                ))}
+              </select>
+            </label>
+            <label className="settings-locale-control" htmlFor="ui-theme">
+              <span>{t(locale, "settings.theme")}</span>
+              <select
+                id="ui-theme"
+                aria-label={t(locale, "settings.theme")}
+                value={theme}
+                onChange={(event) => setTheme(normalizeTheme(event.target.value))}
+              >
+                {THEMES.map((option) => (
+                  <option key={option} value={option}>
+                    {t(locale, `settings.theme.${option}` as MessageKey)}
+                  </option>
                 ))}
               </select>
             </label>
@@ -4014,6 +4197,112 @@ export function App() {
               </div>
               <p className="mode-help">{t(locale, "field.circuitBreakerHint")}</p>
             </div>
+          </section>
+
+          <section
+            className="settings-card plugins-settings-card"
+            role="tabpanel"
+            id="settings-panel-plugins"
+            aria-labelledby="settings-tab-plugins"
+            aria-label={t(locale, "settings.plugins.title")}
+            hidden={settingsTab !== "plugins"}
+          >
+            <div className="plugins-header">
+              <div>
+                <p className="panel-title">{t(locale, "settings.plugins.title")}</p>
+                <p className="mode-help">{t(locale, "settings.plugins.subtitle")}</p>
+              </div>
+              <div className="plugins-actions">
+                <button type="button" className="quiet-button" onClick={() => void importLocalSkill()} disabled={pluginLoading}>
+                  {t(locale, "settings.plugins.importSkill")}
+                </button>
+                <button type="button" className="primary-button" onClick={() => setPluginEditorOpen((open) => !open)} disabled={pluginLoading}>
+                  {t(locale, "settings.plugins.addMcp")}
+                </button>
+              </div>
+            </div>
+
+            {pluginEditorOpen ? (
+              <form className="plugin-editor" onSubmit={(event) => void saveLocalMcp(event)}>
+                <div className="plugin-editor-grid">
+                  <label>
+                    <span className="field-label">{t(locale, "settings.plugins.mcpName")}</span>
+                    <input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required spellCheck={false} />
+                  </label>
+                  <label>
+                    <span className="field-label">{t(locale, "settings.plugins.mcpCommand")}</span>
+                    <input value={mcpCommand} onChange={(event) => setMcpCommand(event.target.value)} required spellCheck={false} />
+                  </label>
+                  <label>
+                    <span className="field-label">{t(locale, "settings.plugins.mcpArgs")}</span>
+                    <textarea rows={3} value={mcpArgs} onChange={(event) => setMcpArgs(event.target.value)} spellCheck={false} />
+                  </label>
+                  <label>
+                    <span className="field-label">{t(locale, "settings.plugins.mcpEnv")}</span>
+                    <textarea rows={3} value={mcpEnv} onChange={(event) => setMcpEnv(event.target.value)} spellCheck={false} />
+                  </label>
+                </div>
+                <div className="plugin-editor-actions">
+                  <button type="button" className="quiet-button" onClick={() => setPluginEditorOpen(false)}>{t(locale, "action.cancel")}</button>
+                  <button type="submit" className="primary-button">{t(locale, "action.saveSettings")}</button>
+                </div>
+              </form>
+            ) : null}
+
+            <div className="plugin-toolbar">
+              <div className="plugin-filter" role="tablist" aria-label={t(locale, "settings.plugins.title")}>
+                {(["all", "mcp", "skill"] as const).map((filter) => (
+                  <button
+                    key={filter}
+                    type="button"
+                    className={pluginFilter === filter ? "active" : undefined}
+                    aria-selected={pluginFilter === filter}
+                    onClick={() => setPluginFilter(filter)}
+                  >
+                    {t(locale, `settings.plugins.${filter}` as MessageKey)}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="plugin-search"
+                value={pluginSearch}
+                onChange={(event) => setPluginSearch(event.target.value)}
+                placeholder={t(locale, "settings.plugins.search")}
+                aria-label={t(locale, "settings.plugins.search")}
+              />
+            </div>
+
+            {pluginNotice ? <p className="plugin-notice" role="status">{pluginNotice}</p> : null}
+            {pluginLoading ? <p className="mode-help">{t(locale, "settings.plugins.loading")}</p> : null}
+            {!pluginLoading && filteredPluginItems.length === 0 ? (
+              <p className="plugin-empty">{t(locale, "settings.plugins.empty")}</p>
+            ) : (
+              <div className="plugin-list" role="list">
+                {filteredPluginItems.map((item) => (
+                  <div className="plugin-list-item" role="listitem" key={item.id}>
+                    <div className={`plugin-icon ${item.kind}`} aria-hidden="true">{item.kind === "mcp" ? "M" : "S"}</div>
+                    <div className="plugin-meta">
+                      <strong>{item.name}</strong>
+                      <span>{item.description}</span>
+                      <small className="plugin-source">
+                        {item.source === "user" ? t(locale, "settings.plugins.userSource") : t(locale, "settings.plugins.workspaceSource")}
+                        {item.kind === "mcp" && item.env_keys?.length ? ` · ${item.env_keys.join(", ")}` : ""}
+                      </small>
+                    </div>
+                    <button
+                      type="button"
+                      className={`plugin-toggle${item.enabled ? " on" : ""}`}
+                      aria-label={`${item.name}: ${item.enabled ? t(locale, "settings.plugins.enabled") : t(locale, "settings.plugins.disabled")}`}
+                      aria-pressed={item.enabled}
+                      onClick={() => void toggleLocalPlugin(item)}
+                      disabled={pluginLoading}
+                    >
+                      <span className="plugin-toggle-knob" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           <section

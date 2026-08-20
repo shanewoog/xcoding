@@ -36,6 +36,18 @@ export interface PingResult {
   version: string;
 }
 
+export interface LocalPluginItem {
+  id: string;
+  kind: "mcp" | "skill";
+  name: string;
+  description: string;
+  source: "user" | "workspace";
+  enabled: boolean;
+  status: string;
+  tool_count?: number;
+  env_keys?: string[];
+}
+
 export interface ProviderAuthStatus {
   ready: boolean;
   has_api_key: boolean;

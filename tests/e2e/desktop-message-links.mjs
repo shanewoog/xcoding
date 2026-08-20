@@ -25,6 +25,10 @@ async function main() {
   );
   assert.ok(appSource.includes('className="assistant-message-link"'), "assistant links must use the link visual treatment");
   assert.ok(appSource.includes("onOpenLink(url);"), "assistant link clicks must be handled by the application");
+  assert.ok(
+    appSource.includes("BARE_URL_PATTERN.test(fenced.url)") && appSource.includes("<code>{url}</code>"),
+    "a URL wrapped in backticks must still render as a clickable link",
+  );
   assert.ok(appSource.includes('openRightPanel("browser");'), "assistant link clicks must reveal the built-in browser");
   assert.ok(appSource.includes("browserNavigation={browserNavigation}"), "assistant link navigation must be passed to the right tool panel");
   assert.ok(appSource.includes("<AssistantMessageBody content={streamedText}"), "streaming assistant messages must render links before completion");
@@ -33,7 +37,11 @@ async function main() {
   assert.ok(panelsSource.includes("forceEmbedded?: boolean"), "browser navigation must support an embedded override");
   assert.ok(panelsSource.includes("openUrl(navigation.url, { forceEmbedded: true })"), "assistant links must always open in the built-in browser");
   assert.ok(panelsSource.includes("navigation={browserNavigation}"), "browser panel must receive requested URLs");
-  assert.ok(panelsSource.includes("!settingsOpen && !menuOpen"), "opening the browser menu must hide the native webview so the menu remains visible");
+  assert.ok(
+    panelsSource.includes("const overlayOpen = settingsOpen || historyOpen") &&
+      panelsSource.includes("!overlayOpen && !menuOpen"),
+    "opening the browser menu must hide the native webview so the menu remains visible",
+  );
   assert.ok(
     panelsSource.includes('label: "Surface Pro 7"') &&
       panelsSource.includes('label: "iPhone 15 Pro Max"') &&

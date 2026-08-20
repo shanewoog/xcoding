@@ -726,6 +726,14 @@ const GALAXY_S24_ULTRA_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36";
 
 const BROWSER_SETTINGS_KEY = "xcoding.browserSettings.v1";
+const BROWSER_HISTORY_KEY = "xcoding.browserHistory.v1";
+const BROWSER_HISTORY_LIMIT = 200;
+
+type BrowserHistoryEntry = {
+  url: string;
+  title: string;
+  visitedAt: number;
+};
 
 const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   openWebTarget: "browser",
@@ -778,6 +786,65 @@ function saveBrowserSettings(next: BrowserSettingsState): void {
   } catch {
     // ignore storage access failures
   }
+}
+
+function loadBrowserHistory(): BrowserHistoryEntry[] {
+  try {
+    if (typeof localStorage === "undefined") return [];
+    const raw = localStorage.getItem(BROWSER_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const entries: BrowserHistoryEntry[] = [];
+    for (const item of parsed) {
+      const record = item as Partial<BrowserHistoryEntry>;
+      const url = typeof record?.url === "string" ? record.url : "";
+      if (!url) continue;
+      entries.push({
+        url,
+        title: typeof record?.title === "string" ? record.title : "",
+        visitedAt: Number.isFinite(record?.visitedAt) ? Number(record?.visitedAt) : Date.now(),
+      });
+      if (entries.length >= BROWSER_HISTORY_LIMIT) break;
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+function saveBrowserHistory(entries: BrowserHistoryEntry[]): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(BROWSER_HISTORY_KEY, JSON.stringify(entries));
+    }
+  } catch {
+    // ignore storage access failures
+  }
+}
+
+function historyDayKey(visitedAt: number): string {
+  const date = new Date(visitedAt);
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function formatHistoryDay(locale: Locale, visitedAt: number): string {
+  const day = historyDayKey(visitedAt);
+  const now = Date.now();
+  if (day === historyDayKey(now)) return t(locale, "browser.historyToday");
+  if (day === historyDayKey(now - 86_400_000)) return t(locale, "browser.historyYesterday");
+  return new Date(visitedAt).toLocaleDateString(locale === "zh-CN" ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatHistoryTime(locale: Locale, visitedAt: number): string {
+  return new Date(visitedAt).toLocaleTimeString(locale === "zh-CN" ? "zh-CN" : "en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function createBrowserTab(partial?: Partial<BrowserTabState>): BrowserTabState {
@@ -869,6 +936,9 @@ function BuiltInBrowserPanel({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<BrowserSettingsSection>("general");
   const [settings, setSettings] = useState<BrowserSettingsState>(() => loadBrowserSettings());
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<BrowserHistoryEntry[]>(() => loadBrowserHistory());
+  const [historyQuery, setHistoryQuery] = useState("");
   const [downloadDir, setDownloadDir] = useState("");
   const contentRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -885,8 +955,10 @@ function BuiltInBrowserPanel({
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0];
   const hasPage = Boolean(activeTab?.url);
+  // Settings and history replace the page area, so page actions stay disabled while either is open.
+  const overlayOpen = settingsOpen || historyOpen;
   // The native child webview is always above the desktop DOM on Windows, so hide it while a DOM menu is open.
-  const showWebview = active && hasPage && !settingsOpen && !menuOpen && !refreshMenuOpen;
+  const showWebview = active && hasPage && !overlayOpen && !menuOpen && !refreshMenuOpen;
 
   useEffect(() => {
     onStateChangeRef.current({ tabs, activeTabId, handledNavigationId });
@@ -896,6 +968,17 @@ function BuiltInBrowserPanel({
     setSettings((current) => {
       const next = { ...current, ...patch };
       saveBrowserSettings(next);
+      return next;
+    });
+  }, []);
+
+  const recordHistory = useCallback((url: string, title: string) => {
+    if (!url || url === "about:blank") return;
+    setHistory((current) => {
+      const entry: BrowserHistoryEntry = { url, title: title.trim() || url, visitedAt: Date.now() };
+      // Revisiting a URL moves it to the top instead of stacking duplicates.
+      const next = [entry, ...current.filter((item) => item.url !== url)].slice(0, BROWSER_HISTORY_LIMIT);
+      saveBrowserHistory(next);
       return next;
     });
   }, []);
@@ -1025,6 +1108,7 @@ function BuiltInBrowserPanel({
         ),
       );
       lastUrlRef.current = nextUrl;
+      recordHistory(nextUrl, payload.title || "");
       void applyBrowserScrollbarStyle().catch(() => undefined);
     }).then((fn) => {
       unlisten = fn;
@@ -1032,7 +1116,7 @@ function BuiltInBrowserPanel({
     return () => {
       unlisten?.();
     };
-  }, [applyBrowserScrollbarStyle, sessionKey]);
+  }, [applyBrowserScrollbarStyle, recordHistory, sessionKey]);
 
   useEffect(() => {
     // RightToolsPanel removes this component when the side panel closes.
@@ -1113,11 +1197,21 @@ function BuiltInBrowserPanel({
         event.preventDefault();
         setFindOpen(true);
         setSettingsOpen(false);
+        setHistoryOpen(false);
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "h") {
+        event.preventDefault();
+        setMenuOpen(false);
+        setSettingsOpen(false);
+        setFindOpen(false);
+        setHistoryQuery("");
+        setHistoryOpen(true);
+        void browserHide(sessionKey).catch(() => undefined);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [active]);
+  }, [active, sessionKey]);
 
   const updateActive = useCallback((patch: Partial<BrowserTabState>) => {
     setTabs((current) =>
@@ -1144,6 +1238,7 @@ function BuiltInBrowserPanel({
       updateActive({ input: next, url: next, title: next });
       lastUrlRef.current = next;
       setSettingsOpen(false);
+      setHistoryOpen(false);
       await syncSurface({ url: next, show: true });
     },
     [settings.openLocalTarget, settings.openWebTarget, syncSurface, updateActive],
@@ -1168,6 +1263,7 @@ function BuiltInBrowserPanel({
     setTabs((current) => [...current, tab]);
     setActiveTabId(tab.id);
     setSettingsOpen(false);
+    setHistoryOpen(false);
     setFindOpen(false);
     void browserHide(sessionKey).catch(() => undefined);
   }, [locale, sessionKey]);
@@ -1201,11 +1297,13 @@ function BuiltInBrowserPanel({
       // Re-clicking the open tab must not reload the page it already shows.
       if (id === activeTabIdRef.current) {
         setSettingsOpen(false);
+        setHistoryOpen(false);
         void syncSurface({ show: true });
         return;
       }
       setActiveTabId(id);
       setSettingsOpen(false);
+      setHistoryOpen(false);
       const tab = tabs.find((item) => item.id === id);
       if (tab?.url) void syncSurface({ url: tab.url, show: true });
       else void browserHide(sessionKey).catch(() => undefined);
@@ -1278,22 +1376,54 @@ function BuiltInBrowserPanel({
     }
   }, [downloadDir]);
 
+  const openHistory = useCallback(() => {
+    setMenuOpen(false);
+    setRefreshMenuOpen(false);
+    setSettingsOpen(false);
+    setFindOpen(false);
+    setHistoryQuery("");
+    setHistoryOpen(true);
+    void browserHide(sessionKey).catch(() => undefined);
+  }, [sessionKey]);
+
+  const removeHistoryEntry = useCallback((url: string) => {
+    setHistory((current) => {
+      const next = current.filter((item) => item.url !== url);
+      saveBrowserHistory(next);
+      return next;
+    });
+  }, []);
+
+  const clearHistory = useCallback(() => {
+    setHistory([]);
+    saveBrowserHistory([]);
+  }, []);
+
+  const openHistoryEntry = useCallback(
+    (url: string) => {
+      void openUrl(url, { forceEmbedded: true });
+    },
+    [openUrl],
+  );
+
   const clearBrowsingData = useCallback(async () => {
     setMenuOpen(false);
     try {
       await browserClearData(sessionKey);
+      clearHistory();
       setStatus(t(locale, "browser.clearData"));
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [locale, sessionKey]);
+  }, [clearHistory, locale, sessionKey]);
 
   const openSettings = useCallback((section: BrowserSettingsSection = "general") => {
     setMenuOpen(false);
     setSettingsSection(section);
     setSettingsOpen(true);
     setFindOpen(false);
+    setHistoryOpen(false);
     void browserHide(sessionKey).catch(() => undefined);
   }, [sessionKey]);
 
@@ -1317,6 +1447,19 @@ function BuiltInBrowserPanel({
     setMenuOpen(false);
     setStatus(t(locale, "browser.unavailable"));
   }, [locale]);
+
+  const historyGroups = useMemo(() => {
+    const needle = historyQuery.trim().toLowerCase();
+    const groups: Array<{ key: string; label: string; entries: BrowserHistoryEntry[] }> = [];
+    for (const entry of history) {
+      if (needle && !`${entry.title} ${entry.url}`.toLowerCase().includes(needle)) continue;
+      const key = historyDayKey(entry.visitedAt);
+      const last = groups[groups.length - 1];
+      if (last && last.key === key) last.entries.push(entry);
+      else groups.push({ key, label: formatHistoryDay(locale, entry.visitedAt), entries: [entry] });
+    }
+    return groups;
+  }, [history, historyQuery, locale]);
 
   return (
     <div className="builtin-browser">
@@ -1356,7 +1499,7 @@ function BuiltInBrowserPanel({
             className="browser-icon-button"
             title={t(locale, "browser.back")}
             aria-label={t(locale, "browser.back")}
-            disabled={!hasPage || settingsOpen}
+            disabled={!hasPage || overlayOpen}
             onClick={() => void browserBack(sessionKey).catch((cause) => setError(String(cause)))}
           >
             ←
@@ -1366,7 +1509,7 @@ function BuiltInBrowserPanel({
             className="browser-icon-button"
             title={t(locale, "browser.forward")}
             aria-label={t(locale, "browser.forward")}
-            disabled={!hasPage || settingsOpen}
+            disabled={!hasPage || overlayOpen}
             onClick={() => void browserForward(sessionKey).catch((cause) => setError(String(cause)))}
           >
             →
@@ -1377,7 +1520,7 @@ function BuiltInBrowserPanel({
             onContextMenu={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              if (!hasPage || settingsOpen) return;
+              if (!hasPage || overlayOpen) return;
               setMenuOpen(false);
               setRefreshMenuOpen(true);
             }}
@@ -1387,7 +1530,7 @@ function BuiltInBrowserPanel({
               className="browser-icon-button"
               title={t(locale, "browser.reload")}
               aria-label={t(locale, "browser.reload")}
-              disabled={!hasPage || settingsOpen}
+              disabled={!hasPage || overlayOpen}
               onClick={() => void browserReload(sessionKey).catch((cause) => setError(String(cause)))}
             >
               ↻
@@ -1397,7 +1540,7 @@ function BuiltInBrowserPanel({
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={!hasPage || settingsOpen}
+                  disabled={!hasPage || overlayOpen}
                   onClick={() => {
                     setRefreshMenuOpen(false);
                     void browserForceReload(sessionKey).catch((cause) => setError(String(cause)));
@@ -1416,7 +1559,7 @@ function BuiltInBrowserPanel({
             onChange={(event) => updateActive({ input: event.target.value })}
             placeholder={t(locale, "browser.urlPlaceholder")}
             spellCheck={false}
-            disabled={settingsOpen}
+            disabled={overlayOpen}
           />
         </form>
 
@@ -1435,7 +1578,7 @@ function BuiltInBrowserPanel({
               <button
                 type="button"
                 role="menuitem"
-                disabled={!hasPage || settingsOpen}
+                disabled={!hasPage || overlayOpen}
                 onClick={() => {
                   setMenuOpen(false);
                   setFindOpen(true);
@@ -1446,7 +1589,7 @@ function BuiltInBrowserPanel({
               <button
                 type="button"
                 role="menuitem"
-                disabled={!hasPage || settingsOpen}
+                disabled={!hasPage || overlayOpen}
                 onClick={() => {
                   setMenuOpen(false);
                   void browserPrint(sessionKey).catch((cause) => setError(String(cause)));
@@ -1480,7 +1623,7 @@ function BuiltInBrowserPanel({
               >
                 {deviceOpen ? t(locale, "browser.hideDeviceToolbar") : t(locale, "browser.deviceToolbar")}
               </button>
-              <button type="button" role="menuitem" disabled={!hasPage || settingsOpen} onClick={() => void takeScreenshot()}>
+              <button type="button" role="menuitem" disabled={!hasPage || overlayOpen} onClick={() => void takeScreenshot()}>
                 {t(locale, "browser.screenshot")}
               </button>
               <div className="browser-menu-divider" role="separator" />
@@ -1489,6 +1632,10 @@ function BuiltInBrowserPanel({
               </button>
               <button type="button" role="menuitem" className="browser-menu-advance" onClick={() => openSettings("autofill")}>
                 <span>{t(locale, "browser.passwords")}</span>
+                <span aria-hidden="true">›</span>
+              </button>
+              <button type="button" role="menuitem" className="browser-menu-advance" onClick={openHistory}>
+                <span>{t(locale, "browser.history")}</span>
                 <span aria-hidden="true">›</span>
               </button>
               <button type="button" role="menuitem" onClick={() => void openDownloads()}>
@@ -1519,7 +1666,7 @@ function BuiltInBrowserPanel({
         </div>
       </div>
 
-      {findOpen && !settingsOpen ? (
+      {findOpen && !overlayOpen ? (
         <div className="browser-findbar">
           <input
             ref={findInputRef}
@@ -1547,7 +1694,7 @@ function BuiltInBrowserPanel({
         </div>
       ) : null}
 
-      {deviceOpen && !settingsOpen ? (
+      {deviceOpen && !overlayOpen ? (
         <div className="browser-devicebar">
           <label className="browser-device-field">
             <span>{t(locale, "browser.deviceSize")}</span>
@@ -1622,8 +1769,76 @@ function BuiltInBrowserPanel({
       {error ? <p className="error-message browser-error">{error}</p> : null}
       {status ? <p className="browser-status">{status}</p> : null}
 
-      <div className={`browser-content${deviceOpen && !settingsOpen ? " device-mode" : ""}`} ref={contentRef}>
-        {settingsOpen ? (
+      <div className={`browser-content${deviceOpen && !overlayOpen ? " device-mode" : ""}`} ref={contentRef}>
+        {historyOpen ? (
+          <div className="browser-history">
+            <div className="browser-settings-header">
+              <div>
+                <div className="browser-settings-title">{t(locale, "browser.historyTitle")}</div>
+                <div className="browser-settings-sub">{t(locale, "browser.historySub")}</div>
+              </div>
+              <button type="button" className="quiet-button" onClick={() => setHistoryOpen(false)}>
+                {t(locale, "browser.backToBrowser")}
+              </button>
+            </div>
+
+            <div className="browser-history-tools">
+              <input
+                value={historyQuery}
+                onChange={(event) => setHistoryQuery(event.target.value)}
+                placeholder={t(locale, "browser.historySearch")}
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={history.length === 0}
+                onClick={clearHistory}
+              >
+                {t(locale, "browser.clearHistory")}
+              </button>
+            </div>
+
+            {historyGroups.length === 0 ? (
+              <div className="browser-settings-card">
+                <div className="browser-settings-empty">
+                  {history.length === 0 ? t(locale, "browser.historyEmpty") : t(locale, "browser.historyNoMatch")}
+                </div>
+              </div>
+            ) : (
+              historyGroups.map((group) => (
+                <div key={group.key} className="browser-history-group">
+                  <div className="browser-history-day">{group.label}</div>
+                  <div className="browser-settings-card">
+                    {group.entries.map((entry) => (
+                      <div key={`${group.key}-${entry.url}`} className="browser-history-row">
+                        <span className="browser-history-time">{formatHistoryTime(locale, entry.visitedAt)}</span>
+                        <button
+                          type="button"
+                          className="browser-history-main"
+                          title={entry.url}
+                          onClick={() => openHistoryEntry(entry.url)}
+                        >
+                          <span className="browser-history-title">{entry.title || entry.url}</span>
+                          <span className="browser-history-url">{entry.url}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="browser-icon-button"
+                          title={t(locale, "browser.historyRemove")}
+                          aria-label={t(locale, "browser.historyRemove")}
+                          onClick={() => removeHistoryEntry(entry.url)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        ) : settingsOpen ? (
           <div className="browser-settings">
             <div className="browser-settings-header">
               <div>
