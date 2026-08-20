@@ -1,0 +1,10 @@
+# Normalize text files to LF in the index and in the working tree so that
+# e2e assertions matching literal "\n" in source files behave identically
+# on every platform, regardless of core.autocrlf.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF on checkout.
+*.ps1 text eol=crlf
+
+*.ico binary
+*.wasm binary
