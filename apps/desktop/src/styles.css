@@ -3240,7 +3240,10 @@ body.is-resizing-right-panel .browser-surface-host {
   padding: 0;
 }
 .right-tools-review {
+  display: grid;
+  gap: 0.75rem;
   max-width: 70ch;
+  min-width: 0;
 }
 
 .bottom-terminal {
@@ -3524,6 +3527,46 @@ body.is-resizing-right-panel .browser-surface-host {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.bottom-files-meta {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.bottom-files-crumbs {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.bottom-files-crumb {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  padding: 0.1rem 0.3rem;
+}
+.bottom-files-crumb:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+.bottom-files-crumb + .bottom-files-crumb::before {
+  content: "\\";
+  color: var(--text-muted);
+  margin-right: 0.25rem;
+}
+.bottom-files-filter {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.78rem;
+  padding: 0.3rem 0.45rem;
+  width: 100%;
+}
 .bottom-files-list {
   display: grid;
   gap: 0.2rem;
@@ -3542,6 +3585,125 @@ body.is-resizing-right-panel .browser-surface-host {
 .bottom-file-item:hover {
   background: var(--bg-hover);
   border-color: var(--border);
+}
+
+.file-viewer {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+.file-viewer-body {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 70vh;
+  min-width: 0;
+  overflow: auto;
+  padding: 0.65rem;
+  tab-size: 2;
+  white-space: pre;
+}
+.file-viewer-line {
+  display: flex;
+  gap: 0.6rem;
+}
+.file-viewer-gutter {
+  color: var(--text-muted);
+  flex: none;
+  min-width: 3ch;
+  text-align: right;
+  user-select: none;
+}
+.file-viewer-text {
+  min-width: 0;
+  white-space: pre;
+}
+.review-preview {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.review-changes {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.review-changes-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 0.45rem;
+}
+.review-changes-title {
+  color: var(--text);
+  flex: 1;
+  font-size: 0.82rem;
+}
+.review-changes-stat {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+.review-changes-list {
+  display: grid;
+  gap: 0.2rem;
+}
+.review-change-item {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text);
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: 2.4ch minmax(0, 1fr) auto;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+.review-change-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+.review-change-status {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.review-change-path {
+  align-items: baseline;
+  display: flex;
+  font-size: 0.78rem;
+  gap: 0.4rem;
+  min-width: 0;
+  overflow: hidden;
+}
+.review-change-dir {
+  color: var(--text-muted);
+  flex: 1;
+  font-size: 0.72rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-change-name {
+  flex: none;
+  white-space: nowrap;
+}
+.review-change-stat {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.review-diff {
+  max-height: 70vh;
+  overflow: auto;
+}
+.diff-line.context {
+  color: var(--text-secondary);
 }
 
 .empty-chat {

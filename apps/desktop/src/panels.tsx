@@ -33,6 +33,8 @@ import {
   browserShow,
   fetchGitEnvironment,
   fetchGitNexusStatus,
+  fetchWorkspaceChanges,
+  fetchWorkspaceFileDiff,
   formatDiffStat,
   listWorkspaceEntries,
   normalizeBrowserUrl,
@@ -41,12 +43,17 @@ import {
   openPath,
   queryGitNexus,
   impactGitNexus,
+  readWorkspaceFile,
   type DirEntryInfo,
   type GitEnvironment,
   type GitNexusCommandResult,
   type GitNexusStatus,
   type GitNexusSymbol,
   type BrowserPasswordEntry,
+  type WorkspaceChangedFile,
+  type WorkspaceChanges,
+  type WorkspaceFileDiff,
+  type WorkspaceFileContent,
 } from "./workspaceApi";
 
 export type ToolPanelTab = "review" | "browser" | "files" | "code";
@@ -127,6 +134,221 @@ function parentRelative(path: string): string {
   const parts = path.replace(/\//g, "\\").split("\\").filter(Boolean);
   parts.pop();
   return parts.join("\\");
+}
+
+type PathCrumb = { label: string; path: string };
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function pathCrumbs(path: string): PathCrumb[] {
+  const parts = path.replace(/\//g, "\\").split("\\").filter(Boolean);
+  const crumbs: PathCrumb[] = [];
+  let current = "";
+  for (const part of parts) {
+    current = current ? `${current}\\${part}` : part;
+    crumbs.push({ label: part, path: current });
+  }
+  return crumbs;
+}
+
+type DiffLine = { kind: "add" | "remove" | "meta" | "context"; text: string };
+
+// Classify unified diff lines so the viewer can color them like a review tool.
+function buildUnifiedDiffLines(diff: string): DiffLine[] {
+  const lines: DiffLine[] = [];
+  for (const line of diff.split("\n")) {
+    if (
+      line.startsWith("diff --git") ||
+      line.startsWith("index ") ||
+      line.startsWith("--- ") ||
+      line.startsWith("+++ ") ||
+      line.startsWith("@@") ||
+      line.startsWith("new file mode") ||
+      line.startsWith("deleted file mode") ||
+      line.startsWith("similarity index") ||
+      line.startsWith("rename ")
+    ) {
+      lines.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (line.startsWith("+")) {
+      lines.push({ kind: "add", text: line });
+      continue;
+    }
+    if (line.startsWith("-")) {
+      lines.push({ kind: "remove", text: line });
+      continue;
+    }
+    lines.push({ kind: "context", text: line });
+  }
+  return lines;
+}
+
+function changeStatusLabel(file: WorkspaceChangedFile): string {
+  return file.untracked ? "U" : file.status.replace(/\s+/g, "") || "M";
+}
+
+// Show the file name first and the folder after it, so long paths truncate on
+// the part that matters least.
+function splitChangePath(path: string): { name: string; dir: string } {
+  const parts = path.replace(/\//g, "\\").split("\\").filter(Boolean);
+  const name = parts.pop() ?? path;
+  return { name, dir: parts.join("\\") };
+}
+
+// Review tab: the working-tree change list plus a unified diff per file, so a
+// change can be read here instead of in an external tool.
+function ReviewChangesPanel({
+  locale,
+  active,
+  workspaceRoot,
+}: {
+  locale: Locale;
+  active: boolean;
+  workspaceRoot: string;
+}) {
+  const [changes, setChanges] = useState<WorkspaceChanges | null>(null);
+  const [selected, setSelected] = useState<WorkspaceChangedFile | null>(null);
+  const [diff, setDiff] = useState<WorkspaceFileDiff | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadChanges = useCallback(async () => {
+    const root = workspaceRoot.trim();
+    if (!root) {
+      setChanges(null);
+      setError(t(locale, "env.needProject"));
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      setChanges(await fetchWorkspaceChanges(root));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [locale, workspaceRoot]);
+
+  const openDiff = useCallback(
+    async (file: WorkspaceChangedFile) => {
+      const root = workspaceRoot.trim();
+      if (!root) return;
+      setSelected(file);
+      setLoading(true);
+      setError(null);
+      try {
+        setDiff(await fetchWorkspaceFileDiff(root, file.path, file.untracked));
+      } catch (cause) {
+        setDiff(null);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [workspaceRoot],
+  );
+
+  useEffect(() => {
+    if (!active) return;
+    void loadChanges();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, workspaceRoot]);
+
+  useEffect(() => {
+    setSelected(null);
+    setDiff(null);
+  }, [workspaceRoot]);
+
+  const diffLines = useMemo(() => (diff ? buildUnifiedDiffLines(diff.diff) : []), [diff]);
+
+  if (selected && diff) {
+    return (
+      <div className="review-changes">
+        <div className="review-changes-toolbar">
+          <button
+            type="button"
+            className="quiet-button"
+            onClick={() => {
+              setSelected(null);
+              setDiff(null);
+            }}
+          >
+            {t(locale, "review.backToChanges")}
+          </button>
+          <code className="bottom-files-path" title={diff.path}>
+            {diff.path}
+          </code>
+          <button type="button" className="quiet-button" onClick={() => void openDiff(selected)} disabled={loading}>
+            {t(locale, "action.refresh")}
+          </button>
+        </div>
+        {error ? <p className="error-message">{error}</p> : null}
+        {diff.binary ? <p className="env-muted">{t(locale, "review.diffBinary")}</p> : null}
+        {!diff.binary && diff.diff.trim() === "" ? <p className="env-muted">{t(locale, "review.diffEmpty")}</p> : null}
+        {!diff.binary && diff.diff.trim() !== "" ? (
+          <pre className="diff-preview review-diff">
+            {diffLines.map((line, index) => (
+              <span key={index} className={`diff-line ${line.kind}`}>
+                {line.text || " "}
+              </span>
+            ))}
+          </pre>
+        ) : null}
+        {diff.truncated ? <p className="env-muted">{t(locale, "review.diffTruncated")}</p> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="review-changes">
+      <div className="review-changes-toolbar">
+        <strong className="review-changes-title">{t(locale, "review.changesTitle")}</strong>
+        {changes?.is_repo ? (
+          <span className="review-changes-stat">
+            {formatDiffStat(changes.insertions, changes.deletions)}
+          </span>
+        ) : null}
+        <button type="button" className="quiet-button" onClick={() => void loadChanges()} disabled={loading}>
+          {t(locale, "action.refresh")}
+        </button>
+      </div>
+      {error ? <p className="error-message">{error}</p> : null}
+      {loading ? <p className="env-muted">{t(locale, "env.loading")}</p> : null}
+      {changes && !changes.is_repo ? <p className="env-muted">{t(locale, "env.notRepo")}</p> : null}
+      {changes?.is_repo && changes.files.length === 0 ? (
+        <p className="env-muted">{t(locale, "env.noChanges")}</p>
+      ) : null}
+      {changes?.is_repo && changes.files.length > 0 ? (
+        <div className="review-changes-list">
+          {changes.files.map((file) => {
+            const crumb = splitChangePath(file.path);
+            return (
+              <button
+                key={file.path}
+                type="button"
+                className="review-change-item"
+                onClick={() => void openDiff(file)}
+                title={file.path}
+              >
+                <span className="review-change-status">{changeStatusLabel(file)}</span>
+                <span className="review-change-path">
+                  <span className="review-change-name">{crumb.name}</span>
+                  {crumb.dir ? <span className="review-change-dir">{crumb.dir}</span> : null}
+                </span>
+                <span className="review-change-stat">{formatDiffStat(file.insertions, file.deletions)}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function EmptyQuickActions({ locale, onOpen }: EmptyQuickActionsProps) {
@@ -2522,6 +2744,9 @@ export function RightToolsPanel({
   const [entries, setEntries] = useState<DirEntryInfo[]>([]);
   const [filesError, setFilesError] = useState<string | null>(null);
   const [filesLoading, setFilesLoading] = useState(false);
+  const [viewedFile, setViewedFile] = useState<WorkspaceFileContent | null>(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
+  const [fileFilter, setFileFilter] = useState("");
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const loadFiles = useCallback(
@@ -2536,6 +2761,7 @@ export function RightToolsPanel({
       try {
         const next = await listWorkspaceEntries(workspaceRoot.trim(), relative || "");
         setFilePath(relative || "");
+        setFileFilter("");
         setEntries(next);
       } catch (cause) {
         setFilesError(cause instanceof Error ? cause.message : String(cause));
@@ -2546,11 +2772,55 @@ export function RightToolsPanel({
     [locale, workspaceRoot],
   );
 
+  // Text files open inside the panel; only binary or oversized files are handed
+  // to the operating system.
+  const openFileInPanel = useCallback(
+    async (entry: DirEntryInfo) => {
+      const root = workspaceRoot.trim();
+      if (!root) {
+        setFilesError(t(locale, "env.needProject"));
+        return;
+      }
+      setViewerLoading(true);
+      setFilesError(null);
+      try {
+        const content = await readWorkspaceFile(root, entry.path);
+        if (content.binary || content.too_large) {
+          setViewedFile(null);
+          setFilesError(t(locale, content.binary ? "panel.fileBinary" : "panel.fileTooLarge"));
+          await openPath(joinWorkspacePath(root, entry.path));
+          return;
+        }
+        setViewedFile(content);
+      } catch (cause) {
+        setFilesError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setViewerLoading(false);
+      }
+    },
+    [locale, workspaceRoot],
+  );
+
   useEffect(() => {
     if (!open || tab !== "files") return;
     void loadFiles(filePath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, tab, workspaceRoot]);
+
+  useEffect(() => {
+    setViewedFile(null);
+  }, [workspaceRoot]);
+
+  const visibleEntries = useMemo(() => {
+    const needle = fileFilter.trim().toLowerCase();
+    if (!needle) return entries;
+    return entries.filter((entry) => entry.name.toLowerCase().includes(needle));
+  }, [entries, fileFilter]);
+
+  const viewedFileLines = useMemo(
+    () => (viewedFile ? viewedFile.text.replace(/\n$/, "").split("\n") : []),
+    [viewedFile],
+  );
 
   const onRightPanelResizeStart = (event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -2577,13 +2847,11 @@ export function RightToolsPanel({
 
   const openEntry = (entry: DirEntryInfo) => {
     if (entry.is_dir) {
+      setViewedFile(null);
       void loadFiles(entry.path);
       return;
     }
-    const absolute = joinWorkspacePath(workspaceRoot, entry.path);
-    void openPath(absolute).catch((cause) => {
-      setFilesError(cause instanceof Error ? cause.message : String(cause));
-    });
+    void openFileInPanel(entry);
   };
 
   return (
@@ -2621,7 +2889,8 @@ export function RightToolsPanel({
       <div className={`right-tools-body${tab === "browser" ? " is-browser" : ""}`}>
         {tab === "review" ? (
           <div className="right-tools-review">
-            {reviewContent || <p className="env-muted">{t(locale, "panel.reviewEmpty")}</p>}
+            {reviewContent}
+            <ReviewChangesPanel locale={locale} active={open && tab === "review"} workspaceRoot={workspaceRoot} />
           </div>
         ) : null}
 
@@ -2640,33 +2909,109 @@ export function RightToolsPanel({
 
         {tab === "files" ? (
           <div className="bottom-files">
-            <div className="bottom-files-toolbar">
-              <button
-                type="button"
-                className="quiet-button"
-                disabled={!filePath}
-                onClick={() => void loadFiles(parentRelative(filePath))}
-              >
-                {t(locale, "panel.up")}
-              </button>
-              <code className="bottom-files-path">{filePath || "."}</code>
-              <button type="button" className="quiet-button" onClick={() => void loadFiles(filePath)} disabled={filesLoading}>
-                {t(locale, "action.refresh")}
-              </button>
-            </div>
-            {filesError ? <p className="error-message">{filesError}</p> : null}
-            {filesLoading ? <p className="env-muted">{t(locale, "env.loading")}</p> : null}
-            <div className="bottom-files-list">
-              {entries.map((entry) => (
-                <button key={entry.path} type="button" className="bottom-file-item" onClick={() => openEntry(entry)}>
-                  <span aria-hidden="true">{entry.is_dir ? "📁" : "📄"}</span>
-                  <span>{entry.name}</span>
-                </button>
-              ))}
-              {!filesLoading && entries.length === 0 && !filesError ? (
-                <p className="env-muted">{t(locale, "panel.filesEmpty")}</p>
-              ) : null}
-            </div>
+            {viewedFile ? (
+              <div className="file-viewer">
+                <div className="bottom-files-toolbar">
+                  <button type="button" className="quiet-button" onClick={() => setViewedFile(null)}>
+                    {t(locale, "panel.backToFiles")}
+                  </button>
+                  <code className="bottom-files-path" title={viewedFile.path}>
+                    {viewedFile.path}
+                  </code>
+                  <span className="bottom-files-meta">
+                    {t(locale, "panel.fileMeta", {
+                      lines: String(viewedFileLines.length),
+                      size: formatFileSize(viewedFile.byte_size),
+                    })}
+                  </span>
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(viewedFile.text).catch(() => {
+                        // Clipboard is unavailable outside secure contexts; ignore.
+                      });
+                    }}
+                  >
+                    {t(locale, "action.copy")}
+                  </button>
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    onClick={() => {
+                      void openPath(joinWorkspacePath(workspaceRoot, viewedFile.path)).catch((cause) => {
+                        setFilesError(cause instanceof Error ? cause.message : String(cause));
+                      });
+                    }}
+                  >
+                    {t(locale, "panel.openExternally")}
+                  </button>
+                </div>
+                {filesError ? <p className="error-message">{filesError}</p> : null}
+                <pre className="file-viewer-body">
+                  {viewedFileLines.map((line, index) => (
+                    <span key={index} className="file-viewer-line">
+                      <span className="file-viewer-gutter" aria-hidden="true">
+                        {index + 1}
+                      </span>
+                      <span className="file-viewer-text">{line || " "}</span>
+                    </span>
+                  ))}
+                </pre>
+              </div>
+            ) : (
+              <>
+                <div className="bottom-files-toolbar">
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    disabled={!filePath}
+                    onClick={() => void loadFiles(parentRelative(filePath))}
+                  >
+                    {t(locale, "panel.up")}
+                  </button>
+                  <nav className="bottom-files-crumbs" aria-label={t(locale, "panel.files")}>
+                    <button type="button" className="bottom-files-crumb" onClick={() => void loadFiles("")}>
+                      {t(locale, "panel.rootCrumb")}
+                    </button>
+                    {pathCrumbs(filePath).map((crumb) => (
+                      <button
+                        key={crumb.path}
+                        type="button"
+                        className="bottom-files-crumb"
+                        onClick={() => void loadFiles(crumb.path)}
+                      >
+                        {crumb.label}
+                      </button>
+                    ))}
+                  </nav>
+                  <button type="button" className="quiet-button" onClick={() => void loadFiles(filePath)} disabled={filesLoading}>
+                    {t(locale, "action.refresh")}
+                  </button>
+                </div>
+                <input
+                  className="bottom-files-filter"
+                  type="search"
+                  value={fileFilter}
+                  placeholder={t(locale, "panel.filterFiles")}
+                  onChange={(event) => setFileFilter(event.target.value)}
+                  aria-label={t(locale, "panel.filterFiles")}
+                />
+                {filesError ? <p className="error-message">{filesError}</p> : null}
+                {filesLoading || viewerLoading ? <p className="env-muted">{t(locale, "env.loading")}</p> : null}
+                <div className="bottom-files-list">
+                  {visibleEntries.map((entry) => (
+                    <button key={entry.path} type="button" className="bottom-file-item" onClick={() => openEntry(entry)}>
+                      <span aria-hidden="true">{entry.is_dir ? "📁" : "📄"}</span>
+                      <span>{entry.name}</span>
+                    </button>
+                  ))}
+                  {!filesLoading && visibleEntries.length === 0 && !filesError ? (
+                    <p className="env-muted">{t(locale, "panel.filesEmpty")}</p>
+                  ) : null}
+                </div>
+              </>
+            )}
           </div>
         ) : null}
       </div>

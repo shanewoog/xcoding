@@ -19,6 +19,38 @@ export type DirEntryInfo = {
   is_dir: boolean;
 };
 
+export type WorkspaceFileContent = {
+  path: string;
+  text: string;
+  byte_size: number;
+  binary: boolean;
+  too_large: boolean;
+};
+
+export type WorkspaceChangedFile = {
+  path: string;
+  status: string;
+  insertions: number;
+  deletions: number;
+  untracked: boolean;
+};
+
+export type WorkspaceChanges = {
+  is_repo: boolean;
+  branch: string | null;
+  insertions: number;
+  deletions: number;
+  files: WorkspaceChangedFile[];
+};
+
+export type WorkspaceFileDiff = {
+  path: string;
+  diff: string;
+  untracked: boolean;
+  binary: boolean;
+  truncated: boolean;
+};
+
 export type TerminalCommandResult = {
   command: string;
   cwd: string;
@@ -85,6 +117,32 @@ export async function listWorkspaceEntries(
   return invoke<DirEntryInfo[]>("list_workspace_entries", {
     workspaceRoot,
     relativePath: relativePath || null,
+  });
+}
+
+export async function readWorkspaceFile(
+  workspaceRoot: string,
+  relativePath: string,
+): Promise<WorkspaceFileContent> {
+  return invoke<WorkspaceFileContent>("read_workspace_file", {
+    workspaceRoot,
+    relativePath,
+  });
+}
+
+export async function fetchWorkspaceChanges(workspaceRoot: string): Promise<WorkspaceChanges> {
+  return invoke<WorkspaceChanges>("workspace_changes", { workspaceRoot });
+}
+
+export async function fetchWorkspaceFileDiff(
+  workspaceRoot: string,
+  relativePath: string,
+  untracked = false,
+): Promise<WorkspaceFileDiff> {
+  return invoke<WorkspaceFileDiff>("workspace_file_diff", {
+    workspaceRoot,
+    relativePath,
+    untracked,
   });
 }
 

@@ -10,7 +10,7 @@
     "cli": "node apps/cli/dist/index.js",
     "desktop": "pnpm --dir apps/desktop dev",
     "test:e2e": "node tests/e2e/run.mjs",
-    "verify:fast": "pnpm check && node tests/e2e/run.mjs --no-build desktop-review.mjs desktop-activity.mjs desktop-layout.mjs desktop-gitnexus.mjs desktop-config.mjs desktop-message-links.mjs desktop-theme.mjs desktop-browser-passwords.mjs task-summary.mjs surface-parity.mjs",
+    "verify:fast": "pnpm check && node tests/e2e/run.mjs --no-build desktop-review.mjs desktop-activity.mjs desktop-layout.mjs desktop-gitnexus.mjs desktop-config.mjs desktop-message-links.mjs desktop-theme.mjs desktop-browser-passwords.mjs desktop-file-viewer.mjs task-summary.mjs surface-parity.mjs",
     "verify:affected": "node scripts/verify-affected.mjs",
     "verify:full": "pnpm check && node tests/e2e/run.mjs",
     "test:acceptance": "node tests/acceptance/run.mjs",

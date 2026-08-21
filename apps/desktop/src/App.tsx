@@ -5485,9 +5485,47 @@ export function App() {
           saveRightPanelWidth(clamped);
         }}
         reviewContent={
-          pendingAction ? (
-            <p className="env-muted">{t(locale, "trace.review")}: {pendingAction.tool_call.name}</p>
-          ) : null
+          pendingAction ? (() => {
+            // The side panel mirrors the composer review so a patch can be read
+            // in full width instead of the cramped approval strip.
+            const review = buildReviewPresentation(pendingAction, approvalSummary, Boolean(patchPreview), locale);
+            return (
+              <div className="review-preview">
+                <div className="review-header">
+                  <strong>{review.title}</strong>
+                  {review.highRisk ? <span className="risk-badge">{t(locale, "risk.high")}</span> : null}
+                </div>
+                <p className="review-summary">{review.summary}</p>
+                {review.bodyKind === "patch" && patchPreview ? (
+                  <>
+                    <code>{patchPreview.path}</code>
+                    <pre className="diff-preview">
+                      {buildPatchDiffLines(patchPreview, locale).map((line, index) => (
+                        <span key={index} className={`diff-line ${line.kind}`}>
+                          {line.kind === "remove" ? `- ${line.text}` : line.kind === "add" ? `+ ${line.text}` : line.text}
+                        </span>
+                      ))}
+                    </pre>
+                  </>
+                ) : null}
+                {review.bodyKind === "command" ? (
+                  <pre className="command-preview">
+                    {review.commandText ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}
+                  </pre>
+                ) : null}
+                {review.bodyKind === "git" ? (
+                  <pre className="command-preview git-preview">
+                    {review.gitDetail ?? JSON.stringify(pendingAction.tool_call.arguments, null, 2)}
+                  </pre>
+                ) : null}
+                {review.bodyKind === "generic" ? (
+                  <pre className="command-preview">{JSON.stringify(pendingAction.tool_call.arguments, null, 2)}</pre>
+                ) : null}
+                {review.riskHint ? <p className="risk-hint">{review.riskHint}</p> : null}
+                <p className="env-muted">{t(locale, "panel.reviewActionsHint")}</p>
+              </div>
+            );
+          })() : null
         }
       />
     </main>
