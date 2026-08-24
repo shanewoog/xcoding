@@ -143,6 +143,25 @@ async function main() {
     appSource.indexOf("activeFollowUps.map") < appSource.indexOf('<div className="chat-bottom">'),
     "queued follow-ups must not be hidden in the composer",
   );
+  assert.ok(
+    conversationSource.includes("<RunPlanTimeline"),
+    "run plan steps must render inline in the conversation, not only in the floating popover",
+  );
+  assert.ok(
+    conversationSource.indexOf("activeFollowUps.map") < conversationSource.indexOf("<RunPlanTimeline"),
+    "run plan steps must follow the tool activity and queued follow-ups",
+  );
+  const runStatusPopoverStart = appSource.indexOf('<div className="run-status-popover">');
+  const runStatusPopoverEnd = appSource.indexOf("run-status-activity", runStatusPopoverStart);
+  assert.ok(runStatusPopoverStart >= 0 && runStatusPopoverEnd > runStatusPopoverStart, "App missing run status popover");
+  assert.ok(
+    !appSource.slice(runStatusPopoverStart, runStatusPopoverEnd).includes("run-plan-list"),
+    "run plan steps must not be duplicated inside the run status popover",
+  );
+  assert.ok(
+    /function RunPlanTimeline\(/.test(appSource) && appSource.includes('t(locale, "run.plan.pending")'),
+    "RunPlanTimeline must label not-yet-started steps",
+  );
 
   const keyDownStart = appSource.indexOf("function onComposerKeyDown(");
   assert.ok(keyDownStart >= 0, "App missing composer keyboard handler");

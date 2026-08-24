@@ -615,6 +615,38 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   margin: 0;
   padding: 0.8rem 0.9rem;
 }
+.run-plan-timeline {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  margin: 0.35rem 0;
+  max-width: min(34rem, 100%);
+}
+.run-plan-timeline-title {
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  margin: 0;
+  padding: 0.45rem 0.9rem;
+}
+.run-plan-body {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.run-plan-text {
+  overflow-wrap: anywhere;
+}
+.run-plan-status {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.run-plan-result {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.run-plan-step.failed .run-plan-status { color: var(--danger-text); }
 .run-plan-step {
   align-items: start;
   color: var(--text-muted);
