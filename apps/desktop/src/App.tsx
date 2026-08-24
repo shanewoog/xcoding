@@ -1149,54 +1149,31 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
 
 type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults";
 
-function RunPlanTimeline({
+// One-line "current step" hint that lives in the conversation while a turn runs. The full step
+// list stays in the run-status popover; this only answers "which step am I on right now".
+function RunPlanProgress({
   plan,
   currentIndex,
   phase,
-  activityLabel,
   locale,
 }: {
   plan: PlanStep[];
   currentIndex: number;
   phase: RunStatus["phase"] | null;
-  activityLabel: string | null;
   locale: Locale;
 }) {
-  if (plan.length === 0) return null;
+  if (phase === null || plan.length === 0 || currentIndex < 0) return null;
+  const step = plan[currentIndex];
+  if (!step) return null;
+  const failed = phase === "failed";
   return (
-    <section className="run-plan-timeline">
-      <p className="run-plan-timeline-title">{t(locale, "run.planLabel")}</p>
-      <ol className="run-plan-list" aria-label={t(locale, "run.planLabel")}>
-        {plan.map((step, index) => {
-          const state = phase === null || index < currentIndex
-            ? "done"
-            : index === currentIndex
-              ? (phase === "failed" ? "failed" : "current")
-              : "pending";
-          const status = state === "done"
-            ? t(locale, "status.done")
-            : state === "failed"
-              ? t(locale, "status.failed")
-              : state === "current"
-                ? t(locale, "status.running")
-                : t(locale, "run.plan.pending");
-          return (
-            <li className={`run-plan-step ${state}`} key={step.id}>
-              <span className="run-plan-marker" aria-hidden="true">
-                {state === "done" ? "✓" : state === "failed" ? "!" : state === "current" ? "●" : "○"}
-              </span>
-              <span className="run-plan-body">
-                <span className="run-plan-text">{runPlanStepDescription(step, locale)}</span>
-                <span className="run-plan-status">{status}</span>
-                {state !== "pending" && state !== "done" && activityLabel ? (
-                  <span className="run-plan-result">{activityLabel}</span>
-                ) : null}
-              </span>
-            </li>
-          );
-        })}
-      </ol>
-    </section>
+    <p className={`run-plan-progress${failed ? " failed" : ""}`}>
+      <span className="run-plan-marker" aria-hidden="true">{failed ? "!" : "●"}</span>
+      <span className="run-plan-progress-step">
+        {t(locale, "run.stepProgress", { current: String(currentIndex + 1), total: String(plan.length) })}
+      </span>
+      <span className="run-plan-progress-text">{runPlanStepDescription(step, locale)}</span>
+    </p>
   );
 }
 
@@ -5110,11 +5087,10 @@ export function App() {
               </div>
             </article>
           ))}
-          <RunPlanTimeline
+          <RunPlanProgress
             plan={plan}
             currentIndex={currentPlanStepIndex}
             phase={runStatus?.phase ?? null}
-            activityLabel={latestActivity?.label ?? null}
             locale={locale}
           />
           {runStatus ? (
@@ -5155,6 +5131,25 @@ export function App() {
                 )}
               </summary>
               <div className="run-status-popover">
+                {plan.length > 0 && currentPlanStepIndex >= 0 ? (
+                  <ol className="run-plan-list" aria-label={t(locale, "run.planLabel")}>
+                    {plan.map((step, index) => {
+                      const state = index < currentPlanStepIndex
+                        ? "done"
+                        : index === currentPlanStepIndex
+                          ? (runStatus.phase === "failed" ? "failed" : "current")
+                          : "pending";
+                      return (
+                        <li className={`run-plan-step ${state}`} key={step.id}>
+                          <span className="run-plan-marker" aria-hidden="true">
+                            {state === "done" ? "✓" : state === "failed" ? "!" : state === "current" ? "●" : "○"}
+                          </span>
+                          <span>{runPlanStepDescription(step, locale)}</span>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                ) : null}
                 {latestActivity ? <p className={`run-status-activity ${latestActivity.state}`}>{latestActivity.label}</p> : null}
                 {runStatus.detail ? <p className="run-status-detail">{runStatus.detail}</p> : null}
                 {streamedText ? (

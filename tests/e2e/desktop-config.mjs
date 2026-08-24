@@ -144,23 +144,27 @@ async function main() {
     "queued follow-ups must not be hidden in the composer",
   );
   assert.ok(
-    conversationSource.includes("<RunPlanTimeline"),
-    "run plan steps must render inline in the conversation, not only in the floating popover",
+    conversationSource.includes("<RunPlanProgress"),
+    "the current plan step must be hinted inline in the conversation, not only in the floating popover",
   );
   assert.ok(
-    conversationSource.indexOf("activeFollowUps.map") < conversationSource.indexOf("<RunPlanTimeline"),
-    "run plan steps must follow the tool activity and queued follow-ups",
+    conversationSource.indexOf("activeFollowUps.map") < conversationSource.indexOf("<RunPlanProgress"),
+    "the current-step hint must follow the tool activity and queued follow-ups",
   );
-  const runStatusPopoverStart = appSource.indexOf('<div className="run-status-popover">');
-  const runStatusPopoverEnd = appSource.indexOf("run-status-activity", runStatusPopoverStart);
-  assert.ok(runStatusPopoverStart >= 0 && runStatusPopoverEnd > runStatusPopoverStart, "App missing run status popover");
+  const runPlanProgressStart = appSource.indexOf("function RunPlanProgress(");
+  assert.ok(runPlanProgressStart >= 0, "App missing RunPlanProgress component");
+  const runPlanProgressSource = appSource.slice(runPlanProgressStart, appSource.indexOf("\n}\n", runPlanProgressStart));
   assert.ok(
-    !appSource.slice(runStatusPopoverStart, runStatusPopoverEnd).includes("run-plan-list"),
-    "run plan steps must not be duplicated inside the run status popover",
+    runPlanProgressSource.includes("phase === null") && runPlanProgressSource.includes("return null"),
+    "the inline hint must disappear once the turn is no longer running",
   );
   assert.ok(
-    /function RunPlanTimeline\(/.test(appSource) && appSource.includes('t(locale, "run.plan.pending")'),
-    "RunPlanTimeline must label not-yet-started steps",
+    !runPlanProgressSource.includes("plan.map("),
+    "the inline hint must show only the current step, not the whole plan list",
+  );
+  assert.ok(
+    appSource.slice(appSource.indexOf('<div className="run-status-popover">')).includes("run-plan-list"),
+    "the full plan list must stay available in the run status popover",
   );
 
   const keyDownStart = appSource.indexOf("function onComposerKeyDown(");
