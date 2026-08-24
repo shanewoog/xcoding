@@ -5380,7 +5380,7 @@ dependencies = [
 
 [[package]]
 name = "xcoding-desktop"
-version = "1.0.18"
+version = "1.0.19"
 dependencies = [
  "dotenvy",
  "pinyin",
