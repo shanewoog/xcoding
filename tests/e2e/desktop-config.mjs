@@ -134,6 +134,15 @@ async function main() {
   assert.ok(submitStart >= 0 && submitEnd > submitStart, "App missing composer submit handler");
   const submitSource = appSource.slice(submitStart, submitEnd);
   assert.ok(submitSource.includes("enqueueFollowUp(activeSessionId, message, images);"), "running sessions must queue follow-up input");
+  const conversationStart = appSource.indexOf('className="conversation"');
+  const conversationEnd = appSource.indexOf('<div className="chat-bottom">', conversationStart);
+  assert.ok(conversationStart >= 0 && conversationEnd > conversationStart, "App missing conversation region");
+  const conversationSource = appSource.slice(conversationStart, conversationEnd);
+  assert.ok(conversationSource.includes("activeFollowUps.map"), "queued follow-ups must stay visible in the conversation");
+  assert.ok(
+    appSource.indexOf("activeFollowUps.map") < appSource.indexOf('<div className="chat-bottom">'),
+    "queued follow-ups must not be hidden in the composer",
+  );
 
   const keyDownStart = appSource.indexOf("function onComposerKeyDown(");
   assert.ok(keyDownStart >= 0, "App missing composer keyboard handler");

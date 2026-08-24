@@ -5020,6 +5020,45 @@ export function App() {
             );
           })}
           {pendingInlineActivity.length > 0 ? <InlineActivityList items={pendingInlineActivity} locale={locale} /> : null}
+          {activeFollowUps.map((item, index) => (
+            <article className="message message-user message-queued" key={item.id}>
+              <div className="message-bubble">
+                <UserMessageBody
+                  content={item.text || (item.images.length > 0 ? t(locale, "message.imageCount", { count: String(item.images.length) }) : "")}
+                />
+              </div>
+              <div className="message-meta">
+                <span className="message-queued-state">
+                  #{index + 1} · {t(locale, "composer.queueHint")}
+                </span>
+                <button
+                  type="button"
+                  className="quiet-button message-queued-button"
+                  onClick={() => void steerFollowUp(item.id)}
+                  title={t(locale, "action.steerHelp")}
+                >
+                  {t(locale, "action.steerMode")}
+                </button>
+                <button
+                  type="button"
+                  className="quiet-button message-queued-button"
+                  onClick={() => editFollowUp(item.id)}
+                  title={t(locale, "action.editMessage")}
+                >
+                  {t(locale, "action.editMessage")}
+                </button>
+                <button
+                  type="button"
+                  className="quiet-button message-queued-button"
+                  onClick={() => removeFollowUp(item.id)}
+                  title={t(locale, "action.closeQueue")}
+                  aria-label={t(locale, "action.closeQueue")}
+                >
+                  {t(locale, "action.closeQueue")}
+                </button>
+              </div>
+            </article>
+          ))}
           {runStatus ? (
             <details
               className={`run-status run-status-${runStatus.phase}`}
@@ -5182,52 +5221,6 @@ export function App() {
             >
               <span aria-hidden="true">↓</span>
             </button>
-          ) : null}
-          {activeFollowUps.length > 0 ? (
-            <div className="followup-queue" aria-label={t(locale, "composer.queueList")}>
-              <div className="followup-queue-header">
-                <strong>{t(locale, "composer.queueTitle", { count: String(activeFollowUps.length) })}</strong>
-                <span>{t(locale, "composer.queueHelp")}</span>
-              </div>
-              <ul>
-                {activeFollowUps.map((item, index) => (
-                  <li key={item.id}>
-                    <span className="followup-index">#{index + 1}</span>
-                    <span className="followup-text">
-                      {item.text || (item.images.length > 0 ? t(locale, "message.imageCount", { count: String(item.images.length) }) : "")}
-                      {item.text && item.images.length > 0 ? ` · ${t(locale, "message.imageCount", { count: String(item.images.length) })}` : ""}
-                    </span>
-                    <div className="followup-actions">
-                      <button
-                        type="button"
-                        className="quiet-button"
-                        onClick={() => void steerFollowUp(item.id)}
-                        title={t(locale, "action.steerHelp")}
-                      >
-                        {t(locale, "action.steerMode")}
-                      </button>
-                      <button
-                        type="button"
-                        className="quiet-button"
-                        onClick={() => editFollowUp(item.id)}
-                        title={t(locale, "action.editMessage")}
-                      >
-                        {t(locale, "action.editMessage")}
-                      </button>
-                      <button
-                        type="button"
-                        className="quiet-button"
-                        onClick={() => removeFollowUp(item.id)}
-                        title={t(locale, "action.closeQueue")}
-                        aria-label={t(locale, "action.closeQueue")}
-                      >
-                        {t(locale, "action.closeQueue")}
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
           ) : null}
           {composerImages.length > 0 ? (
             <div className="composer-images" aria-label={t(locale, "composer.imagesLabel")}>
