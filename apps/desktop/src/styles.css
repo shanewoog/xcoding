@@ -631,6 +631,15 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 }
 .run-plan-progress-step { color: var(--text-muted); }
 .run-plan-progress-text { overflow-wrap: anywhere; }
+.run-plan-progress-now {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.run-plan-progress-now::before {
+  content: "· ";
+}
+.run-plan-progress-now.running { color: var(--text-secondary); }
+.run-plan-progress-now.failed { color: var(--danger-text); }
 .run-plan-progress.failed { color: var(--danger-text); }
 .run-plan-progress.failed .run-plan-marker { color: var(--danger); }
 .run-plan-step {

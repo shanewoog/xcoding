@@ -163,6 +163,14 @@ async function main() {
     "the inline hint must show only the current step, not the whole plan list",
   );
   assert.ok(
+    runPlanProgressSource.includes("runningActivity(activity)"),
+    "the inline hint must name the tool call that is currently executing",
+  );
+  assert.ok(
+    /function runningActivity\([\s\S]*?state === "running"/.test(appSource),
+    "runningActivity must prefer the in-flight tool call over the last finished one",
+  );
+  assert.ok(
     appSource.slice(appSource.indexOf('<div className="run-status-popover">')).includes("run-plan-list"),
     "the full plan list must stay available in the run status popover",
   );

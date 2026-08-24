@@ -1149,23 +1149,40 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
 
 type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults";
 
+// Prefer the tool call that is still running, so the hint names what is happening now rather than
+// the last thing that finished. Falls back to the most recent entry once nothing is in flight.
+function runningActivity(activity: ActivityItem[]): ActivityItem | null {
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    if (activity[index].state === "running") return activity[index];
+  }
+  return activity.length > 0 ? activity[activity.length - 1] : null;
+}
+
+function shortActivityLabel(label: string): string {
+  const single = label.replace(/\s+/g, " ").trim();
+  return single.length > 72 ? `${single.slice(0, 71)}…` : single;
+}
+
 // One-line "current step" hint that lives in the conversation while a turn runs. The full step
 // list stays in the run-status popover; this only answers "which step am I on right now".
 function RunPlanProgress({
   plan,
   currentIndex,
   phase,
+  activity,
   locale,
 }: {
   plan: PlanStep[];
   currentIndex: number;
   phase: RunStatus["phase"] | null;
+  activity: ActivityItem[];
   locale: Locale;
 }) {
   if (phase === null || plan.length === 0 || currentIndex < 0) return null;
   const step = plan[currentIndex];
   if (!step) return null;
   const failed = phase === "failed";
+  const current = runningActivity(activity);
   return (
     <p className={`run-plan-progress${failed ? " failed" : ""}`}>
       <span className="run-plan-marker" aria-hidden="true">{failed ? "!" : "●"}</span>
@@ -1173,6 +1190,11 @@ function RunPlanProgress({
         {t(locale, "run.stepProgress", { current: String(currentIndex + 1), total: String(plan.length) })}
       </span>
       <span className="run-plan-progress-text">{runPlanStepDescription(step, locale)}</span>
+      {current ? (
+        <span className={`run-plan-progress-now ${current.state}`} title={current.detail || current.label}>
+          {shortActivityLabel(current.label)}
+        </span>
+      ) : null}
     </p>
   );
 }
@@ -5091,6 +5113,7 @@ export function App() {
             plan={plan}
             currentIndex={currentPlanStepIndex}
             phase={runStatus?.phase ?? null}
+            activity={activity}
             locale={locale}
           />
           {runStatus ? (
