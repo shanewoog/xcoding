@@ -1,6 +1,6 @@
 {
   "name": "xcoding",
-  "version": "1.0.22",
+  "version": "1.0.23",
   "private": true,
   "description": "Local-first AI coding agent platform",
   "packageManager": "pnpm@11.9.0",
