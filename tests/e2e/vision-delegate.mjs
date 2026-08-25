@@ -21,6 +21,8 @@ async function main() {
   await assertDelegateReplacesImagesAndCachesTheDescription();
   await assertVisionCapableModelKeepsReceivingImages();
   await assertDelegateFailureDegradesInsteadOfAborting();
+  await assertStoredDescriptionSurvivesRestart();
+  await assertHistoricalAttachmentIsLabelledAsSuch();
   console.log("Vision delegate E2E passed.");
 }
 
@@ -69,6 +71,11 @@ async function assertDelegateReplacesImagesAndCachesTheDescription() {
     assert.equal(started.length, 1);
     assert.equal(started[0].image_count, 1);
     assert.equal(started[0].delegate_model, DELEGATE_MODEL);
+    assert.equal(
+      started[0].historical,
+      false,
+      "an attachment on the message just sent is not historical",
+    );
     assert.equal(succeeded.length, 1);
     assert.equal(succeeded[0].image_count, 1);
     assert.equal(succeeded[0].description_length, VISION_DESCRIPTION.length);
@@ -199,6 +206,107 @@ async function assertDelegateFailureDegradesInsteadOfAborting() {
   }
 }
 
+/// Descriptions must outlive the process. The in-memory cache is lost on
+/// restart, so without the store the same stored screenshot would be
+/// re-described (and re-billed) on the first turn after every restart.
+async function assertStoredDescriptionSurvivesRestart() {
+  const vision = await startMockProvider({ text: VISION_DESCRIPTION });
+  const session = await startMockProvider({ text: "Acknowledged." });
+  const context = await startIsolatedServer({
+    slug: "vision-restart",
+    sessionBaseUrl: session.baseUrl,
+    visionBaseUrl: vision.baseUrl,
+  });
+
+  try {
+    const first = await context.rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Why does this screen fail?",
+      model: "fixture-model",
+      images: [{ mime_type: "image/png", data_base64: PNG_BASE64, name: "screen.png" }],
+    });
+    assert.equal(first.session.status, "done");
+    assert.equal(vision.requests.length, 1);
+
+    await context.restart();
+
+    const second = await context.rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "And what should I check first?",
+      model: "fixture-model",
+      session_id: first.session.id,
+    });
+    assert.equal(second.session.status, "done");
+    assert.equal(
+      vision.requests.length,
+      1,
+      "a persisted description must not call the delegate again after a restart",
+    );
+    assert.ok(
+      session.requests.at(-1).messages.some(
+        (message) => message.role === "user" && /INVALID_API_KEY/.test(contentText(message)),
+      ),
+      "the restarted turn should still carry the stored description",
+    );
+    assert.equal(
+      context.rpc.events.filter((event) => event.type === "vision_delegate_start").length,
+      0,
+      "a store hit must stay out of the activity feed",
+    );
+  } finally {
+    await context.close();
+    await vision.close();
+    await session.close();
+  }
+}
+
+/// An attachment from an earlier turn must be reported as historical, so the
+/// hint cannot imply the message just sent carries an image.
+async function assertHistoricalAttachmentIsLabelledAsSuch() {
+  const vision = await startMockProvider({ text: VISION_DESCRIPTION });
+  const session = await startMockProvider({ text: "Acknowledged." });
+  const context = await startIsolatedServer({
+    slug: "vision-historical",
+    sessionBaseUrl: session.baseUrl,
+    visionBaseUrl: vision.baseUrl,
+  });
+
+  try {
+    const first = await context.rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Why does this screen fail?",
+      model: "fixture-model",
+      images: [{ mime_type: "image/png", data_base64: PNG_BASE64, name: "screen.png" }],
+    });
+    assert.equal(first.session.status, "done");
+
+    // Restart drops the in-memory cache, and a different delegate model changes
+    // the cache key, so the second turn has to describe the earlier attachment
+    // again instead of reusing the stored description.
+    await context.restart({ visionModel: `${DELEGATE_MODEL}-2` });
+
+    const second = await context.rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "And what should I check first?",
+      model: "fixture-model",
+      session_id: first.session.id,
+    });
+    assert.equal(second.session.status, "done");
+
+    const started = context.rpc.events.filter((event) => event.type === "vision_delegate_start");
+    assert.equal(started.length, 1, "the earlier attachment should have been described again");
+    assert.equal(
+      started[0].historical,
+      true,
+      "an attachment from an earlier turn must be reported as historical",
+    );
+  } finally {
+    await context.close();
+    await vision.close();
+    await session.close();
+  }
+}
+
 function contentText(message) {
   if (typeof message.content === "string") {
     return message.content;
@@ -240,47 +348,61 @@ async function startIsolatedServer({ slug, sessionBaseUrl, visionBaseUrl }) {
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), `xcoding-e2e-${slug}-`));
   const homeDirectory = await mkdtemp(resolve(tmpdir(), `xcoding-e2e-${slug}-home-`));
   const configDirectory = resolve(homeDirectory, ".xcoding");
+  const databasePath = resolve(databaseDirectory, "xcoding.db");
   await mkdir(configDirectory, { recursive: true });
-  await writeFile(
-    resolve(configDirectory, "config.json"),
-    `${JSON.stringify(
-      {
-        max_provider_retries: 0,
-        provider_fallback_enabled: false,
-        base_url: sessionBaseUrl,
-        api_key: "e2e-session-key",
-        providers: [
-          { id: "default", name: "openai", base_url: sessionBaseUrl, api_key: "e2e-session-key" },
-          { id: "vision", name: "vision", base_url: visionBaseUrl, api_key: "e2e-vision-key" },
-        ],
-        active_provider_id: "default",
-        vision_delegate: {
-          enabled: true,
-          provider_id: "vision",
-          model: DELEGATE_MODEL,
-          timeout_seconds: 30,
-        },
-        model_capabilities: { "fixture-model": { supports_vision: false } },
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
-  );
 
-  const rpc = startRpcClient({
-    databasePath: resolve(databaseDirectory, "xcoding.db"),
-    environment: {
-      ...process.env,
-      OPENAI_API_KEY: "e2e-session-key",
-      XCODING_OPENAI_BASE_URL: sessionBaseUrl,
-      HOME: homeDirectory,
-      USERPROFILE: homeDirectory,
-    },
-  });
+  const writeConfig = async (visionModel) =>
+    writeFile(
+      resolve(configDirectory, "config.json"),
+      `${JSON.stringify(
+        {
+          max_provider_retries: 0,
+          provider_fallback_enabled: false,
+          base_url: sessionBaseUrl,
+          api_key: "e2e-session-key",
+          providers: [
+            { id: "default", name: "openai", base_url: sessionBaseUrl, api_key: "e2e-session-key" },
+            { id: "vision", name: "vision", base_url: visionBaseUrl, api_key: "e2e-vision-key" },
+          ],
+          active_provider_id: "default",
+          vision_delegate: {
+            enabled: true,
+            provider_id: "vision",
+            model: visionModel,
+            timeout_seconds: 30,
+          },
+          model_capabilities: { "fixture-model": { supports_vision: false } },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+  const environment = {
+    ...process.env,
+    OPENAI_API_KEY: "e2e-session-key",
+    XCODING_OPENAI_BASE_URL: sessionBaseUrl,
+    HOME: homeDirectory,
+    USERPROFILE: homeDirectory,
+  };
+
+  await writeConfig(DELEGATE_MODEL);
+  let rpc = startRpcClient({ databasePath, environment });
 
   return {
-    rpc,
+    get rpc() {
+      return rpc;
+    },
+    /// Replaces the server process while keeping the same database, so a test
+    /// can observe behaviour that must survive a restart.
+    restart: async ({ visionModel } = {}) => {
+      await rpc.close();
+      if (visionModel) {
+        await writeConfig(visionModel);
+      }
+      rpc = startRpcClient({ databasePath, environment });
+    },
     close: async () => {
       await rpc.close();
       await rm(databaseDirectory, { recursive: true, force: true });

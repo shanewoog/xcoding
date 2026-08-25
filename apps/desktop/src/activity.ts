@@ -158,7 +158,9 @@ export function eventActivity(
   if (event.type === "vision_delegate_start") {
     return {
       id: "vision-delegate",
-      label: t(locale, "activity.visionDelegate"),
+      label: event.historical
+        ? t(locale, "activity.visionDelegateHistory", { count: event.image_count })
+        : t(locale, "activity.visionDelegate"),
       detail: event.delegate_model,
       state: "running",
       policy: "running",

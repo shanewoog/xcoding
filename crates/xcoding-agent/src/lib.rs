@@ -745,17 +745,25 @@ impl<'a> AgentService<'a> {
         // model and only the description text reaches the session model. Stored
         // history keeps the original attachments either way.
         let vision_delegate = resolve_vision_delegate(&user_config, &session.model);
-        for message in history.iter().skip(compacted_message_count) {
+        // Index of the message the user just sent, so a delegate call on any
+        // earlier attachment can be reported as historical.
+        let latest_user_index = history
+            .iter()
+            .rposition(|message| message.role == MessageRole::User);
+        for (index, message) in history.iter().enumerate().skip(compacted_message_count) {
             let converted = match (&vision_delegate, &message.role) {
                 (Some(delegate), MessageRole::User) => {
                     let (text, images) = parse_stored_user_message(&message.content);
                     if images.is_empty() {
                         provider_message_from_stored(message)
                     } else {
+                        let historical = latest_user_index != Some(index);
                         // A delegate failure degrades this one attachment to a
                         // note instead of aborting the run.
                         match self
-                            .describe_images(session, delegate, &text, &images, on_event)
+                            .describe_images(
+                                session, delegate, &text, &images, historical, on_event,
+                            )
                             .await
                         {
                             Ok(description) => ChatMessage::user(message_with_vision_description(
@@ -1550,13 +1558,14 @@ impl<'a> AgentService<'a> {
         delegate: &VisionDelegate,
         text: &str,
         images: &[(String, String)],
+        historical: bool,
         on_event: &mut F,
     ) -> Result<String, AgentError>
     where
         F: FnMut(SessionEvent),
     {
         let key = vision_cache_key(&delegate.model, text, images);
-        if let Some(cached) = cached_vision_description(&key) {
+        if let Some(cached) = self.cached_vision_description(&key) {
             return Ok(cached);
         }
 
@@ -1566,11 +1575,12 @@ impl<'a> AgentService<'a> {
                 session_id: session.id,
                 image_count: images.len(),
                 delegate_model: delegate.model.clone(),
+                historical,
             },
         );
         match stream_vision_description(delegate, text, images).await {
             Ok(description) => {
-                store_vision_description(&key, &description);
+                self.store_vision_description(&key, &description);
                 self.emit(
                     on_event,
                     SessionEvent::VisionDelegateSuccess {
@@ -1595,6 +1605,22 @@ impl<'a> AgentService<'a> {
                 Err(error)
             }
         }
+    }
+
+    /// Process cache first, then the store, so a restart reuses descriptions
+    /// instead of paying the delegate again for the same stored screenshot.
+    fn cached_vision_description(&self, key: &str) -> Option<String> {
+        if let Some(cached) = cached_vision_description(key) {
+            return Some(cached);
+        }
+        let persisted = self.core.vision_description(key).ok().flatten()?;
+        store_vision_description(key, &persisted);
+        Some(persisted)
+    }
+
+    fn store_vision_description(&self, key: &str, description: &str) {
+        store_vision_description(key, description);
+        let _ = self.core.save_vision_description(key, description);
     }
 
     fn emit_model_call<F>(

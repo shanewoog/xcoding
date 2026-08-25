@@ -488,6 +488,8 @@ export type SessionEvent =
       session_id: string;
       image_count: number;
       delegate_model: string;
+      /** True when the images come from an earlier turn, not the message just sent. */
+      historical?: boolean;
     }
   | {
       type: "vision_delegate_success";

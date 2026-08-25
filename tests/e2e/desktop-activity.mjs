@@ -196,6 +196,22 @@ async function main() {
   assert.ok(i18nSource.includes('"activity.toolCalls": "Tool calls: {count}"'), "tool activity count should be localized in English");
   assert.ok(i18nSource.includes('"activity.toolCalls": "工具调用 {count} 项"'), "tool activity count should be localized in Chinese");
 
+  // Describing an attachment from an earlier turn must not read as if the
+  // message just sent carries an image.
+  assert.ok(
+    activitySource.includes('event.historical') &&
+      activitySource.includes('t(locale, "activity.visionDelegateHistory", { count: event.image_count })'),
+    "vision activity should distinguish historical attachments",
+  );
+  assert.ok(
+    i18nSource.includes('"activity.visionDelegateHistory": "Describing images from an earlier message ({count})"'),
+    "historical image description should be localized in English",
+  );
+  assert.ok(
+    i18nSource.includes('"activity.visionDelegateHistory": "正在识别历史消息中的图片（{count} 张）"'),
+    "historical image description should be localized in Chinese",
+  );
+
   assert.ok(
     i18nSource.includes("allowlisted safe commands") || configSource.includes("allowlisted safe commands"),
     "modeHelpText should mention allowlisted commands",

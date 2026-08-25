@@ -947,6 +947,12 @@ pub enum SessionEvent {
         session_id: Uuid,
         image_count: usize,
         delegate_model: String,
+        /// True when the images come from an earlier turn rather than the
+        /// message the user just sent, so the UI can say so instead of
+        /// implying the current message has attachments. Defaults to false so
+        /// events persisted before this field stay readable.
+        #[serde(default)]
+        historical: bool,
     },
     /// Vision delegate successfully returned image descriptions.
     VisionDelegateSuccess {

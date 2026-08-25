@@ -438,6 +438,36 @@ impl SessionStore {
         Ok(removed)
     }
 
+    /// Description produced earlier for the same delegate model and image
+    /// payload, if any. Survives restarts so a stored screenshot is described
+    /// once instead of once per process.
+    pub fn get_vision_description(&self, cache_key: &str) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT description FROM vision_descriptions WHERE cache_key = ?1",
+                params![cache_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn save_vision_description(
+        &self,
+        cache_key: &str,
+        description: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO vision_descriptions (cache_key, description, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                description = excluded.description,
+                updated_at = excluded.updated_at",
+            params![cache_key, description, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn create_pending_action(
         &self,
         session_id: Uuid,
@@ -811,6 +841,12 @@ impl SessionStore {
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE (workspace_root, content)
+            );
+
+            CREATE TABLE IF NOT EXISTS vision_descriptions (
+                cache_key TEXT PRIMARY KEY NOT NULL,
+                description TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );",
         )?;
         self.ensure_column("restore_points", "applied_text", "TEXT")?;

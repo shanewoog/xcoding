@@ -479,6 +479,22 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    pub fn vision_description(&self, cache_key: &str) -> Result<Option<String>, CoreError> {
+        self.store
+            .get_vision_description(cache_key)
+            .map_err(CoreError::from)
+    }
+
+    pub fn save_vision_description(
+        &self,
+        cache_key: &str,
+        description: &str,
+    ) -> Result<(), CoreError> {
+        self.store
+            .save_vision_description(cache_key, description)
+            .map_err(CoreError::from)
+    }
+
     pub fn session(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
         self.store
             .get_session(session_id)?
@@ -916,10 +932,14 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     success: Some(false),
                 });
             }
-            SessionEvent::VisionDelegateStart { image_count, delegate_model, .. } => {
+            SessionEvent::VisionDelegateStart { image_count, delegate_model, historical, .. } => {
                 steps.push(ReplayStep {
                     kind: "vision_delegate_start".to_owned(),
-                    summary: format!("使用 {} 分析 {} 张图片", delegate_model, image_count),
+                    summary: if *historical {
+                        format!("使用 {} 分析历史消息中的 {} 张图片", delegate_model, image_count)
+                    } else {
+                        format!("使用 {} 分析 {} 张图片", delegate_model, image_count)
+                    },
                     tool_name: None,
                     success: None,
                 });
