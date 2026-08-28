@@ -183,6 +183,9 @@ $releaseGitPaths = @(
   "docs/zh/getting-started.md",
   "docs/zh/session-safety.md",
   "tests/e2e/full-auto-mode.mjs",
+  "apps/desktop/src/App.tsx",
+  "apps/desktop/src/styles.css",
+  "tests/e2e/desktop-layout.mjs",
   "scripts/package-desktop-portable.ps1"
 )
 

@@ -4874,7 +4874,9 @@ export function App() {
                   title={sessionMetaLine(session, Date.now(), locale)}
                 >
                   <span className="session-item-title">{sessionTitle(session, locale)}</span>
-                  {completedUnseenSessionIds.includes(session.id) ? (
+                  {runningSessionIds.includes(session.id) || session.status === "running" ? (
+                    <span className="session-running-spinner" role="img" aria-label={t(locale, "status.running")} />
+                  ) : completedUnseenSessionIds.includes(session.id) ? (
                     <span className="session-done-dot" role="img" aria-label={t(locale, "status.done")} />
                   ) : null}
                 </button>
@@ -4947,7 +4949,9 @@ export function App() {
                     title={sessionMetaLine(session, Date.now(), locale)}
                   >
                     <span className="session-item-title">{sessionTitle(session, locale)}</span>
-                    {completedUnseenSessionIds.includes(session.id) ? (
+                    {runningSessionIds.includes(session.id) || session.status === "running" ? (
+                      <span className="session-running-spinner" role="img" aria-label={t(locale, "status.running")} />
+                    ) : completedUnseenSessionIds.includes(session.id) ? (
                       <span className="session-done-dot" role="img" aria-label={t(locale, "status.done")} />
                     ) : null}
                   </button>

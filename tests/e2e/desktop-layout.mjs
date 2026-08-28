@@ -519,11 +519,20 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
     "App.tsx must render a completion dot for finished background tasks",
   );
   assert.ok(
+    appSource.includes('className="session-running-spinner"') &&
+      appSource.includes('runningSessionIds.includes(session.id) || session.status === "running"'),
+    "App.tsx must render a running indicator for active sidebar tasks",
+  );
+  assert.ok(
     appSource.includes("setCompletedUnseenSessionIds((current) => markSessionCompletedUnseen(current, sid))") &&
       appSource.includes("setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, session.id))"),
     "completion dot must be set on task_completed and cleared when the task is selected",
   );
   assert.ok(cssSource.includes(".session-done-dot"), "styles.css missing .session-done-dot");
+  assert.ok(
+    cssSource.includes(".session-running-spinner") && cssSource.includes("@keyframes session-running-spin"),
+    "styles.css missing the sidebar running spinner",
+  );
   assert.deepEqual(markSessionCompletedUnseen([], "s1"), ["s1"]);
   assert.deepEqual(markSessionCompletedUnseen(["s1"], "s1"), ["s1"]);
   assert.deepEqual(markSessionCompletedUnseen(["s1"], "  "), ["s1"]);

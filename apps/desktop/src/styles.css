@@ -469,6 +469,21 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   justify-self: end;
   width: 9px;
 }
+.session-running-spinner {
+  align-self: center;
+  animation: session-running-spin 0.9s linear infinite;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 50%;
+  border-top-color: var(--accent);
+  box-sizing: border-box;
+  grid-column: 2;
+  height: 12px;
+  justify-self: end;
+  width: 12px;
+}
+@keyframes session-running-spin {
+  to { transform: rotate(360deg); }
+}
 .session-item.has-done-dot .session-item-title { grid-column: 1; }
 .session-item small {
   color: var(--text-muted);
