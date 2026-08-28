@@ -30,6 +30,14 @@ pub struct SessionStore {
     connection: Connection,
 }
 
+/// A cached delegate description plus the delegate model that produced it.
+#[derive(Debug, Clone)]
+pub struct StoredVisionDescription {
+    pub description: String,
+    /// Empty for rows written before the model became a column.
+    pub delegate_model: String,
+}
+
 fn normalize_workspace_root(value: &str) -> String {
     value
         .trim()
@@ -86,13 +94,19 @@ impl SessionStore {
     }
 
     pub fn create_session(&self, params: CreateSessionParams) -> Result<Session, StoreError> {
+        let model = params.model.trim().to_owned();
+        if model.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "model must not be empty".to_owned(),
+            ));
+        }
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
             workspace_root: params.workspace_root,
             mode: params.mode,
             provider: params.provider,
-            model: params.model,
+            model,
             status: SessionStatus::Created,
             created_at: now,
             updated_at: now,
@@ -213,6 +227,10 @@ impl SessionStore {
             "DELETE FROM context_compactions WHERE session_id = ?1",
             params![id],
         )?;
+        self.connection.execute(
+            "DELETE FROM vision_descriptions WHERE session_id = ?1",
+            params![id],
+        )?;
         let deleted = self
             .connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -257,6 +275,10 @@ impl SessionStore {
             )?;
             transaction.execute(
                 "DELETE FROM context_compactions WHERE session_id = ?1",
+                params![id],
+            )?;
+            transaction.execute(
+                "DELETE FROM vision_descriptions WHERE session_id = ?1",
                 params![id],
             )?;
             transaction.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -438,32 +460,55 @@ impl SessionStore {
         Ok(removed)
     }
 
-    /// Description produced earlier for the same delegate model and image
-    /// payload, if any. Survives restarts so a stored screenshot is described
-    /// once instead of once per process.
-    pub fn get_vision_description(&self, cache_key: &str) -> Result<Option<String>, StoreError> {
+    /// Description produced earlier for the same image payload, if any.
+    /// Survives restarts so a stored screenshot is described once instead of
+    /// once per process. The delegate model that produced it is returned as
+    /// well, because a later run may use a different delegate and callers have
+    /// to attribute the text honestly.
+    pub fn get_vision_description(
+        &self,
+        cache_key: &str,
+    ) -> Result<Option<StoredVisionDescription>, StoreError> {
         self.connection
             .query_row(
-                "SELECT description FROM vision_descriptions WHERE cache_key = ?1",
+                "SELECT description, delegate_model FROM vision_descriptions WHERE cache_key = ?1",
                 params![cache_key],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok(StoredVisionDescription {
+                        description: row.get::<_, String>(0)?,
+                        delegate_model: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    })
+                },
             )
             .optional()
             .map_err(StoreError::from)
     }
 
+    /// `session_id` records where the description was first needed so deleting
+    /// that session can clean it up. Lookups stay session-independent because
+    /// the cache key is the image payload itself.
     pub fn save_vision_description(
         &self,
         cache_key: &str,
+        delegate_model: &str,
+        session_id: Option<Uuid>,
         description: &str,
     ) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT INTO vision_descriptions (cache_key, description, updated_at)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO vision_descriptions (cache_key, delegate_model, session_id, description, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(cache_key) DO UPDATE SET
+                delegate_model = excluded.delegate_model,
+                session_id = excluded.session_id,
                 description = excluded.description,
                 updated_at = excluded.updated_at",
-            params![cache_key, description, Utc::now().to_rfc3339()],
+            params![
+                cache_key,
+                delegate_model,
+                session_id.map(|id| id.to_string()),
+                description,
+                Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -850,6 +895,11 @@ impl SessionStore {
             );",
         )?;
         self.ensure_column("restore_points", "applied_text", "TEXT")?;
+        // Added after the first release of the description cache: the delegate
+        // model moved out of the cache key so text edits stop invalidating it,
+        // and the session id lets `delete_session` clean up after itself.
+        self.ensure_column("vision_descriptions", "delegate_model", "TEXT")?;
+        self.ensure_column("vision_descriptions", "session_id", "TEXT")?;
         Ok(())
     }
 
@@ -1097,11 +1147,14 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
         | SessionEvent::SessionCancelled { session_id, .. }
         | SessionEvent::TaskCompleted { session_id, .. }
         | SessionEvent::Retrying { session_id, .. }
+        | SessionEvent::StreamReset { session_id, .. }
         | SessionEvent::ModelCall { session_id, .. }
         | SessionEvent::Error { session_id, .. }
         | SessionEvent::VisionDelegateStart { session_id, .. }
         | SessionEvent::VisionDelegateSuccess { session_id, .. }
-        | SessionEvent::VisionDelegateFailed { session_id, .. } => *session_id,
+        | SessionEvent::VisionDelegateFailed { session_id, .. }
+        | SessionEvent::VisionDescriptionsApplied { session_id, .. }
+        | SessionEvent::ContextCompacted { session_id, .. } => *session_id,
     }
 }
 

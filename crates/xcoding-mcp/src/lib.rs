@@ -4,7 +4,7 @@
 //! `.xcoding/mcp.json` and exposed to the model as namespaced tools:
 //! `mcp__<server>__<tool>`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub const MCP_CONFIG_RELATIVE_PATH: &str = ".xcoding/mcp.json";
+pub const PLUGIN_CONFIG_FILE_NAME: &str = "plugins.json";
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SERVERS: usize = 16;
@@ -45,6 +46,65 @@ pub enum McpError {
 pub struct McpFileConfig {
     #[serde(default, rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerEntry>,
+}
+
+/// User-level MCP and skill settings stored under `~/.xcoding/plugins.json`.
+/// Skill bodies remain in `~/.xcoding/skills`; this file only stores enablement.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct PluginConfig {
+    #[serde(default, rename = "mcpServers")]
+    pub mcp_servers: BTreeMap<String, McpServerEntry>,
+    #[serde(default, rename = "mcpEnabled")]
+    pub mcp_enabled: BTreeMap<String, bool>,
+    #[serde(default, rename = "skillEnabled")]
+    pub skill_enabled: BTreeMap<String, bool>,
+}
+
+pub fn user_config_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join(".xcoding");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join(".xcoding");
+        }
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".xcoding")
+}
+
+pub fn user_plugin_config_path() -> PathBuf {
+    user_config_dir().join(PLUGIN_CONFIG_FILE_NAME)
+}
+
+pub fn user_skill_root() -> PathBuf {
+    user_config_dir().join("skills")
+}
+
+pub fn load_plugin_config() -> PluginConfig {
+    let path = user_plugin_config_path();
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_plugin_config(config: &PluginConfig) -> Result<(), String> {
+    let path = user_plugin_config_path();
+    let body = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = path.with_file_name(format!(".{}.tmp", PLUGIN_CONFIG_FILE_NAME));
+    std::fs::write(&temporary, format!("{body}\n")).map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+    }
+    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -179,8 +239,16 @@ pub struct McpRuntime {
 impl McpRuntime {
     /// Spawn enabled servers, initialize, and list tools.
     pub fn prepare(workspace_root: impl AsRef<Path>) -> Result<Self, McpError> {
+        let plugin_config = load_plugin_config();
+        Self::prepare_with_plugin_config(workspace_root, &plugin_config)
+    }
+
+    pub fn prepare_with_plugin_config(
+        workspace_root: impl AsRef<Path>,
+        plugin_config: &PluginConfig,
+    ) -> Result<Self, McpError> {
         let workspace_root = workspace_root.as_ref().to_path_buf();
-        let configs = load_mcp_config(&workspace_root)?;
+        let configs = load_effective_mcp_config(&workspace_root, plugin_config)?;
         let mut sessions = HashMap::new();
         let mut tools = Vec::new();
         let mut startup_errors = Vec::new();
@@ -247,6 +315,62 @@ impl McpRuntime {
             })?;
         session.call_tool(tool, arguments)
     }
+}
+
+fn plugin_enabled(
+    overrides: &BTreeMap<String, bool>,
+    source: &str,
+    name: &str,
+    default: bool,
+) -> bool {
+    overrides
+        .get(&format!("{source}:{name}"))
+        .copied()
+        .unwrap_or(default)
+}
+
+pub fn load_effective_mcp_config(
+    workspace_root: impl AsRef<Path>,
+    plugin_config: &PluginConfig,
+) -> Result<Vec<McpServerConfig>, McpError> {
+    let workspace = load_mcp_config(workspace_root)?;
+    let mut by_name = HashMap::new();
+    for mut config in workspace {
+        config.enabled = plugin_enabled(
+            &plugin_config.mcp_enabled,
+            "workspace",
+            &config.name,
+            config.enabled,
+        );
+        by_name.insert(config.name.clone(), config);
+    }
+    for (name, entry) in &plugin_config.mcp_servers {
+        if !is_valid_server_name(name) {
+            return Err(McpError::Config(format!("invalid server name `{name}`")));
+        }
+        if entry.command.trim().is_empty() {
+            return Err(McpError::Config(format!(
+                "server `{name}` is missing a command"
+            )));
+        }
+        if by_name.contains_key(name) {
+            continue;
+        }
+        by_name.insert(
+            name.clone(),
+            McpServerConfig {
+                name: name.clone(),
+                command: entry.command.trim().to_owned(),
+                args: entry.args.clone(),
+                env: entry.env.clone(),
+                enabled: plugin_enabled(&plugin_config.mcp_enabled, "user", name, entry.enabled),
+            },
+        );
+    }
+    let mut configs: Vec<_> = by_name.into_values().collect();
+    configs.sort_by(|left, right| left.name.cmp(&right.name));
+    configs.truncate(MAX_SERVERS);
+    Ok(configs)
 }
 
 impl Drop for McpRuntime {

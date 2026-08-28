@@ -70,6 +70,7 @@ export interface ListModelsResult {
 
 /** One OpenAI-compatible cloud provider endpoint in Desktop settings. */
 export type ProviderWireApi = "chat_completions" | "responses";
+export type ProviderTrustLevel = "local" | "official" | "relay";
 
 export interface CloudProviderConfig {
   id: string;
@@ -79,6 +80,8 @@ export interface CloudProviderConfig {
   base_url: string;
   /** HTTP request/stream protocol used by this provider. */
   wire_api?: ProviderWireApi;
+  /** Trust boundary used for sensitive-data routing and fallback isolation. */
+  trust_level?: ProviderTrustLevel;
   /** Full API key when configured. Never log this value. */
   api_key?: string;
 }
@@ -469,6 +472,12 @@ export type SessionEvent =
       message: string;
     }
   | {
+      type: "stream_reset";
+      session_id: string;
+      discarded_chars: number;
+      reason: string;
+    }
+  | {
       type: "model_call";
       session_id: string;
       provider: string;
@@ -502,6 +511,21 @@ export type SessionEvent =
       session_id: string;
       image_count: number;
       error: string;
+    }
+  | {
+      type: "vision_descriptions_applied";
+      session_id: string;
+      image_count: number;
+      /** Characters spent on descriptions of attachments from earlier turns. */
+      historical_chars: number;
+      /** True when an earlier description was clipped or omitted for budget. */
+      truncated: boolean;
+    }
+  | {
+      type: "context_compacted";
+      session_id: string;
+      compacted_message_count: number;
+      summary: string;
     }
   | {
       type: "error";
@@ -566,4 +590,3 @@ export function isJsonRpcResponse(value: unknown): value is JsonRpcResponse {
     ("result" in value || "error" in value)
   );
 }
-

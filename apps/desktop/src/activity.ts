@@ -187,6 +187,21 @@ export function eventActivity(
       policy: "failed",
     };
   }
+  // Injecting descriptions is routine and stays silent. Only the budget cut is
+  // reported, because dropping an earlier image is a loss the user should see.
+  if (event.type === "vision_descriptions_applied") {
+    if (!event.truncated) return null;
+    return {
+      id: "vision-descriptions-truncated",
+      label: t(locale, "activity.visionDescriptionsTruncated"),
+      detail: t(locale, "activity.visionDelegateDetail", {
+        count: event.image_count,
+        chars: event.historical_chars,
+      }),
+      state: "done",
+      policy: "generic",
+    };
+  }
   if (event.type === "error") {
     return {
       id: sequence,

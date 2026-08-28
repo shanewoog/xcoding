@@ -151,3 +151,17 @@ export function adoptDraftSessionKey<T>(map: Record<string, T>, sessionId: strin
   if (key in rest) return rest;
   return { ...rest, [key]: draft };
 }
+
+// A task that finishes while the user is looking elsewhere keeps a green dot in
+// the sidebar until that task is opened.
+export function markSessionCompletedUnseen(current: string[], sessionId: string): string[] {
+  const id = sessionId.trim();
+  if (!id || current.includes(id)) return current;
+  return [...current, id];
+}
+
+export function clearSessionCompletedUnseen(current: string[], sessionId: string): string[] {
+  const id = sessionId.trim();
+  if (!id || !current.includes(id)) return current;
+  return current.filter((entry) => entry !== id);
+}

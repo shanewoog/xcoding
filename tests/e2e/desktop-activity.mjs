@@ -212,6 +212,23 @@ async function main() {
     "historical image description should be localized in Chinese",
   );
 
+  // A routine description injection stays silent; only the budget cut surfaces.
+  assert.ok(
+    activitySource.includes('event.type === "vision_descriptions_applied"') &&
+      activitySource.includes("if (!event.truncated) return null;"),
+    "applied descriptions should only surface when the historical budget trimmed them",
+  );
+  assert.ok(
+    i18nSource.includes(
+      '"activity.visionDescriptionsTruncated": "Earlier image descriptions trimmed to fit the context"',
+    ),
+    "trimmed description notice should be localized in English",
+  );
+  assert.ok(
+    i18nSource.includes('"activity.visionDescriptionsTruncated": "历史图片描述已因上下文上限裁剪"'),
+    "trimmed description notice should be localized in Chinese",
+  );
+
   assert.ok(
     i18nSource.includes("allowlisted safe commands") || configSource.includes("allowlisted safe commands"),
     "modeHelpText should mention allowlisted commands",

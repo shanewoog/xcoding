@@ -11,3 +11,4 @@ thiserror.workspace = true
 uuid.workspace = true
 xcoding-policy = { path = "../xcoding-policy" }
 xcoding-protocol = { path = "../xcoding-protocol" }
+xcoding-mcp = { path = "../xcoding-mcp" }

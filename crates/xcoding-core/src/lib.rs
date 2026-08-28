@@ -22,6 +22,7 @@ use xcoding_protocol::{
     WorkspaceConfig,
 };
 use xcoding_store::{SessionStore, StoreError};
+pub use xcoding_store::StoredVisionDescription;
 
 fn temporary_sibling(path: &Path) -> PathBuf {
     match path.file_name().and_then(|value| value.to_str()) {
@@ -155,6 +156,16 @@ impl CoreService {
         }
 
         let config = self.workspace_config(&params.workspace_root)?;
+        let model = params
+            .model
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| config.model.trim().to_owned());
+        if model.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "model must not be empty".to_owned(),
+            ));
+        }
         let derived_title = params
             .title
             .filter(|value| !value.trim().is_empty())
@@ -166,7 +177,7 @@ impl CoreService {
             workspace_root: params.workspace_root,
             mode: params.mode.unwrap_or(config.mode),
             provider: params.provider.unwrap_or(config.provider),
-            model: params.model.unwrap_or(config.model),
+            model,
             title: derived_title,
         })?;
         let session = self.set_status(session.id, SessionStatus::Running)?;
@@ -254,7 +265,8 @@ impl CoreService {
                 workspace_root: workspace_root.to_owned(),
                 mode: xcoding_protocol::Mode::Ask,
                 provider: "openai".to_owned(),
-                model: "gpt-5.5".to_owned(),
+                // No fallback model: callers must supply one until the workspace stores a choice.
+                model: String::new(),
                 command_allowlist: Vec::new(),
                 command_denylist: Vec::new(),
                 updated_at: Utc::now(),
@@ -479,7 +491,10 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
-    pub fn vision_description(&self, cache_key: &str) -> Result<Option<String>, CoreError> {
+    pub fn vision_description(
+        &self,
+        cache_key: &str,
+    ) -> Result<Option<StoredVisionDescription>, CoreError> {
         self.store
             .get_vision_description(cache_key)
             .map_err(CoreError::from)
@@ -488,10 +503,12 @@ impl CoreService {
     pub fn save_vision_description(
         &self,
         cache_key: &str,
+        delegate_model: &str,
+        session_id: Option<uuid::Uuid>,
         description: &str,
     ) -> Result<(), CoreError> {
         self.store
-            .save_vision_description(cache_key, description)
+            .save_vision_description(cache_key, delegate_model, session_id, description)
             .map_err(CoreError::from)
     }
 
@@ -741,13 +758,26 @@ impl CoreService {
     }
 
     fn create_session(&self, params: Value) -> Result<Value, RpcError> {
-        let params: CreateSessionParams = serde_json::from_value(params).map_err(|error| {
+        let mut params: CreateSessionParams = serde_json::from_value(params).map_err(|error| {
             RpcError::invalid_params(format!("invalid session.create params: {error}"))
         })?;
+        // No global fallback model: inherit the workspace choice, otherwise reject the call.
+        if params.model.trim().is_empty() {
+            let config =
+                self.workspace_config(&params.workspace_root)
+                    .map_err(|error| match error {
+                        CoreError::InvalidInput(message) => RpcError::invalid_params(message),
+                        other => RpcError::internal(other.to_string()),
+                    })?;
+            params.model = config.model;
+        }
         let session = self
             .store
             .create_session(params)
-            .map_err(|error| RpcError::internal(error.to_string()))?;
+            .map_err(|error| match error {
+                StoreError::InvalidInput(message) => RpcError::invalid_params(message),
+                other => RpcError::internal(other.to_string()),
+            })?;
         serde_json::to_value(CreateSessionResult { session })
             .map_err(|error| RpcError::internal(error.to_string()))
     }
@@ -923,7 +953,10 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     });
                 }
             }
-            SessionEvent::Retrying { .. } | SessionEvent::ModelCall { .. } => {}
+            SessionEvent::Retrying { .. }
+            | SessionEvent::StreamReset { .. }
+            | SessionEvent::ModelCall { .. }
+            | SessionEvent::ContextCompacted { .. } => {}
             SessionEvent::Error { message, .. } => {
                 steps.push(ReplayStep {
                     kind: "error".to_owned(),
@@ -958,6 +991,24 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     summary: format!("✗ 视觉分析失败（{} 张图片）: {}", image_count, error),
                     tool_name: None,
                     success: Some(false),
+                });
+            }
+            SessionEvent::VisionDescriptionsApplied { image_count, historical_chars, truncated, .. } => {
+                steps.push(ReplayStep {
+                    kind: "vision_descriptions_applied".to_owned(),
+                    summary: if *truncated {
+                        format!(
+                            "已注入 {} 张图片的描述（历史 {} 字符，已达上限并裁剪）",
+                            image_count, historical_chars
+                        )
+                    } else {
+                        format!(
+                            "已注入 {} 张图片的描述（历史 {} 字符）",
+                            image_count, historical_chars
+                        )
+                    },
+                    tool_name: None,
+                    success: Some(true),
                 });
             }
             SessionEvent::TextDelta { .. } => {}
@@ -1123,7 +1174,7 @@ mod tests {
                 message: "Original task".to_owned(),
                 mode: None,
                 provider: None,
-                model: None,
+                model: Some("test-model".to_owned()),
                 title: None,
                 session_id: None,
                 images: None,
@@ -1154,7 +1205,7 @@ mod tests {
         let create = core.dispatch(JsonRpcRequest::new(
             json!(1),
             "session.create",
-            json!({ "workspace_root": "D:/work/demo", "title": "Demo" }),
+            json!({ "workspace_root": "D:/work/demo", "title": "Demo", "model": "test-model" }),
         ));
         assert!(matches!(create, JsonRpcResponse::Success { .. }));
 
@@ -1172,6 +1223,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_sessions_and_chats_without_a_model() {
+        let core = CoreService::in_memory().expect("core starts");
+        let created = core.dispatch(JsonRpcRequest::new(
+            json!(1),
+            "session.create",
+            json!({ "workspace_root": "D:/work/demo", "title": "Demo" }),
+        ));
+        match created {
+            JsonRpcResponse::Failure { error, .. } => {
+                assert!(
+                    error.message.contains("model must not be empty"),
+                    "unexpected error: {error:?}"
+                );
+            }
+            JsonRpcResponse::Success { .. } => panic!("session.create must require a model"),
+        }
+
+        let chat = core.start_chat(ChatParams {
+            workspace_root: "D:/work/demo".to_owned(),
+            message: "Explain this project".to_owned(),
+            mode: None,
+            provider: None,
+            model: None,
+            title: None,
+            session_id: None,
+            images: None,
+        });
+        assert!(matches!(chat, Err(CoreError::InvalidInput(_))));
+    }
+
+    #[test]
     fn persists_workspace_defaults_and_uses_them_for_chats() {
         let core = CoreService::in_memory().expect("core starts");
         let workspace_root = "D:/work/configured";
@@ -1180,7 +1262,10 @@ mod tests {
             .expect("defaults load");
         assert_eq!(defaults.mode, Mode::Ask);
         assert_eq!(defaults.provider, "openai");
-        assert_eq!(defaults.model, "gpt-5.5");
+        assert!(
+            defaults.model.is_empty(),
+            "unconfigured workspaces must not synthesize a fallback model"
+        );
 
         let saved = core
             .set_workspace_config(SetConfigParams {
@@ -1223,7 +1308,7 @@ mod tests {
                 message: "Summarize work".to_owned(),
                 mode: None,
                 provider: None,
-                model: None,
+                model: Some("test-model".to_owned()),
                 title: None,
 
                 session_id: None,

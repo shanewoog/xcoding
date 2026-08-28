@@ -72,11 +72,26 @@ export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1" # optional
 
 `OPENAI_API_KEY` stays in the environment of the CLI or Desktop process. The RPC protocol accepts no credential fields.
 
+## Provider Trust Boundaries
+
+Provider configuration includes `trust_level`: `local` is for local or private deployments, `official` is for verified direct connections, and `relay` is for relays and unknown services. Legacy providers and providers without this field default to `relay`; upgrading the configuration never silently grants trust. Provider fallback also never crosses trust levels.
+
+For a `relay` provider:
+
+- Requests are blocked when high-confidence sensitive data is detected, including private-key headers, common cloud credentials, Bearer/JWT tokens, `.env` files, or similar secrets. Messages that cannot be parsed reliably are treated as sensitive.
+- Images are not sent to a relay vision delegate.
+- `apply_patch`, `run_command`, and MCP tools are downgraded to user confirmation even when they would otherwise auto-run.
+- The provider-reported model identifier is checked. A mismatch with the requested model fails the call instead of accepting a silent model swap.
+
+This does not prove that a relay is trustworthy. Prefer local or verified official connections for confidential material, and implement separate network, provider-log, access-control, and retention auditing as required by the deployment.
+
 ## Command Policy
 
 `run_command` is gated by a hard denylist, an allowlist, optional workspace lists, and risk labels:
 
-- **Hard deny** for clearly destructive system commands (for example `format`, `shutdown`, recursive root deletes, registry machine-wide edits, `git clean -fdx`, mirror push). Hard-denied commands never enter the approval queue.
+- **Hard deny** for clearly destructive system commands (for example `format`, `shutdown`, recursive root deletes, registry machine-wide edits, `git clean`, and `git push --mirror`). Hard-denied commands never enter the approval queue.
+- File deletion commands are denied when wrapped by a shell, when targeting absolute paths or parent traversal, or when recursive deletion reaches a drive root or user directory. Relative workspace deletion remains subject to the normal pattern and approval policies.
+- Git denies remote ref deletion (including `--delete`, `-d`, and `:ref`), reference deletion, forced worktree/submodule deletion, and history or reference destruction through `filter-branch`, `filter-repo`, `gc`, `prune`, `repack`, `replace`, or reflog expiry/deletion.
 - **Workspace denylist** (`.xcoding/command-denylist`) always blocks matching patterns, even if they also appear on the allowlist.
 - High-risk shells and force-push style invocations always need approval and are labeled **HIGH-RISK** in the approval summary (with a structured policy code).
 - Under `ask`, every remaining command still needs approval.

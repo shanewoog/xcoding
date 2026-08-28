@@ -2,6 +2,8 @@
 
 use std::{collections::VecDeque, fs, path::Path};
 
+use xcoding_mcp::{PluginConfig, load_plugin_config, user_skill_root};
+
 /// Workspace-root rule files, in load order.
 const RULE_FILES: [&str; 3] = ["AGENTS.md", "XCoding.md", ".xcoding/rules.md"];
 const MAX_RULE_CHARS: usize = 20_000;
@@ -22,6 +24,7 @@ pub struct SkillSummary {
     pub name: String,
     pub description: String,
     pub path: String,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -33,6 +36,10 @@ pub struct ContextSnapshot {
 
 impl ContextSnapshot {
     pub fn load(workspace_root: &Path) -> Self {
+        Self::load_with_plugin_config(workspace_root, &load_plugin_config())
+    }
+
+    pub fn load_with_plugin_config(workspace_root: &Path, plugin_config: &PluginConfig) -> Self {
         let project_rules = RULE_FILES
             .into_iter()
             .filter_map(|name| {
@@ -52,7 +59,7 @@ impl ContextSnapshot {
         Self {
             project_rules,
             relevant_paths: workspace_path_sketch(workspace_root),
-            skills: load_skill_catalog(workspace_root),
+            skills: load_skill_catalog(workspace_root, plugin_config),
         }
     }
 
@@ -67,6 +74,9 @@ In ask mode, propose writes and wait for required approval. In auto-edit mode, o
 In full-auto mode, every permitted write and command runs without approval; hard-denied destructive commands are still blocked, so act with extra care. \
 Prefer minimal, scoped changes. Do not invent secrets or commit credentials. If apply_patch fails with a patch conflict, re-read the file and retry with updated old_text; do not force-write without matching the current contents. \
 When several independent read-only lookups are needed, request them as parallel tool calls in one turn instead of one call per turn. \
+When starting a local service, launch it with run_command background=true plus ready_port and, when it needs its own directory, cwd. A ready=true result already proves the service is up, so do not add health-check commands after it. \
+Once the user's stated goal is met, answer and stop. Do not extend a finished request into further exploration such as unrelated credentials, auth flows, or code reading; if follow-up work looks useful, name it in the answer and let the user decide. \
+When giving the user a URL to open, write it as bare text. Do not wrap it in backticks or a fenced code block, because only unwrapped URLs render as clickable links in the desktop UI. \
 When a workspace skill matches the task, call load_skill with its name before following its instructions."
         );
 
@@ -109,47 +119,70 @@ For GitNexus, prefer built-in code-analysis tools. For a CLI fallback, invoke gi
     }
 }
 
-fn load_skill_catalog(workspace_root: &Path) -> Vec<SkillSummary> {
-    let skills_root = workspace_root.join(SKILLS_DIR);
-    let Ok(entries) = fs::read_dir(&skills_root) else {
-        return Vec::new();
-    };
-
-    let mut folders = entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|file_type| file_type.is_dir())
-                .unwrap_or(false)
-        })
-        .collect::<Vec<_>>();
-    folders.sort_by_key(|entry| entry.file_name());
-
+fn load_skill_catalog(workspace_root: &Path, plugin_config: &PluginConfig) -> Vec<SkillSummary> {
+    let mut roots = vec![
+        (
+            "workspace",
+            workspace_root.join(SKILLS_DIR),
+            ".xcoding/skills".to_owned(),
+        ),
+        ("user", user_skill_root(), "~/.xcoding/skills".to_owned()),
+    ];
+    let mut seen = std::collections::HashSet::new();
     let mut skills = Vec::new();
-    for entry in folders {
-        if skills.len() >= MAX_SKILLS {
-            break;
-        }
-        let folder_name = entry.file_name().to_string_lossy().into_owned();
-        if !is_valid_skill_name(&folder_name) {
-            continue;
-        }
-        let skill_path = entry.path().join("SKILL.md");
-        let Ok(raw) = fs::read_to_string(&skill_path) else {
+
+    for (source, skills_root, display_root) in roots.drain(..) {
+        let Ok(entries) = fs::read_dir(&skills_root) else {
             continue;
         };
-        let parsed = parse_skill_document(&folder_name, &raw);
-        skills.push(SkillSummary {
-            // Catalog key is always the folder name so load_skill arguments stay stable.
-            name: folder_name.clone(),
-            description: truncate_chars(
-                parsed.description.trim(),
-                MAX_SKILL_DESCRIPTION_CHARS,
-                "skill description",
-            ),
-            path: format!("{SKILLS_DIR}/{folder_name}/SKILL.md"),
-        });
+
+        let mut folders = entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .map(|file_type| file_type.is_dir())
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        folders.sort_by_key(|entry| entry.file_name());
+
+        for entry in folders {
+            if skills.len() >= MAX_SKILLS {
+                break;
+            }
+            let folder_name = entry.file_name().to_string_lossy().into_owned();
+            if !is_valid_skill_name(&folder_name) {
+                continue;
+            }
+            if !plugin_config
+                .skill_enabled
+                .get(&format!("{source}:{folder_name}"))
+                .copied()
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            if !seen.insert(folder_name.clone()) {
+                continue;
+            }
+            let skill_path = entry.path().join("SKILL.md");
+            let Ok(raw) = fs::read_to_string(&skill_path) else {
+                continue;
+            };
+            let parsed = parse_skill_document(&folder_name, &raw);
+            skills.push(SkillSummary {
+                // Catalog key is always the folder name so load_skill arguments stay stable.
+                name: folder_name.clone(),
+                description: truncate_chars(
+                    parsed.description.trim(),
+                    MAX_SKILL_DESCRIPTION_CHARS,
+                    "skill description",
+                ),
+                path: format!("{display_root}/{folder_name}/SKILL.md"),
+                source: source.to_owned(),
+            });
+        }
     }
     skills
 }
@@ -363,6 +396,24 @@ mod tests {
         let prompt = ContextSnapshot::load(&root).system_prompt("full-auto");
         assert!(prompt.contains("independent read-only lookups"));
         assert!(prompt.contains("parallel tool calls in one turn"));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn system_prompt_bounds_service_startup_and_finished_work() {
+        let root = temp_workspace("service-startup-guidance");
+
+        let prompt = ContextSnapshot::load(&root).system_prompt("full-auto");
+        // A started service must be proven by the launch itself, not by follow-up
+        // health-check commands.
+        assert!(prompt.contains("ready_port"));
+        assert!(prompt.contains("do not add health-check commands after it"));
+        // And a met goal has to end the turn instead of drifting into unrelated
+        // exploration.
+        assert!(prompt.contains("answer and stop"));
+        // A URL the user is meant to open has to stay clickable in the desktop UI.
+        assert!(prompt.contains("Do not wrap it in backticks or a fenced code block"));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }

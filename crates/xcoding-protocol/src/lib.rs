@@ -475,6 +475,17 @@ pub enum ProviderWireApi {
     Responses,
 }
 
+/// Trust boundary for an OpenAI-compatible endpoint.
+/// Unknown/legacy entries default to Relay so they cannot silently gain trust.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTrustLevel {
+    Local,
+    Official,
+    #[default]
+    Relay,
+}
+
 /// Vision delegate configuration for models without native vision support.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct VisionDelegateConfig {
@@ -515,6 +526,9 @@ pub struct CloudProviderConfig {
     /// HTTP request/stream protocol used by this provider.
     #[serde(default)]
     pub wire_api: ProviderWireApi,
+    /// Trust boundary used for sensitive-data routing and fallback isolation.
+    #[serde(default)]
+    pub trust_level: ProviderTrustLevel,
     /// Full API key when configured. Never log this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -543,7 +557,8 @@ pub struct UserConfig {
     /// Technical provider id used by sessions (currently always openai-compatible).
     #[serde(default = "default_provider")]
     pub provider: String,
-    #[serde(default = "default_model")]
+    /// Model id used by sessions. Empty until the user picks one; there is no fallback default.
+    #[serde(default)]
     pub model: String,
     /// Reasoning effort for compatible models: none | low | medium | high.
     #[serde(default = "default_reasoning_effort")]
@@ -626,6 +641,7 @@ impl Default for UserConfig {
             name: "openai".to_owned(),
             base_url: default_base_url(),
             wire_api: ProviderWireApi::default(),
+            trust_level: ProviderTrustLevel::Relay,
             api_key: None,
         };
         Self {
@@ -636,7 +652,7 @@ impl Default for UserConfig {
             local_memory_enabled: false,
             tool_memory_enabled: default_tool_memory_enabled(),
             provider: default_provider(),
-            model: default_model(),
+            model: String::new(),
             reasoning_effort: default_reasoning_effort(),
             max_provider_retries: default_max_provider_retries(),
             provider_fallback_enabled: default_provider_fallback_enabled(),
@@ -710,7 +726,8 @@ pub struct CreateSessionParams {
     pub mode: Mode,
     #[serde(default = "default_provider")]
     pub provider: String,
-    #[serde(default = "default_model")]
+    /// Model id for the session. Callers must supply it; there is no fallback default.
+    #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub title: Option<String>,
@@ -925,6 +942,14 @@ pub enum SessionEvent {
         max_attempts: u32,
         message: String,
     },
+    /// The stream broke after text was already shown, and the turn is being
+    /// restarted. Clients must discard the text streamed for the current
+    /// assistant turn so the retried answer does not render twice.
+    StreamReset {
+        session_id: Uuid,
+        discarded_chars: usize,
+        reason: String,
+    },
     /// Sanitized audit record for one model HTTP request. It deliberately excludes
     /// credentials, request messages, and generated text.
     ModelCall {
@@ -941,6 +966,10 @@ pub enum SessionEvent {
         tool_calls: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Model identifier returned by the upstream, when the wire protocol
+        /// reported one. The request and response bodies are never persisted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_reported: Option<String>,
     },
     /// Vision delegate started processing images.
     VisionDelegateStart {
@@ -966,6 +995,24 @@ pub enum SessionEvent {
         image_count: usize,
         error: String,
     },
+    /// Image descriptions were substituted into one request. Reported once per
+    /// turn so the size the descriptions add to the prompt is observable,
+    /// including cache hits that produce no delegate call.
+    VisionDescriptionsApplied {
+        session_id: Uuid,
+        image_count: usize,
+        /// Characters spent on descriptions of attachments from earlier turns.
+        historical_chars: usize,
+        /// True when the historical budget was reached and at least one earlier
+        /// description was clipped or omitted.
+        truncated: bool,
+    },
+    /// The early history prefix represented by the saved compaction summary.
+    ContextCompacted {
+        session_id: Uuid,
+        compacted_message_count: usize,
+        summary: String,
+    },
     Error {
         session_id: Uuid,
         message: String,
@@ -974,10 +1021,6 @@ pub enum SessionEvent {
 
 fn default_provider() -> String {
     "openai".to_owned()
-}
-
-fn default_model() -> String {
-    "gpt-5.5".to_owned()
 }
 
 fn default_reasoning_effort() -> String {
@@ -989,7 +1032,7 @@ fn default_max_provider_retries() -> u32 {
 }
 
 fn default_provider_fallback_enabled() -> bool {
-    true
+    false
 }
 
 fn default_max_tool_rounds() -> u32 {
@@ -1083,7 +1126,7 @@ mod tests {
             DEFAULT_STREAM_IDLE_TIMEOUT_SECS
         );
         assert_eq!(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES);
-        assert!(config.provider_fallback_enabled);
+        assert!(!config.provider_fallback_enabled);
         assert_eq!(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS);
         assert_eq!(
             config.circuit_failure_threshold,
@@ -1168,6 +1211,10 @@ mod tests {
     fn defaults_user_config_includes_provider_slot() {
         let config = UserConfig::default();
         assert_eq!(config.base_url, "https://ai.v58.dev");
+        assert!(
+            config.model.is_empty(),
+            "user config must not carry a hardcoded fallback model"
+        );
         assert_eq!(config.providers.len(), 1);
         assert_eq!(config.providers[0].base_url, "https://ai.v58.dev");
         assert_eq!(
@@ -1212,7 +1259,10 @@ mod tests {
             Mode::FullAuto
         );
         assert_eq!(params.provider, "openai");
-        assert_eq!(params.model, "gpt-5.5");
+        assert!(
+            params.model.is_empty(),
+            "session params must not fall back to a hardcoded model"
+        );
     }
 
     #[test]

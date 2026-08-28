@@ -1,8 +1,8 @@
 //! Cloud-model adapters for OpenAI-compatible streaming chat completions.
 
-use std::{collections::BTreeMap, env, fs, path::PathBuf, pin::Pin, time::Duration};
 use std::io::Write;
 use std::path::Path;
+use std::{collections::BTreeMap, env, fs, path::PathBuf, pin::Pin, time::Duration};
 
 use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
@@ -16,15 +16,13 @@ use xcoding_protocol::{
     CloudProviderConfig, ListModelsResult, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
     MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
     MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
-    MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS,
-    MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
-    MAX_NON_STREAM_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+    MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES,
+    MAX_MAX_TOOL_ROUNDS, MAX_NON_STREAM_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
     MAX_STREAM_IDLE_TIMEOUT_SECS, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
     MIN_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_MIN_REQUEST_COUNT,
     MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
-    MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
-    MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
-    MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+    MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES,
+    MIN_MAX_TOOL_ROUNDS, MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS,
     MIN_STREAM_IDLE_TIMEOUT_SECS, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
 
@@ -34,7 +32,25 @@ pub type ProviderEventStream =
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProviderEvent {
     TextDelta(String),
+    /// Model identifier reported by the upstream response, used to detect a
+    /// gateway silently swapping the requested model.
+    ModelReported(String),
+    /// Hidden thinking a gateway streams while a reasoning model works. It is
+    /// not model output: it exists so the caller can tell a thinking model
+    /// apart from a stalled connection.
+    ReasoningDelta(String),
     ToolCall(ProviderToolCall),
+    /// Token accounting reported by the endpoint for this request. Optional on
+    /// the wire: many OpenAI-compatible endpoints never send it.
+    Usage(ProviderUsage),
+}
+
+/// Real token counts for one provider request, used to calibrate the local
+/// estimator. Zero means the endpoint did not report that field.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ProviderUsage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -206,7 +222,10 @@ impl ProviderError {
                 if self.is_context_overflow() {
                     return false;
                 }
-                matches!(status.as_u16(), 400 | 401 | 403 | 404 | 408 | 409 | 429 | 500 | 502 | 503 | 504)
+                matches!(
+                    status.as_u16(),
+                    400 | 401 | 403 | 404 | 408 | 409 | 429 | 500 | 502 | 503 | 504
+                )
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
             Self::MissingApiKey
@@ -438,9 +457,8 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
     config.circuit_min_request_count = config
         .circuit_min_request_count
         .clamp(MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT);
-    config.context_compaction_threshold_percent = config
-        .context_compaction_threshold_percent
-        .clamp(
+    config.context_compaction_threshold_percent =
+        config.context_compaction_threshold_percent.clamp(
             MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
             MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
         );
@@ -498,6 +516,7 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
                 base
             },
             wire_api: ProviderWireApi::default(),
+            trust_level: xcoding_protocol::ProviderTrustLevel::Relay,
             api_key: config.api_key.clone(),
         });
         config.active_provider_id = Some(id);
@@ -869,8 +888,23 @@ impl OpenAiCompatibleProvider {
                     }
 
                     let parsed = parse_chunk(data)?;
+                    if let Some(model) = parsed.model {
+                        yield ProviderEvent::ModelReported(model);
+                    }
                     if let Some(reason) = parsed.finish_reason.as_deref() {
                         truncated_by_length = reason == "length";
+                    }
+                    // Usage is reference data, not model output, so it never
+                    // satisfies the empty-stream check.
+                    if let Some(usage) = parsed.usage {
+                        yield ProviderEvent::Usage(usage);
+                    }
+                    // Thinking arrives before the first content token on
+                    // reasoning models. It is not output either, so it does not
+                    // satisfy the empty-stream check; it only proves the stream
+                    // is alive.
+                    if let Some(reasoning) = parsed.reasoning {
+                        yield ProviderEvent::ReasoningDelta(reasoning);
                     }
                     if let Some(content) = parsed.content.filter(|content| !content.trim().is_empty()) {
                         emitted_event = true;
@@ -954,11 +988,22 @@ impl OpenAiCompatibleProvider {
                                 yield ProviderEvent::TextDelta(delta);
                             }
                         }
+                        ResponsesParsedEvent::ReasoningDelta(delta) => {
+                            if !delta.is_empty() {
+                                yield ProviderEvent::ReasoningDelta(delta);
+                            }
+                        }
                         ResponsesParsedEvent::ToolCall(tool_call) => {
                             emitted_event = true;
                             yield ProviderEvent::ToolCall(tool_call);
                         }
-                        ResponsesParsedEvent::Completed => {
+                        ResponsesParsedEvent::Completed { usage, model } => {
+                            if let Some(model) = model {
+                                yield ProviderEvent::ModelReported(model);
+                            }
+                            if let Some(usage) = usage {
+                                yield ProviderEvent::Usage(usage);
+                            }
                             completed = true;
                             break;
                         }
@@ -999,7 +1044,11 @@ fn chat_completions_request_body(
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "stream": true
+        "stream": true,
+        // Endpoints that honor this send a final usage-only chunk, which lets
+        // the agent calibrate its token estimate against real counts.
+        // Endpoints that ignore it simply never send the chunk.
+        "stream_options": { "include_usage": true }
     });
     if let Some(effort) = reasoning_effort
         .map(str::trim)
@@ -1139,8 +1188,12 @@ fn responses_message_item(role: &str, content: ChatMessageContent) -> Value {
 
 enum ResponsesParsedEvent {
     TextDelta(String),
+    ReasoningDelta(String),
     ToolCall(ProviderToolCall),
-    Completed,
+    Completed {
+        usage: Option<ProviderUsage>,
+        model: Option<String>,
+    },
     Failed(String),
     Ignored,
 }
@@ -1159,6 +1212,17 @@ fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderErr
                 .unwrap_or_default()
                 .to_owned(),
         )),
+        // Reasoning summaries prove the model is working before the first
+        // output token, which can be minutes away on high reasoning effort.
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            Ok(ResponsesParsedEvent::ReasoningDelta(
+                event
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ))
+        }
         "response.output_item.done" => {
             let Some(item) = event.get("item") else {
                 return Ok(ResponsesParsedEvent::Ignored);
@@ -1204,7 +1268,13 @@ fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderErr
                 truncated: false,
             }))
         }
-        "response.completed" => Ok(ResponsesParsedEvent::Completed),
+        "response.completed" => Ok(ResponsesParsedEvent::Completed {
+            usage: responses_usage(&event),
+            model: event
+                .pointer("/response/model")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }),
         "response.failed" | "response.incomplete" => {
             let message = event
                 .pointer("/response/error/message")
@@ -1229,9 +1299,41 @@ fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderErr
     }
 }
 
+/// Reads token counts from a `response.completed` event. Absent or zero counts
+/// mean the endpoint did not report usage, so the agent keeps estimating.
+fn responses_usage(event: &Value) -> Option<ProviderUsage> {
+    let prompt_tokens = event
+        .pointer("/response/usage/input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let completion_tokens = event
+        .pointer("/response/usage/output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    (prompt_tokens > 0 || completion_tokens > 0).then_some(ProviderUsage {
+        prompt_tokens,
+        completion_tokens,
+    })
+}
+
 #[derive(Deserialize)]
 struct ChatCompletionChunk {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
     choices: Vec<ChatCompletionChoice>,
+    /// Sent only by endpoints that honor `stream_options.include_usage`, and
+    /// usually on a final chunk that carries no choices.
+    #[serde(default)]
+    usage: Option<ChatCompletionUsage>,
+}
+
+#[derive(Deserialize)]
+struct ChatCompletionUsage {
+    #[serde(default)]
+    prompt_tokens: Option<usize>,
+    #[serde(default)]
+    completion_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1246,6 +1348,14 @@ struct ChatCompletionChoice {
 #[derive(Default, Deserialize)]
 struct ChatCompletionDelta {
     content: Option<String>,
+    /// Gateways in front of reasoning models stream visible-to-nobody thinking
+    /// here before the first `content` token. `reasoning_content` is the common
+    /// spelling; `reasoning` is accepted because some gateways use it, either as
+    /// a string or as an object carrying the text.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<Value>,
     #[serde(default)]
     tool_calls: Vec<ToolCallDelta>,
 }
@@ -1267,9 +1377,12 @@ struct ToolFunctionDelta {
 }
 
 struct ParsedChunk {
+    model: Option<String>,
     content: Option<String>,
+    reasoning: Option<String>,
     tool_calls: Vec<ToolCallDelta>,
     finish_reason: Option<String>,
+    usage: Option<ProviderUsage>,
 }
 
 #[derive(Default)]
@@ -1498,16 +1611,48 @@ fn load_dotenv_files() {
 }
 fn parse_chunk(data: &str) -> Result<ParsedChunk, ProviderError> {
     let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
+    let usage = chunk.usage.and_then(|usage| {
+        let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
+        let completion_tokens = usage.completion_tokens.unwrap_or(0);
+        (prompt_tokens > 0 || completion_tokens > 0).then_some(ProviderUsage {
+            prompt_tokens,
+            completion_tokens,
+        })
+    });
     let mut choices = chunk.choices.into_iter();
     let (delta, finish_reason) = choices
         .next()
         .map(|choice| (choice.delta, choice.finish_reason))
         .unwrap_or_default();
+    let reasoning = reasoning_delta_text(&delta);
     Ok(ParsedChunk {
+        model: chunk.model,
         content: delta.content,
+        reasoning,
         tool_calls: delta.tool_calls,
         finish_reason,
+        usage,
     })
+}
+
+/// Pulls the thinking text out of one delta, whichever field the gateway used.
+fn reasoning_delta_text(delta: &ChatCompletionDelta) -> Option<String> {
+    if let Some(text) = delta
+        .reasoning_content
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_owned());
+    }
+    match delta.reasoning.as_ref()? {
+        Value::String(text) => (!text.is_empty()).then(|| text.clone()),
+        value => value
+            .get("content")
+            .or_else(|| value.get("text"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+    }
 }
 
 fn completed_tool_calls(
@@ -1551,6 +1696,122 @@ mod tests {
         let parsed =
             parse_chunk(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#).expect("event parses");
         assert_eq!(parsed.content.as_deref(), Some("Hello"));
+        assert_eq!(parsed.usage, None);
+    }
+
+    #[test]
+    fn reasoning_only_delta_is_reported_as_stream_progress() {
+        // Gateways in front of reasoning models send minutes of this before the
+        // first content token. Dropping it made the caller treat a working
+        // stream as one that never started.
+        let parsed = parse_chunk(r#"{"choices":[{"delta":{"reasoning_content":"weighing options"}}]}"#)
+            .expect("reasoning chunk parses");
+        assert_eq!(parsed.reasoning.as_deref(), Some("weighing options"));
+        assert_eq!(parsed.content, None);
+        assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn reasoning_delta_accepts_string_and_object_spellings() {
+        let as_string = parse_chunk(r#"{"choices":[{"delta":{"reasoning":"thinking"}}]}"#)
+            .expect("string reasoning parses");
+        assert_eq!(as_string.reasoning.as_deref(), Some("thinking"));
+
+        let as_object = parse_chunk(r#"{"choices":[{"delta":{"reasoning":{"content":"nested"}}}]}"#)
+            .expect("object reasoning parses");
+        assert_eq!(as_object.reasoning.as_deref(), Some("nested"));
+
+        let empty = parse_chunk(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#)
+            .expect("empty reasoning parses");
+        assert_eq!(empty.reasoning, None);
+    }
+
+    #[test]
+    fn content_delta_reports_no_reasoning() {
+        let parsed = parse_chunk(r#"{"choices":[{"delta":{"content":"answer"}}]}"#)
+            .expect("content chunk parses");
+        assert_eq!(parsed.reasoning, None);
+    }
+
+    #[test]
+    fn responses_stream_reports_reasoning_deltas() {
+        match parse_responses_event(
+            r#"{"type":"response.reasoning_summary_text.delta","delta":"planning"}"#,
+        )
+        .expect("reasoning summary parses")
+        {
+            ResponsesParsedEvent::ReasoningDelta(delta) => assert_eq!(delta, "planning"),
+            _ => panic!("expected reasoning delta"),
+        }
+        match parse_responses_event(r#"{"type":"response.reasoning_text.delta","delta":"step"}"#)
+            .expect("reasoning text parses")
+        {
+            ResponsesParsedEvent::ReasoningDelta(delta) => assert_eq!(delta, "step"),
+            _ => panic!("expected reasoning delta"),
+        }
+    }
+
+    #[test]
+    fn parses_streamed_usage_and_degrades_without_it() {
+        // Endpoints that honor `include_usage` send a final choice-less chunk.
+        let parsed = parse_chunk(
+            r#"{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":56,"total_tokens":1290}}"#,
+        )
+        .expect("usage chunk parses");
+        assert_eq!(
+            parsed.usage,
+            Some(ProviderUsage {
+                prompt_tokens: 1234,
+                completion_tokens: 56,
+            })
+        );
+        assert_eq!(parsed.content, None);
+
+        // A null usage field, an all-zero report, and a plain chunk must all
+        // degrade to "no usage" instead of poisoning the calibration.
+        assert_eq!(
+            parse_chunk(r#"{"choices":[{"delta":{"content":"hi"}}],"usage":null}"#)
+                .expect("null usage parses")
+                .usage,
+            None
+        );
+        assert_eq!(
+            parse_chunk(r#"{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}"#)
+                .expect("zero usage parses")
+                .usage,
+            None
+        );
+
+        // Responses endpoints report the same numbers under different names.
+        match parse_responses_event(
+            r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":800,"output_tokens":20}}}"#,
+        )
+        .expect("completion event parses")
+        {
+            ResponsesParsedEvent::Completed { usage, model } => assert_eq!(
+                (usage, model),
+                (
+                    Some(ProviderUsage {
+                        prompt_tokens: 800,
+                        completion_tokens: 20,
+                    }),
+                    None,
+                )
+            ),
+            _ => panic!("expected completed event"),
+        }
+    }
+
+    #[test]
+    fn chat_completions_request_body_asks_for_streamed_usage() {
+        let body = chat_completions_request_body(
+            "gpt-test",
+            vec![ChatMessage::user("Say hello.")],
+            &[],
+            None,
+        );
+
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
     #[test]
@@ -1702,7 +1963,10 @@ mod tests {
                 r#"{"type":"response.completed","response":{"status":"completed"}}"#
             )
             .expect("completion event parses"),
-            ResponsesParsedEvent::Completed
+            ResponsesParsedEvent::Completed {
+                usage: None,
+                model: None,
+            }
         ));
 
         match parse_responses_event(
@@ -2000,8 +2264,10 @@ mod tests {
             .is_context_overflow()
         );
         assert!(!ProviderError::MissingApiKey.is_context_overflow());
-        assert!(!ProviderError::InvalidResponse("upstream_error: request failed".to_owned())
-            .is_context_overflow());
+        assert!(
+            !ProviderError::InvalidResponse("upstream_error: request failed".to_owned())
+                .is_context_overflow()
+        );
     }
 
     #[test]
@@ -2017,7 +2283,9 @@ mod tests {
     fn context_overflow_message_does_not_blame_credentials() {
         let message = ProviderError::HttpStatus {
             status: StatusCode::BAD_REQUEST,
-            body: "Input exceeds the model's context window. Please shorten your input and try again.".to_owned(),
+            body:
+                "Input exceeds the model's context window. Please shorten your input and try again."
+                    .to_owned(),
         }
         .to_string();
         assert!(message.contains("Context window exceeded (HTTP 400)"));

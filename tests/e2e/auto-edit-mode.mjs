@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,12 +14,31 @@ const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 async function main() {
   const workspace = await mkdtemp(resolve(tmpdir(), "xcoding-auto-edit-"));
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-auto-edit-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-auto-edit-home-"));
+  const configDirectory = resolve(homeDirectory, ".xcoding");
   await cp(fixtureSource, workspace, { recursive: true });
   const mock = await startMockProvider();
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    resolve(configDirectory, "config.json"),
+    `${JSON.stringify(
+      {
+        provider_fallback_enabled: false,
+        providers: [
+          { id: "default", name: "openai", base_url: mock.baseUrl, api_key: "e2e-test-key", trust_level: "official" },
+        ],
+        active_provider_id: "default",
+      },
+      null,
+    )}\n`,
+    "utf8",
+  );
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
       ...process.env,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
       OPENAI_API_KEY: "e2e-test-key",
       XCODING_OPENAI_BASE_URL: mock.baseUrl,
     },
@@ -127,6 +146,7 @@ async function main() {
     await mock.close();
     await rm(workspace, { recursive: true, force: true });
     await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
   }
 }
 

@@ -24,10 +24,17 @@ pub enum CommandPolicyCode {
     AbsolutePath,
     PathSeparator,
     DeniedExecutable,
+    DeniedAbsoluteDelete,
+    DeniedShellDestructiveDelete,
     DeniedRecursiveRootDelete,
     DeniedRegistryHklm,
     DeniedGitClean,
     DeniedGitMirrorPush,
+    DeniedGitRemoteDelete,
+    DeniedGitHistoryRewrite,
+    DeniedGitReferenceDelete,
+    DeniedGitForcedWorktreeDelete,
+    DeniedDeletePathTraversal,
     DeniedDestructiveDisk,
     DeniedWorkspaceDenylist,
     DeniedDetachedWindow,
@@ -35,6 +42,7 @@ pub enum CommandPolicyCode {
     HighRiskNetwork,
     HighRiskForcePush,
     HighRiskPublish,
+    HighRiskPackageInstall,
     HighRiskInterpreter,
     HighRiskGit,
     HighRiskSudo,
@@ -49,10 +57,17 @@ impl CommandPolicyCode {
             Self::AbsolutePath => "absolute_path",
             Self::PathSeparator => "path_separator",
             Self::DeniedExecutable => "denied_executable",
+            Self::DeniedAbsoluteDelete => "denied_absolute_delete",
+            Self::DeniedShellDestructiveDelete => "denied_shell_destructive_delete",
             Self::DeniedRecursiveRootDelete => "denied_recursive_root_delete",
             Self::DeniedRegistryHklm => "denied_registry_hklm",
             Self::DeniedGitClean => "denied_git_clean",
             Self::DeniedGitMirrorPush => "denied_git_mirror_push",
+            Self::DeniedGitRemoteDelete => "denied_git_remote_delete",
+            Self::DeniedGitHistoryRewrite => "denied_git_history_rewrite",
+            Self::DeniedGitReferenceDelete => "denied_git_reference_delete",
+            Self::DeniedGitForcedWorktreeDelete => "denied_git_forced_worktree_delete",
+            Self::DeniedDeletePathTraversal => "denied_delete_path_traversal",
             Self::DeniedDestructiveDisk => "denied_destructive_disk",
             Self::DeniedWorkspaceDenylist => "denied_workspace_denylist",
             Self::DeniedDetachedWindow => "denied_detached_window",
@@ -60,6 +75,7 @@ impl CommandPolicyCode {
             Self::HighRiskNetwork => "high_risk_network",
             Self::HighRiskForcePush => "high_risk_force_push",
             Self::HighRiskPublish => "high_risk_publish",
+            Self::HighRiskPackageInstall => "high_risk_package_install",
             Self::HighRiskInterpreter => "high_risk_interpreter",
             Self::HighRiskGit => "high_risk_git",
             Self::HighRiskSudo => "high_risk_sudo",
@@ -98,16 +114,20 @@ pub fn evaluate(mode: &Mode, kind: PermissionKind, high_risk: bool) -> Permissio
 /// High-risk writes (git mutations, `.git` / `.xcoding` paths) still need approval.
 /// `command_allowlisted` only affects `PermissionKind::Exec` under `auto-edit`.
 ///
-/// Under `full-auto` every write and command that reached this function is allowed
-/// without approval. Hard-denied commands are rejected earlier by [`assess_command`],
-/// and `PermissionKind::Network` stays denied in every mode.
+/// Under `full-auto`, ordinary writes and low-risk commands are allowed without
+/// approval. High-risk commands still require approval, while hard-denied commands
+/// are rejected earlier by [`assess_command`]. `PermissionKind::Network` stays
+/// denied in every mode.
 pub fn evaluate_detailed(
     mode: &Mode,
     kind: PermissionKind,
     high_risk: bool,
     command_allowlisted: bool,
 ) -> PermissionDecision {
-    if matches!(mode, Mode::FullAuto) && !matches!(kind, PermissionKind::Network) {
+    if matches!(mode, Mode::FullAuto)
+        && !matches!(kind, PermissionKind::Network)
+        && !high_risk
+    {
         return PermissionDecision::Allow;
     }
     match kind {
@@ -166,8 +186,8 @@ pub fn assess_command_with_lists(
     // Relative build-output paths are a normal local workflow, so allow `./x` and
     // `target/x` while still rejecting absolute paths and upward traversal.
     let normalized_executable = executable.replace('\\', "/");
-    let relative_prefix_allowed = normalized_executable.starts_with("./")
-        || normalized_executable.starts_with("target/");
+    let relative_prefix_allowed =
+        normalized_executable.starts_with("./") || normalized_executable.starts_with("target/");
     let has_separator = executable.contains('/') || executable.contains('\\');
     if executable.contains("..") || (has_separator && !relative_prefix_allowed) {
         return denied(
@@ -184,6 +204,18 @@ pub fn assess_command_with_lists(
         .join(" ");
     let lower_joined = joined.to_ascii_lowercase();
     let args_lower: Vec<String> = args.iter().map(|arg| arg.to_ascii_lowercase()).collect();
+
+    // A shell receives packed command text, so a destructive operation can be
+    // hidden inside one quoted `/c` or `-Command` argument and bypass the
+    // direct executable checks below. Refuse that form before approval or
+    // execution; destructive file operations must use a direct executable or a
+    // structured file API instead of shell parsing.
+    if shell_wraps_destructive_delete(&exe, &args_lower) {
+        return denied(
+            CommandPolicyCode::DeniedShellDestructiveDelete,
+            "shell-wrapped delete commands are blocked by XCoding policy; use a direct file operation instead",
+        );
+    }
 
     // Destructive system operations: hard deny.
     if matches!(
@@ -226,11 +258,26 @@ pub fn assess_command_with_lists(
         );
     }
 
-    if exe == "del" || exe == "rmdir" || exe == "rd" {
+    if matches!(exe.as_str(), "rm" | "del" | "erase" | "rmdir" | "rd")
+        && targets_path_traversal(&args_lower)
+    {
+        return denied(
+            CommandPolicyCode::DeniedDeletePathTraversal,
+            "delete targets containing parent traversal are blocked; use a workspace-relative target",
+        );
+    }
+
+    if exe == "del" || exe == "erase" || exe == "rmdir" || exe == "rd" {
         if has_flag(&args_lower, "/s") && targets_filesystem_root(&args_lower) {
             return denied(
                 CommandPolicyCode::DeniedRecursiveRootDelete,
                 "recursive delete of filesystem roots is blocked by XCoding policy",
+            );
+        }
+        if targets_absolute_path(&args_lower) {
+            return denied(
+                CommandPolicyCode::DeniedAbsoluteDelete,
+                "absolute-path file deletion is blocked by XCoding policy; use a workspace-relative path",
             );
         }
     }
@@ -255,10 +302,22 @@ pub fn assess_command_with_lists(
     }
 
     if exe == "git" {
-        if args_lower.iter().any(|arg| arg == "clean") && git_clean_is_hard_denied(&args_lower) {
+        if git_forced_worktree_delete(&args_lower) {
+            return denied(
+                CommandPolicyCode::DeniedGitForcedWorktreeDelete,
+                "forced git worktree or submodule deletion is blocked by XCoding policy",
+            );
+        }
+        if git_file_delete_target_traverses_parent(&args_lower) {
+            return denied(
+                CommandPolicyCode::DeniedDeletePathTraversal,
+                "destructive git targets containing parent traversal are blocked",
+            );
+        }
+        if args_lower.iter().any(|arg| arg == "clean") {
             return denied(
                 CommandPolicyCode::DeniedGitClean,
-                "git clean that removes ignored files with force is blocked by XCoding policy",
+                "git clean can delete untracked workspace files and is blocked by XCoding policy",
             );
         }
         if args_lower.iter().any(|arg| arg == "push")
@@ -267,6 +326,24 @@ pub fn assess_command_with_lists(
             return denied(
                 CommandPolicyCode::DeniedGitMirrorPush,
                 "git push --mirror is blocked by XCoding policy",
+            );
+        }
+        if git_push_deletes_remote_ref(&args_lower) {
+            return denied(
+                CommandPolicyCode::DeniedGitRemoteDelete,
+                "deleting a remote git ref is blocked by XCoding policy",
+            );
+        }
+        if git_history_rewrite_is_irreversible(&args_lower) {
+            return denied(
+                CommandPolicyCode::DeniedGitHistoryRewrite,
+                "irreversible git history cleanup or rewrite is blocked by XCoding policy",
+            );
+        }
+        if git_deletes_reference(&args_lower) {
+            return denied(
+                CommandPolicyCode::DeniedGitReferenceDelete,
+                "deleting git references is blocked by XCoding policy",
             );
         }
     }
@@ -356,9 +433,7 @@ pub fn assess_command_with_lists(
                 "git reset --hard requires explicit approval",
             );
         }
-        if args_lower.iter().any(|arg| {
-            arg == "filter-branch" || arg == "filter-repo" || arg == "rebase" || arg == "--amend"
-        }) {
+        if args_lower.iter().any(|arg| arg == "rebase" || arg == "--amend") {
             return high_risk(
                 CommandPolicyCode::HighRiskGit,
                 "high-risk git operation requires explicit approval",
@@ -372,6 +447,17 @@ pub fn assess_command_with_lists(
         return high_risk(
             CommandPolicyCode::HighRiskPublish,
             format!("package publish via `{exe}` requires explicit approval"),
+        );
+    }
+
+    if matches!(exe.as_str(), "npm" | "pnpm" | "yarn" | "npx")
+        && package_install_or_script_command(&args_lower)
+    {
+        return high_risk(
+            CommandPolicyCode::HighRiskPackageInstall,
+            format!(
+                "package installation or lifecycle execution via `{exe}` requires explicit approval"
+            ),
         );
     }
 
@@ -392,6 +478,28 @@ pub fn assess_command_with_lists(
         code: CommandPolicyCode::RequiresApproval,
         reason: format!("command `{exe}` requires approval before execution"),
     }
+}
+
+fn package_install_or_script_command(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "install"
+                | "i"
+                | "add"
+                | "ci"
+                | "update"
+                | "upgrade"
+                | "exec"
+                | "dlx"
+                | "postinstall"
+                | "preinstall"
+                | "prepare"
+        )
+    }) || (args.iter().any(|arg| arg == "run" || arg == "run-script")
+        && args.iter().any(|arg| {
+            matches!(arg.as_str(), "postinstall" | "preinstall" | "prepare")
+        }))
 }
 /// Strict allowlist for safe, commonly used developer commands.
 ///
@@ -767,6 +875,72 @@ fn detached_window_request(exe: &str, args_lower: &[String]) -> Option<&'static 
         .then_some("Start-Process")
 }
 
+fn shell_wraps_destructive_delete(exe: &str, args_lower: &[String]) -> bool {
+    if !matches!(exe, "cmd" | "powershell" | "pwsh") {
+        return false;
+    }
+
+    // Arguments may be passed as separate argv entries or as one packed script
+    // string. Tokenizing both forms catches quoted Windows paths without trying
+    // to execute or fully emulate either shell.
+    let tokens: Vec<String> = args_lower
+        .iter()
+        .flat_map(|arg| shell_tokens(arg))
+        .collect();
+
+    let mut command_position = true;
+    for token in tokens {
+        if matches!(token.as_str(), "/c" | "/k" | "-command" | "-c" | "&&" | "||") {
+            command_position = true;
+            continue;
+        }
+        if matches!(token.as_str(), "&" | "|" | ";") {
+            command_position = true;
+            continue;
+        }
+        if token.starts_with('-') || (exe == "cmd" && token.starts_with('/')) {
+            continue;
+        }
+        if command_position
+            && matches!(
+                token.trim_start_matches(".\\"),
+                "del" | "erase" | "rd" | "rmdir" | "remove-item" | "ri" | "rm"
+            )
+        {
+            return true;
+        }
+        command_position = false;
+    }
+    false
+}
+
+fn shell_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    let push_current = |tokens: &mut Vec<String>, current: &mut String| {
+        if !current.is_empty() {
+            tokens.push(std::mem::take(current));
+        }
+    };
+
+    for ch in value.chars() {
+        match ch {
+            '"' | '\'' => {}
+            ch if ch.is_whitespace() => {
+                push_current(&mut tokens, &mut current);
+            }
+            ch if matches!(ch, '&' | '|' | ';') => {
+                push_current(&mut tokens, &mut current);
+                tokens.push(ch.to_string());
+            }
+            ch => current.push(ch),
+        }
+    }
+    push_current(&mut tokens, &mut current);
+    tokens
+}
+
 fn looks_absolute(executable: &str) -> bool {
     let path = std::path::Path::new(executable);
     path.is_absolute()
@@ -801,14 +975,35 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 
 fn targets_filesystem_root(args: &[String]) -> bool {
     args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "/" | "\\" | "/*" | "\\*" | "c:\\" | "c:/" | "c:\\*" | "c:/*" | "c:"
-        ) || arg.eq_ignore_ascii_case("c:\\")
-            || arg.eq_ignore_ascii_case("c:/")
-            || arg.eq_ignore_ascii_case("c:\\*")
-            || arg.eq_ignore_ascii_case("c:/*")
+        let normalized = arg
+            .trim()
+            .trim_matches(['"', '\''])
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        matches!(normalized.as_str(), "/" | "\\" | "/*" | "\\*" | "c:")
+            || is_windows_drive_root(&normalized)
     })
+}
+
+fn targets_absolute_path(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let path = arg.trim().trim_matches(['"', '\'']);
+        if path.starts_with('/') {
+            // `/s`, `/q`, and similar forms are rmdir/del switches, not paths.
+            // A longer slash-prefixed token is still an absolute POSIX-style
+            // path and is blocked for portability.
+            return path == "/" || path.len() > 2;
+        }
+        looks_absolute(path) || is_windows_drive_root(&path.to_ascii_lowercase())
+    })
+}
+
+fn is_windows_drive_root(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(&path[2..], "" | "\\" | "\\*")
 }
 
 fn targets_dangerous_delete_path(args: &[String]) -> bool {
@@ -835,6 +1030,13 @@ fn targets_dangerous_delete_path(args: &[String]) -> bool {
     })
 }
 
+fn targets_path_traversal(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let path = arg.trim().trim_matches(['"', '\'']).replace('\\', "/");
+        path.split('/').any(|component| component == "..")
+    })
+}
+
 fn is_raw_disk_dd_arg(arg: &str) -> bool {
     let lower = arg.to_ascii_lowercase();
     lower.starts_with("if=/dev/")
@@ -844,21 +1046,59 @@ fn is_raw_disk_dd_arg(arg: &str) -> bool {
         || lower.contains("physicaldrive")
 }
 
-fn git_clean_is_hard_denied(args: &[String]) -> bool {
-    let force = args.iter().any(|arg| {
-        arg == "-f"
-            || arg == "--force"
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('f') && arg != "-")
-    });
-    let ignored = args.iter().any(|arg| {
-        arg == "-x"
-            || arg == "-X"
-            || arg == "--ignored"
-            || (arg.starts_with('-')
-                && !arg.starts_with("--")
-                && (arg.contains('x') || arg.contains('X')))
-    });
-    force && ignored
+fn git_push_deletes_remote_ref(args: &[String]) -> bool {
+    let Some(push_index) = args.iter().position(|arg| arg == "push") else {
+        return false;
+    };
+    args.iter().skip(push_index + 1).any(|arg| {
+        arg == "--delete" || arg == "-d" || (arg.starts_with(':') && arg.len() > 1)
+    })
+}
+
+fn git_history_rewrite_is_irreversible(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "filter-branch" | "filter-repo" | "gc" | "prune" | "repack" | "replace"
+        )
+    }) || (args.iter().any(|arg| arg == "reflog")
+        && args.iter().any(|arg| arg == "expire" || arg == "delete"))
+}
+
+fn git_deletes_reference(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(arg.as_str(), "update-ref" | "branch" | "tag")
+    }) && args.iter().any(|arg| {
+        arg == "-d" || arg == "-D" || arg == "--delete" || arg == "--expire=now"
+    })
+}
+
+fn git_forced_worktree_delete(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(arg.as_str(), "worktree" | "submodule")
+    }) && args.iter().any(|arg| arg == "--force" || arg == "-f")
+}
+
+fn git_file_delete_target_traverses_parent(args: &[String]) -> bool {
+    let Some(command) = args.iter().find(|arg| {
+        matches!(
+            arg.as_str(),
+            "rm" | "checkout" | "restore" | "clean" | "worktree" | "submodule"
+        )
+    }) else {
+        return false;
+    };
+    let destructive = matches!(command.as_str(), "rm" | "checkout" | "restore" | "clean");
+    if !destructive {
+        return args.iter().any(|arg| {
+            let path = arg.replace('\\', "/");
+            path.split('/').any(|component| component == "..")
+        });
+    }
+    args.iter().any(|arg| {
+        let path = arg.trim_matches(['"', '\'']).replace('\\', "/");
+        !path.starts_with('-') && path.split('/').any(|component| component == "..")
+    })
 }
 
 #[cfg(test)]
@@ -942,14 +1182,14 @@ mod tests {
     }
 
     #[test]
-    fn full_auto_allows_high_risk_writes_and_commands() {
+    fn full_auto_allows_low_risk_but_still_confirms_high_risk_operations() {
         assert_eq!(
             evaluate(&Mode::FullAuto, PermissionKind::Write, false),
             PermissionDecision::Allow
         );
         assert_eq!(
             evaluate(&Mode::FullAuto, PermissionKind::Write, true),
-            PermissionDecision::Allow
+            PermissionDecision::AskUser
         );
         assert_eq!(
             evaluate_detailed(&Mode::FullAuto, PermissionKind::Exec, false, false),
@@ -957,7 +1197,7 @@ mod tests {
         );
         assert_eq!(
             evaluate_detailed(&Mode::FullAuto, PermissionKind::Exec, true, false),
-            PermissionDecision::Allow
+            PermissionDecision::AskUser
         );
         assert_eq!(
             evaluate(&Mode::FullAuto, PermissionKind::Read, false),
@@ -1011,6 +1251,99 @@ mod tests {
         assert_eq!(assessment.code, CommandPolicyCode::DeniedExecutable);
         assert!(!assessment.allowlisted);
         assert!(assessment.reason.contains("blocked"));
+    }
+
+    #[test]
+    fn denies_shell_wrapped_recursive_deletes_before_approval() {
+        let denied: [(&str, &[&str]); 9] = [
+            ("cmd", &["/c", "rmdir", "/s", "/q", r#"E:\target folder"#]),
+            ("cmd", &["/c", r#""rmdir /s /q E:\target folder""#]),
+            ("cmd", &["/c", "rd /s /q E:\\"]),
+            (
+                "powershell",
+                &[
+                    "-Command",
+                    "Remove-Item",
+                    "E:\\target",
+                    "-Recurse",
+                    "-Force",
+                ],
+            ),
+            (
+                "pwsh",
+                &["-Command", r#"Remove-Item 'E:\target folder' -Recurse"#],
+            ),
+            (
+                "powershell",
+                &[
+                    "-Command",
+                    r#"Remove-Item -LiteralPath 'E:\target' -Recurse"#,
+                ],
+            ),
+            ("cmd", &["/c", "echo ok&&rmdir /s /q E:\\target"]),
+            ("cmd", &["/c", "echo ok|rmdir /s /q E:\\target"]),
+            (
+                "powershell",
+                &["-Command", "Write-Output ok; Remove-Item E:\\target -Recurse"],
+            ),
+        ];
+        for (exe, args) in denied {
+            let args: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
+            let assessment = assess_command(exe, &args);
+            assert_eq!(
+                assessment.decision,
+                PermissionDecision::Deny,
+                "{exe} {args:?}"
+            );
+            assert_eq!(
+                assessment.code,
+                CommandPolicyCode::DeniedShellDestructiveDelete,
+                "{exe} {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_any_windows_drive_root_for_recursive_delete() {
+        for root in [r#"E:\"#, "F:/", "g:", r#"H:\*"#] {
+            let assessment = assess_command(
+                "rmdir",
+                &["/s".to_owned(), "/q".to_owned(), root.to_owned()],
+            );
+            assert_eq!(assessment.decision, PermissionDecision::Deny, "{root}");
+            assert_eq!(
+                assessment.code,
+                CommandPolicyCode::DeniedRecursiveRootDelete
+            );
+        }
+    }
+
+    #[test]
+    fn denies_direct_absolute_file_deletes_but_keeps_relative_paths_available() {
+        for (exe, target) in [
+            ("del", r#"E:\outside.txt"#),
+            ("erase", r#"F:\outside.txt"#),
+            ("rmdir", r#"E:\outside-folder"#),
+            ("rd", r#"\\server\share\outside-folder"#),
+        ] {
+            let assessment = assess_command(exe, &[target.to_owned()]);
+            assert_eq!(assessment.decision, PermissionDecision::Deny, "{exe} {target}");
+            assert_eq!(assessment.code, CommandPolicyCode::DeniedAbsoluteDelete);
+        }
+
+        let relative = assess_command("rmdir", &[r#".\cache"#.to_owned()]);
+        assert_ne!(relative.code, CommandPolicyCode::DeniedAbsoluteDelete);
+    }
+
+    #[test]
+    fn shell_without_delete_remains_high_risk_and_askable() {
+        let assessment = assess_command("cmd", &["/c".to_owned(), "echo hello".to_owned()]);
+        assert_eq!(assessment.decision, PermissionDecision::AskUser);
+        assert_eq!(assessment.code, CommandPolicyCode::HighRiskShell);
+
+        let literal = assess_command("cmd", &["/c".to_owned(), "echo rmdir".to_owned()]);
+        assert_eq!(literal.decision, PermissionDecision::AskUser);
+        assert_eq!(literal.code, CommandPolicyCode::HighRiskShell);
     }
 
     #[test]
@@ -1080,6 +1413,70 @@ mod tests {
     }
 
     #[test]
+    fn denies_git_destructive_operations_before_approval() {
+        let denied = [
+            ("git", vec!["clean", "-fd"], CommandPolicyCode::DeniedGitClean),
+            (
+                "git",
+                vec!["push", "origin", "--delete", "main"],
+                CommandPolicyCode::DeniedGitRemoteDelete,
+            ),
+            (
+                "git",
+                vec!["push", "origin", ":main"],
+                CommandPolicyCode::DeniedGitRemoteDelete,
+            ),
+            (
+                "git",
+                vec!["update-ref", "-d", "refs/heads/main"],
+                CommandPolicyCode::DeniedGitReferenceDelete,
+            ),
+            (
+                "git",
+                vec!["branch", "-D", "feature"],
+                CommandPolicyCode::DeniedGitReferenceDelete,
+            ),
+            (
+                "git",
+                vec!["gc", "--prune=now"],
+                CommandPolicyCode::DeniedGitHistoryRewrite,
+            ),
+            (
+                "git",
+                vec!["worktree", "remove", "--force", "../other"],
+                CommandPolicyCode::DeniedGitForcedWorktreeDelete,
+            ),
+        ];
+        for (exe, args, code) in denied {
+            let assessment = assess_command(
+                exe,
+                &args.iter().map(|value| String::from(*value)).collect::<Vec<_>>(),
+            );
+            assert_eq!(assessment.decision, PermissionDecision::Deny, "{args:?}");
+            assert_eq!(assessment.code, code, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn denies_delete_parent_traversal() {
+        for (exe, target) in [
+            ("del", r#"..\outside.txt"#),
+            ("rmdir", "../outside-folder"),
+            ("rm", "../outside-folder"),
+            ("git", r#"..\outside-file"#),
+        ] {
+            let args = if exe == "git" {
+                vec!["rm".to_owned(), target.to_owned()]
+            } else {
+                vec![target.to_owned()]
+            };
+            let assessment = assess_command(exe, &args);
+            assert_eq!(assessment.decision, PermissionDecision::Deny, "{exe} {target}");
+            assert_eq!(assessment.code, CommandPolicyCode::DeniedDeletePathTraversal);
+        }
+    }
+
+    #[test]
     fn denies_raw_disk_dd() {
         let assessment =
             assess_command("dd", &["if=/dev/zero".to_owned(), "of=/dev/sda".to_owned()]);
@@ -1144,6 +1541,25 @@ mod tests {
         let publish = assess_command("pnpm", &["publish".to_owned()]);
         assert_eq!(publish.code, CommandPolicyCode::HighRiskPublish);
         assert!(publish.high_risk);
+    }
+
+    #[test]
+    fn package_install_and_lifecycle_commands_require_approval() {
+        for args in [
+            vec!["npm", "install"],
+            vec!["pnpm", "add", "left-pad"],
+            vec!["yarn", "upgrade"],
+            vec!["npx", "exec", "some-tool"],
+        ] {
+            let executable = args[0];
+            let assessment = assess_command(
+                executable,
+                &args[1..].iter().map(|value| (*value).to_owned()).collect::<Vec<_>>(),
+            );
+            assert_eq!(assessment.decision, PermissionDecision::AskUser, "{args:?}");
+            assert!(assessment.high_risk, "{args:?}");
+            assert_eq!(assessment.code, CommandPolicyCode::HighRiskPackageInstall);
+        }
     }
 
     #[test]

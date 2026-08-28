@@ -95,6 +95,18 @@ function adoptDraftSessionKey(map, sessionId) {
   return { ...rest, [key]: draft };
 }
 
+function markSessionCompletedUnseen(current, sessionId) {
+  const id = sessionId.trim();
+  if (!id || current.includes(id)) return current;
+  return [...current, id];
+}
+
+function clearSessionCompletedUnseen(current, sessionId) {
+  const id = sessionId.trim();
+  if (!id || !current.includes(id)) return current;
+  return current.filter((entry) => entry !== id);
+}
+
 async function main() {
   const appSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8");
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
@@ -117,6 +129,8 @@ async function main() {
     "export function rightPanelStateFor",
     "export function dropSessionKey",
     "export function adoptDraftSessionKey",
+    "export function markSessionCompletedUnseen",
+    "export function clearSessionCompletedUnseen",
   ]) {
     assert.ok(layoutSource.includes(needle), "layout.ts missing " + needle);
   }
@@ -497,6 +511,25 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
   assert.deepEqual(adoptDraftSessionKey({ [DRAFT_SESSION_KEY]: true }, "s1"), { s1: true });
   assert.deepEqual(adoptDraftSessionKey({ [DRAFT_SESSION_KEY]: true, s1: false }, "s1"), { s1: false });
   assert.deepEqual(adoptDraftSessionKey({ s1: true }, "s1"), { s1: true });
+
+  // Finished-task dot: set for background completions, cleared once the task is opened.
+  assert.ok(
+    appSource.includes("completedUnseenSessionIds") &&
+      appSource.includes('className="session-done-dot"'),
+    "App.tsx must render a completion dot for finished background tasks",
+  );
+  assert.ok(
+    appSource.includes("setCompletedUnseenSessionIds((current) => markSessionCompletedUnseen(current, sid))") &&
+      appSource.includes("setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, session.id))"),
+    "completion dot must be set on task_completed and cleared when the task is selected",
+  );
+  assert.ok(cssSource.includes(".session-done-dot"), "styles.css missing .session-done-dot");
+  assert.deepEqual(markSessionCompletedUnseen([], "s1"), ["s1"]);
+  assert.deepEqual(markSessionCompletedUnseen(["s1"], "s1"), ["s1"]);
+  assert.deepEqual(markSessionCompletedUnseen(["s1"], "  "), ["s1"]);
+  assert.deepEqual(markSessionCompletedUnseen(["s1"], "s2"), ["s1", "s2"]);
+  assert.deepEqual(clearSessionCompletedUnseen(["s1", "s2"], "s1"), ["s2"]);
+  assert.deepEqual(clearSessionCompletedUnseen(["s2"], "s1"), ["s2"]);
 
   console.log("Desktop layout UX checks passed.");
 }

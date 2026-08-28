@@ -45,14 +45,12 @@ pub struct TerminalSession {
 fn shell_command(root: &Path) -> CommandBuilder {
     #[cfg(windows)]
     let mut cmd = {
-        const GIT_BASH_CANDIDATES: [&str; 2] = [
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ];
-        if let Some(bash) = GIT_BASH_CANDIDATES
-            .iter()
-            .map(Path::new)
-            .find(|candidate| candidate.exists())
+        // Discovery is shared with the one-shot terminal command so both use the
+        // same shell. A misconfigured override must not block the panel, so the
+        // error degrades to the cmd.exe fallback.
+        if let Some(bash) = crate::workspace_tools::discover_windows_shell()
+            .ok()
+            .flatten()
         {
             let mut cmd = CommandBuilder::new(bash);
             cmd.args(["--noprofile", "--norc", "-l"]);

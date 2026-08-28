@@ -19,6 +19,8 @@ async function main() {
   await assertSupportsMoreThanElevenToolRounds();
   await assertSkipsModelIncompatibleProviderWithinSession();
   await assertReconnectAfterSseDisconnect();
+  await assertRestartsAfterPartialAnswerWasStreamed();
+  await assertOpenCircuitDoesNotLockOutTheOnlyProvider();
   console.log("Provider retry E2E passed.");
 }
 
@@ -270,6 +272,7 @@ async function assertFallsBackToAnotherConfiguredProvider() {
       circuit_recovery_wait_secs: 60,
       circuit_error_rate_threshold_percent: 100,
       circuit_min_request_count: 100,
+      provider_fallback_enabled: true,
       base_url: primary.baseUrl,
       providers: [
         { id: "primary", name: "Primary", base_url: primary.baseUrl, api_key: "primary-test-key" },
@@ -383,6 +386,7 @@ async function assertSkipsModelIncompatibleProviderWithinSession() {
       circuit_recovery_wait_secs: 60,
       circuit_error_rate_threshold_percent: 100,
       circuit_min_request_count: 100,
+      provider_fallback_enabled: true,
       base_url: incompatible.baseUrl,
       providers: [
         { id: "incompatible", name: "Incompatible", base_url: incompatible.baseUrl, api_key: "incompatible-test-key" },
@@ -463,6 +467,134 @@ async function assertReconnectAfterSseDisconnect() {
     assert.ok(reconnectCallEvents[1].success);
     const persistedReconnectCalls = await persistedModelCallEvents(rpc, result.session.id);
     assert.equal(persistedReconnectCalls.length, 2, "should persist the disconnect and reconnect success");
+  } finally {
+    await rpc.close();
+    await mock.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertRestartsAfterPartialAnswerWasStreamed() {
+  const mock = await startFlakyProvider({
+    succeedAfter: 2,
+    alwaysStatus: 503,
+    partialTextBeforeDisconnect: 1,
+  });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-retry-partial-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-retry-partial-home-"));
+  await configureSingleMockProvider(homeDirectory, mock.baseUrl);
+  const rpc = startRpcClient({
+    databasePath: resolve(databaseDirectory, "xcoding.db"),
+    environment: {
+      ...process.env,
+      OPENAI_API_KEY: "e2e-test-key",
+      XCODING_OPENAI_BASE_URL: mock.baseUrl,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
+    },
+  });
+
+  try {
+    const result = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Restart after a half-streamed answer",
+      model: "fixture-model",
+    });
+    // Losing the stream mid-answer used to fail the whole turn on the first hit.
+    assert.equal(result.session.status, "done");
+    assert.match(result.message?.content ?? "", /hello after retries/i);
+    assert.doesNotMatch(result.message?.content ?? "", /partial answer that never finished/i);
+    assert.equal(mock.requests.length, 2, `expected 2 attempts, got ${mock.requests.length}`);
+    const retryEvents = rpc.events.filter((event) => event.type === "retrying");
+    assert.equal(retryEvents.length, 1, "the interrupted attempt must be retried, not failed");
+    assert.match(retryEvents[0].message, /stream disconnected before completion/i);
+    const resetEvents = rpc.events.filter((event) => event.type === "stream_reset");
+    assert.equal(resetEvents.length, 1, "clients must be told to drop the partial text");
+    assert.ok(resetEvents[0].discarded_chars > 0, "reset should report the discarded length");
+    assert.ok(
+      rpc.events.findIndex((event) => event.type === "stream_reset")
+        < rpc.events.findIndex((event) => event.type === "retrying"),
+      "the reset must arrive before the retry so no duplicate text renders",
+    );
+    assert.equal(
+      rpc.events.filter((event) => event.type === "error").length,
+      0,
+      "a recovered turn must not surface a terminal error",
+    );
+  } finally {
+    await rpc.close();
+    await mock.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertOpenCircuitDoesNotLockOutTheOnlyProvider() {
+  const mock = await startFlakyProvider({ succeedAfter: 2, alwaysStatus: 503 });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-circuit-lockout-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-circuit-lockout-home-"));
+  const configDirectory = resolve(homeDirectory, ".xcoding");
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    resolve(configDirectory, "config.json"),
+    JSON.stringify({
+      locale: "en",
+      mode: "ask",
+      provider: "openai",
+      model: "fixture-model",
+      max_provider_retries: 0,
+      // One failure opens the circuit for ten minutes, which used to make every
+      // later turn fail with "circuit is open" until the process was restarted.
+      circuit_failure_threshold: 1,
+      circuit_recovery_wait_secs: 600,
+      circuit_recovery_success_threshold: 2,
+      circuit_error_rate_threshold_percent: 100,
+      circuit_min_request_count: 100,
+      stream_first_event_timeout_secs: 120,
+      stream_idle_timeout_secs: 120,
+      provider_fallback_enabled: false,
+      base_url: mock.baseUrl,
+      providers: [
+        { id: "only", name: "Only", base_url: mock.baseUrl, api_key: "only-test-key" },
+      ],
+      active_provider_id: "only",
+    }, null, 2) + "\n",
+    "utf8",
+  );
+  const { OPENAI_API_KEY, XCODING_OPENAI_BASE_URL, ...environment } = process.env;
+  const rpc = startRpcClient({
+    databasePath: resolve(databaseDirectory, "xcoding.db"),
+    environment: {
+      ...environment,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
+    },
+  });
+
+  try {
+    await assert.rejects(() =>
+      rpc.request("session.chat", {
+        workspace_root: fixtureRoot,
+        message: "First turn hits the upstream failure",
+        model: "fixture-model",
+      }),
+    );
+    assert.equal(mock.requests.length, 1, "the first turn spends the single configured attempt");
+
+    const recovered = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "The next turn must still reach the provider",
+      model: "fixture-model",
+    });
+    assert.equal(recovered.session.status, "done");
+    assert.match(recovered.message?.content ?? "", /hello after retries/i);
+    assert.equal(mock.requests.length, 2, "the open circuit must still allow a probe request");
+    assert.equal(
+      rpc.events.filter((event) => /circuit is open/i.test(event.message ?? "")).length,
+      0,
+      "a single configured provider must never be locked out by its own circuit",
+    );
   } finally {
     await rpc.close();
     await mock.close();
@@ -560,6 +692,7 @@ async function startFlakyProvider({
   succeedAfter,
   alwaysStatus,
   disconnectBeforeDone = 0,
+  partialTextBeforeDisconnect = 0,
   emptyDone = false,
   toolRoundsBeforeAnswer = 0,
   errorBody = { error: { message: "temporary upstream failure", type: "server_error" } },
@@ -572,6 +705,16 @@ async function startFlakyProvider({
     }
     requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
     const attempt = requests.length;
+    // Streams a visible answer prefix and then drops the connection, which is how
+    // a gateway that stops forwarding events mid-answer looks to the client.
+    if (attempt <= partialTextBeforeDisconnect) {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "partial answer that never finished" } }] })}\n\n`,
+      );
+      response.end();
+      return;
+    }
     if (attempt <= disconnectBeforeDone) {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end();

@@ -52,10 +52,12 @@ import {
 import {
   adoptDraftSessionKey,
   clampRightPanelWidth,
+  clearSessionCompletedUnseen,
   DRAFT_SESSION_KEY,
   dropSessionKey,
   formatSessionStatus,
   loadRightPanelWidth,
+  markSessionCompletedUnseen,
   rightPanelStateFor,
   saveRightPanelWidth,
   sessionMetaLine,
@@ -218,6 +220,7 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
       name: item.name?.trim() || `Provider ${index + 1}`,
       base_url: normalizeProviderBaseUrl(item.base_url) || DEFAULT_PROVIDER_BASE_URL,
       wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
+      trust_level: item.trust_level === "local" || item.trust_level === "official" ? item.trust_level : "relay" as const,
       api_key: item.api_key || undefined,
     }));
   const providers = configured.length > 0
@@ -227,6 +230,7 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
         name: defaultProvider,
         base_url: normalizeProviderBaseUrl(config.base_url) || DEFAULT_PROVIDER_BASE_URL,
         wire_api: "chat_completions" as const,
+        trust_level: "relay" as const,
         api_key: config.api_key || undefined,
       }];
   const activeProviderId = providers.some((item) => item.id === config.active_provider_id)
@@ -1228,7 +1232,7 @@ export function App() {
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
   const [maxProviderRetries, setMaxProviderRetries] = useState(DEFAULT_MAX_PROVIDER_RETRIES);
-  const [providerFallbackEnabled, setProviderFallbackEnabled] = useState(true);
+  const [providerFallbackEnabled, setProviderFallbackEnabled] = useState(false);
   const [maxToolRounds, setMaxToolRounds] = useState(DEFAULT_MAX_TOOL_ROUNDS);
   const [circuitFailureThreshold, setCircuitFailureThreshold] = useState(DEFAULT_CIRCUIT_FAILURE_THRESHOLD);
   const [streamFirstEventTimeoutSecs, setStreamFirstEventTimeoutSecs] = useState(DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS);
@@ -1311,6 +1315,8 @@ export function App() {
   const [modelCallLogsLoading, setModelCallLogsLoading] = useState(false);
   const [modelCallLogsError, setModelCallLogsError] = useState<string | null>(null);
   const [runningSessionIds, setRunningSessionIds] = useState<string[]>([]);
+  // Tasks that completed while the user was not looking at them; drives the sidebar green dot.
+  const [completedUnseenSessionIds, setCompletedUnseenSessionIds] = useState<string[]>([]);
   const [draftRunning, setDraftRunning] = useState(false);
   const [runStatusBySession, setRunStatusBySession] = useState<Record<string, RunStatus>>({});
   const [draftRunStatus, setDraftRunStatus] = useState<RunStatus | null>(null);
@@ -1320,7 +1326,7 @@ export function App() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [view, setView] = useState<"workbench" | "settings" | "model-logs">("workbench");
   const [providers, setProviders] = useState<CloudProviderConfig[]>([
-    { id: "default", name: defaultProvider, base_url: DEFAULT_PROVIDER_BASE_URL, wire_api: "chat_completions" },
+    { id: "default", name: defaultProvider, base_url: DEFAULT_PROVIDER_BASE_URL, wire_api: "chat_completions", trust_level: "relay" },
   ]);
   const [activeProviderId, setActiveProviderId] = useState("default");
   const [selectedProviderId, setSelectedProviderId] = useState("default");
@@ -1352,6 +1358,8 @@ export function App() {
   const [rightPanelWidth, setRightPanelWidth] = useState(() => loadRightPanelWidth());
   const [envPopoverOpen, setEnvPopoverOpen] = useState(false);
   const [contextUsageOpen, setContextUsageOpen] = useState(false);
+  const [compactedMessageCount, setCompactedMessageCount] = useState(0);
+  const [contextCompactionSummary, setContextCompactionSummary] = useState("");
 
   useEffect(() => {
     setRememberLocalApiApproval(false);
@@ -1493,8 +1501,10 @@ export function App() {
   );
   const contextUsage = useMemo(() => {
     const limit = contextWindowForModel(model, modelContextWindows);
+    const retainedMessages = messages.slice(Math.min(compactedMessageCount, messages.length));
     const used = SYSTEM_CONTEXT_TOKEN_RESERVE
-      + messages.reduce((total, message) => total + estimateMessageTokens(message), 0)
+      + (contextCompactionSummary ? estimateTextTokens(contextCompactionSummary) : 0)
+      + retainedMessages.reduce((total, message) => total + estimateMessageTokens(message), 0)
       + estimateTextTokens(streamedText)
       + estimateTextTokens(prompt)
       + composerImages.length * IMAGE_CONTEXT_TOKEN_ESTIMATE;
@@ -1503,7 +1513,7 @@ export function App() {
       percent: Math.min(100, Math.round((used / limit) * 100)),
       used,
     };
-  }, [composerImages.length, messages, model, modelContextWindows, prompt, streamedText]);
+  }, [compactedMessageCount, composerImages.length, contextCompactionSummary, messages, model, modelContextWindows, prompt, streamedText]);
 
   const filteredPluginItems = useMemo(() => {
     const query = pluginSearch.trim().toLowerCase();
@@ -1617,7 +1627,7 @@ export function App() {
         setModel((config.model || "").trim());
         setReasoningEffort(normalizeReasoningEffort(config.reasoning_effort));
         setMaxProviderRetries(normalizeBoundedInteger(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
-        setProviderFallbackEnabled(config.provider_fallback_enabled !== false);
+        setProviderFallbackEnabled(config.provider_fallback_enabled === true);
         setMaxToolRounds(normalizeBoundedInteger(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
         setCircuitFailureThreshold(normalizeBoundedInteger(config.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
         setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(config.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
@@ -1798,7 +1808,7 @@ export function App() {
       if (workspaceRootRef.current !== root || workspaceModeRevisionRef.current !== modeRevision) return;
       setMode(config.mode);
       // Model lives in the composer / user config. Workspace defaults must not overwrite it
-      // (missing workspace rows synthesize model=gpt-5.5 and would pin the picker).
+      // (unconfigured workspaces return an empty model and would clear the picker).
       setCommandAllowlistText(formatCommandAllowlistText(config.command_allowlist));
       setCommandDenylistText(formatCommandDenylistText(config.command_denylist));
     } catch (cause) {
@@ -1990,6 +2000,12 @@ export function App() {
         ? detail.pending_actions.find((action) => action.status === "pending") ?? null
         : null;
       setMessages(detail.messages);
+      const latestCompaction = [...detail.events]
+        .reverse()
+        .map((item) => item.event)
+        .find((event): event is Extract<SessionEvent, { type: "context_compacted" }> => event.type === "context_compacted");
+      setCompactedMessageCount(latestCompaction?.compacted_message_count ?? 0);
+      setContextCompactionSummary(latestCompaction?.summary ?? "");
       const liveStream = streamedTextBySessionRef.current.get(sessionId) ?? "";
       setStreamedText(liveStream);
       setPlan(latestPlan(detail.events));
@@ -2164,6 +2180,8 @@ export function App() {
           return current.filter((id) => id !== sid);
         });
         if (running) {
+          // A new turn supersedes the previous completion signal.
+          setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, sid));
           setSessions((current) =>
             current.map((session) =>
               session.id === sid && session.status !== "running" && session.status !== "need_user"
@@ -2226,6 +2244,10 @@ export function App() {
           ? { ...current, phase: "thinking", detail: undefined }
           : (current ?? null));
       }
+      if (payload.type === "context_compacted" && isActive) {
+        setCompactedMessageCount(payload.compacted_message_count);
+        setContextCompactionSummary(payload.summary);
+      }
       if (payload.type === "retrying") {
         markRunning(true);
         patchRunStatus((current) => ({
@@ -2235,6 +2257,12 @@ export function App() {
           retryMaxAttempts: payload.max_attempts,
           detail: payload.message,
         }));
+      }
+      if (payload.type === "stream_reset") {
+        // The interrupted attempt's text was never persisted; drop it so the
+        // restarted answer does not render on top of a half-finished one.
+        markRunning(true);
+        clearStream();
       }
       if (payload.type === "message_completed") {
         // Defensive fallback for sessions produced by an older backend: never render an
@@ -2291,6 +2319,10 @@ export function App() {
             session.id === sid ? { ...session, status: "done" } : session,
           ),
         );
+        // Only a task the user is not currently viewing needs the sidebar completion dot.
+        if (!isActive) {
+          setCompletedUnseenSessionIds((current) => markSessionCompletedUnseen(current, sid));
+        }
         if (isActive) {
           setTaskSummary(payload.summary);
           setRunStatusExpanded(false);
@@ -2422,6 +2454,7 @@ export function App() {
     setSessionMenu(null);
     setView("workbench");
     setActiveSessionId(session.id);
+    setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, session.id));
     // Keep draftRunning for background new-task creation; activeSessionRunning ignores it when a session is selected.
     const live = streamedTextBySessionRef.current.get(session.id) ?? streamedTextBySession[session.id] ?? "";
     setStreamedText(live);
@@ -2507,6 +2540,8 @@ export function App() {
     setActiveSessionId(null);
     setComposerImages([]);
     setMessages([]);
+    setCompactedMessageCount(0);
+    setContextCompactionSummary("");
     setStreamedText("");
     // Always clear draft run state. A still-in-flight draft belongs to the previous epoch, and
     // leaving draftRunning=true here would keep the new composer in queue mode and block sending.
@@ -2660,6 +2695,7 @@ export function App() {
     try {
       await invoke("delete_session", { sessionId });
       setSessions((current) => current.filter((session) => session.id !== sessionId));
+      setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, sessionId));
       setRightPanelOpenBySession((current) => dropSessionKey(current, sessionId));
       setRightPanelTabBySession((current) => dropSessionKey(current, sessionId));
       setBrowserNavigationBySession((current) => dropSessionKey(current, sessionId));
@@ -2928,6 +2964,8 @@ export function App() {
             draftKnownSessionIdsRef.current = new Set(sessionsRef.current.map((item) => item.id));
             setActiveSessionId(null);
             setMessages([]);
+            setCompactedMessageCount(0);
+            setContextCompactionSummary("");
             setStreamedText("");
             setPlan([]);
             setActivity([]);
@@ -3599,6 +3637,7 @@ export function App() {
         name: item.name.trim() || "Provider",
         base_url: normalizeProviderBaseUrl(item.base_url) || DEFAULT_PROVIDER_BASE_URL,
         wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
+        trust_level: item.trust_level === "local" || item.trust_level === "official" ? item.trust_level : "relay" as const,
         api_key: item.api_key?.trim() || undefined,
       }));
       const selectedProvider = normalizedProviders.find((item) => item.id === activeProviderId) ?? normalizedProviders[0];
@@ -3647,7 +3686,7 @@ export function App() {
       setModel((savedUser.model || "").trim());
       setReasoningEffort(normalizeReasoningEffort(savedUser.reasoning_effort));
       setMaxProviderRetries(normalizeBoundedInteger(savedUser.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
-      setProviderFallbackEnabled(savedUser.provider_fallback_enabled !== false);
+      setProviderFallbackEnabled(savedUser.provider_fallback_enabled === true);
       setMaxToolRounds(normalizeBoundedInteger(savedUser.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
       setCircuitFailureThreshold(normalizeBoundedInteger(savedUser.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
       setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(savedUser.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
@@ -4090,6 +4129,21 @@ export function App() {
                   >
                     <option value="chat_completions">{t(locale, "providerProtocol.chatCompletions")}</option>
                     <option value="responses">{t(locale, "providerProtocol.responses")}</option>
+                  </select>
+                  <label className="field-label" htmlFor={`provider-trust-level-${selectedProvider.id}`}>{locale === "zh-CN" ? "Provider 信任级别" : "Provider trust level"}</label>
+                  <select
+                    id={`provider-trust-level-${selectedProvider.id}`}
+                    value={selectedProvider.trust_level || "relay"}
+                    onChange={(event) => updateProvider(selectedProvider.id, {
+                      trust_level: event.target.value === "local" || event.target.value === "official" || event.target.value === "relay"
+                        ? event.target.value
+                        : "relay",
+                    })}
+                    disabled={anySessionRunning || isSavingConfig}
+                  >
+                    <option value="relay">{locale === "zh-CN" ? "中转站（低信任）" : "Relay (untrusted)"}</option>
+                    <option value="official">{locale === "zh-CN" ? "官方直连" : "Official direct"}</option>
+                    <option value="local">{locale === "zh-CN" ? "本地/私有化" : "Local / private"}</option>
                   </select>
                   <p className="mode-help">{t(locale, "field.providerProtocolHint")}</p>
                   <label className="field-label" htmlFor={`provider-base-url-${selectedProvider.id}`}>{t(locale, "field.baseUrl")}</label>
@@ -4811,13 +4865,18 @@ export function App() {
               chatSessions.map((session) => (
                 <button
                   type="button"
-                  className={`session-item ${session.id === activeSessionId ? "is-active" : ""} status-${session.status}`}
+                  className={`session-item ${session.id === activeSessionId ? "is-active" : ""} ${
+                    completedUnseenSessionIds.includes(session.id) ? "has-done-dot" : ""
+                  } status-${session.status}`}
                   key={session.id}
                   onClick={() => selectSession(session)}
                   onContextMenu={(event) => openSessionMenu(event, session.id)}
                   title={sessionMetaLine(session, Date.now(), locale)}
                 >
                   <span className="session-item-title">{sessionTitle(session, locale)}</span>
+                  {completedUnseenSessionIds.includes(session.id) ? (
+                    <span className="session-done-dot" role="img" aria-label={t(locale, "status.done")} />
+                  ) : null}
                 </button>
               ))
             )}
@@ -4879,13 +4938,18 @@ export function App() {
                 {collapsed ? null : group.sessions.map((session) => (
                   <button
                     type="button"
-                    className={`session-item ${session.id === activeSessionId ? "is-active" : ""} status-${session.status}`}
+                    className={`session-item ${session.id === activeSessionId ? "is-active" : ""} ${
+                      completedUnseenSessionIds.includes(session.id) ? "has-done-dot" : ""
+                    } status-${session.status}`}
                     key={session.id}
                     onClick={() => selectSession(session)}
                     onContextMenu={(event) => openSessionMenu(event, session.id)}
                     title={sessionMetaLine(session, Date.now(), locale)}
                   >
                     <span className="session-item-title">{sessionTitle(session, locale)}</span>
+                    {completedUnseenSessionIds.includes(session.id) ? (
+                      <span className="session-done-dot" role="img" aria-label={t(locale, "status.done")} />
+                    ) : null}
                   </button>
                 ))}
               </div>

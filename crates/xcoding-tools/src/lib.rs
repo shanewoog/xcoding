@@ -2,9 +2,9 @@
 
 use std::{
     collections::VecDeque,
-    env,
-    fs,
+    env, fs,
     io::Read,
+    net::{Ipv4Addr, SocketAddr, TcpStream},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -20,14 +20,15 @@ use std::os::windows::process::CommandExt;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use std::io::Write;
 use thiserror::Error;
+use xcoding_mcp::{PluginConfig, load_plugin_config, user_skill_root};
 use xcoding_policy::{
     COMMAND_ALLOWLIST_RELATIVE_PATH, COMMAND_DENYLIST_RELATIVE_PATH, PermissionDecision,
     PermissionKind, assess_command_with_lists, evaluate_detailed, parse_command_allowlist,
     parse_command_denylist,
 };
 use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
-use std::io::Write;
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
 const MAX_LIST_ENTRIES: usize = 1_000;
@@ -57,6 +58,30 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Upper bound a caller may request through `timeout_seconds`.
 const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 3_600;
+
+/// Workspace-relative directory holding `run_command` background launch logs.
+const BACKGROUND_LOG_DIR: &str = ".xcoding/logs";
+
+/// How long a background launch is observed before reporting success.
+/// A service that dies on a bad working directory, a taken port, or a missing
+/// config fails within this window, so the launching call can report the real
+/// error instead of a pid that no longer exists.
+const BACKGROUND_STARTUP_PROBE: Duration = Duration::from_millis(700);
+
+/// Trailing bytes of a background log replayed into the tool result.
+const BACKGROUND_LOG_TAIL_BYTES: u64 = 8 * 1024;
+
+/// Default bound for waiting on a background service's port, in seconds.
+const DEFAULT_READY_TIMEOUT_SECONDS: u64 = 15;
+
+/// Upper bound a caller may request through `ready_timeout_seconds`.
+const MAX_READY_TIMEOUT_SECONDS: u64 = 120;
+
+/// Gap between two port probes while waiting for a background service.
+const READY_PROBE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a single connect attempt may block before it counts as not ready.
+const READY_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How long to keep draining a child's pipes after the child itself has exited.
 /// A grandchild that inherited the pipe write handle (for example anything
@@ -107,10 +132,7 @@ fn await_pipe_drain(flags: [&Arc<AtomicBool>; 2], grace: Duration) {
 }
 
 fn snapshot_pipe(buffer: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
-    buffer
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or_default()
+    buffer.lock().map(|value| value.clone()).unwrap_or_default()
 }
 
 /// Windows process-tree cleanup for one `run_command` call.
@@ -555,10 +577,18 @@ pub struct ToolRegistry {
     workspace_root: PathBuf,
     command_allowlist: Vec<String>,
     command_denylist: Vec<String>,
+    plugin_config: PluginConfig,
 }
 
 impl ToolRegistry {
     pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self, ToolError> {
+        Self::new_with_plugin_config(workspace_root, load_plugin_config())
+    }
+
+    pub fn new_with_plugin_config(
+        workspace_root: impl AsRef<Path>,
+        plugin_config: PluginConfig,
+    ) -> Result<Self, ToolError> {
         let workspace_root = workspace_root.as_ref();
         if !workspace_root.is_dir() {
             return Err(ToolError::WorkspaceNotFound(
@@ -573,6 +603,7 @@ impl ToolRegistry {
             workspace_root,
             command_allowlist,
             command_denylist,
+            plugin_config,
         })
     }
 
@@ -586,6 +617,10 @@ impl ToolRegistry {
 
     pub fn command_denylist(&self) -> &[String] {
         &self.command_denylist
+    }
+
+    pub fn plugin_config(&self) -> &PluginConfig {
+        &self.plugin_config
     }
 
     pub fn execute(&self, mode: &Mode, tool_call: &ToolCall) -> Result<ToolExecution, ToolError> {
@@ -641,6 +676,7 @@ impl ToolRegistry {
                         reason: assessment.reason,
                     });
                 }
+                self.validate_git_command_paths(&args.executable, &args.args, args.cwd.as_deref())?;
                 Ok((
                     PermissionKind::Exec,
                     assessment.high_risk,
@@ -1049,6 +1085,7 @@ impl ToolRegistry {
                 reason: assessment.reason,
             });
         }
+        self.validate_git_command_paths(&args.executable, &args.args, args.cwd.as_deref())?;
 
         // Never inherit the server RPC stdin pipe: some tools (notably git on
         // Windows) can hang when stdin is an open parent pipe still owned by the
@@ -1057,34 +1094,154 @@ impl ToolRegistry {
         // because `current_dir` does not affect how the OS looks up the program.
         let program = self.resolve_executable(&args.executable)?;
 
+        // Requested working directory, still confined to the workspace.
+        let working_dir = match args.cwd.as_deref() {
+            Some(requested) => {
+                let resolved = self.resolve(requested)?;
+                if !resolved.is_dir() {
+                    return Err(ToolError::NotDirectory(self.relative_path(&resolved)));
+                }
+                resolved
+            }
+            None => self.workspace_root.clone(),
+        };
+        let reported_cwd = self.relative_path(&working_dir);
+
         // Background launch: the caller wants the process to outlive this call, so
         // it is neither awaited nor bound to the job object. Output goes to null
         // because nobody stays behind to drain a pipe, and a full pipe buffer
         // would eventually block the service itself.
         if args.background {
+            // A pipe is not an option here: nobody stays behind to drain it and a
+            // full buffer would block the service. A file takes the output without
+            // a reader, so a launch that fails is still diagnosable afterwards.
+            let log_path = self.background_log_path(&args.executable)?;
+            let log_file = fs::File::create(&log_path)?;
+            let log_errors = log_file.try_clone()?;
+            let reported_log = self.relative_path(&log_path);
             let child = workspace_command(&program)
                 .args(&args.args)
-                .current_dir(&self.workspace_root)
+                .current_dir(&working_dir)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::from(log_file))
+                .stderr(Stdio::from(log_errors))
                 .spawn()?;
+            let mut child = child;
             let pid = child.id();
+
+            // Observe the launch briefly. Reporting a pid for a process that
+            // already died is what makes a failed service start unreadable.
+            thread::sleep(BACKGROUND_STARTUP_PROBE);
+            if let Some(status) = child.try_wait()? {
+                let log_tail = read_tail(&log_path, BACKGROUND_LOG_TAIL_BYTES);
+                return Ok(ToolExecution {
+                    output: json!({
+                        "executable": args.executable,
+                        "args": args.args,
+                        "cwd": reported_cwd,
+                        "success": false,
+                        "background": true,
+                        "exited_immediately": true,
+                        "exit_code": status.code(),
+                        "log_path": reported_log,
+                        "log_tail": log_tail,
+                    }),
+                    summary: format!(
+                        "Exited immediately with code {:?}; output in {reported_log}",
+                        status.code()
+                    ),
+                });
+            }
+
+            // With a port to watch, the launch is only done once the service
+            // actually accepts connections. Without it, a live pid is all this
+            // call can honestly report.
+            if let Some(port) = args.ready_port {
+                let ready_timeout = args.effective_ready_timeout();
+                let outcome = await_port_ready(&mut child, port, ready_timeout, is_cancelled)?;
+                let url = format!("http://127.0.0.1:{port}");
+                return Ok(match outcome {
+                    PortReadyOutcome::Ready { waited } => ToolExecution {
+                        output: json!({
+                            "executable": args.executable,
+                            "args": args.args,
+                            "cwd": reported_cwd,
+                            "success": true,
+                            "background": true,
+                            "exited_immediately": false,
+                            "pid": pid,
+                            "ready": true,
+                            "ready_port": port,
+                            "url": url,
+                            "waited_ms": waited.as_millis(),
+                            "log_path": reported_log,
+                        }),
+                        summary: format!("Service ready on {url} with pid {pid}"),
+                    },
+                    PortReadyOutcome::Exited { status } => ToolExecution {
+                        output: json!({
+                            "executable": args.executable,
+                            "args": args.args,
+                            "cwd": reported_cwd,
+                            "success": false,
+                            "background": true,
+                            "exited_immediately": true,
+                            "exit_code": status.code(),
+                            "ready": false,
+                            "ready_port": port,
+                            "log_path": reported_log,
+                            "log_tail": read_tail(&log_path, BACKGROUND_LOG_TAIL_BYTES),
+                        }),
+                        summary: format!(
+                            "Died before listening on port {port} with code {:?}; output in {reported_log}",
+                            status.code()
+                        ),
+                    },
+                    // Still alive but silent on the port: the pid stays reported so
+                    // the caller can stop it instead of leaking a half-started service.
+                    PortReadyOutcome::TimedOut => ToolExecution {
+                        output: json!({
+                            "executable": args.executable,
+                            "args": args.args,
+                            "cwd": reported_cwd,
+                            "success": false,
+                            "background": true,
+                            "exited_immediately": false,
+                            "pid": pid,
+                            "ready": false,
+                            "ready_port": port,
+                            "ready_timed_out": true,
+                            "waited_ms": ready_timeout.as_millis(),
+                            "log_path": reported_log,
+                            "log_tail": read_tail(&log_path, BACKGROUND_LOG_TAIL_BYTES),
+                        }),
+                        summary: format!(
+                            "Still not listening on port {port} after {}s with pid {pid}; output in {reported_log}",
+                            ready_timeout.as_secs()
+                        ),
+                    },
+                });
+            }
+
             return Ok(ToolExecution {
                 output: json!({
                     "executable": args.executable,
                     "args": args.args,
+                    "cwd": reported_cwd,
                     "success": true,
                     "background": true,
+                    "exited_immediately": false,
                     "pid": pid,
+                    "ready": Value::Null,
+                    "log_path": reported_log,
                 }),
-                summary: format!("Started in background with pid {pid}"),
+                summary: format!("Started in background with pid {pid}; output in {reported_log}"),
             });
         }
 
         let mut child = workspace_command(&program)
             .args(&args.args)
-            .current_dir(&self.workspace_root)
+            .current_dir(&working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1149,6 +1306,7 @@ impl ToolRegistry {
             output: json!({
                 "executable": args.executable,
                 "args": args.args,
+                "cwd": reported_cwd,
                 "success": success,
                 "exit_code": status.code(),
                 "stdout": stdout,
@@ -1156,7 +1314,10 @@ impl ToolRegistry {
                 "timed_out": timed_out,
             }),
             summary: if timed_out {
-                format!("Command timed out after {}s and was terminated", timeout.as_secs())
+                format!(
+                    "Command timed out after {}s and was terminated",
+                    timeout.as_secs()
+                )
             } else if success {
                 "Command completed".to_owned()
             } else {
@@ -1173,10 +1334,41 @@ impl ToolRegistry {
                     .to_owned(),
             ));
         }
-        let relative = format!(".xcoding/skills/{name}/SKILL.md");
-        let path = self.resolve(&relative)?;
+        let workspace_relative = format!(".xcoding/skills/{name}/SKILL.md");
+        let workspace_candidate = self.workspace_root.join(&workspace_relative);
+        let (path, display_path, source) = if workspace_candidate.is_file()
+            && self
+                .plugin_config
+                .skill_enabled
+                .get(&format!("workspace:{name}"))
+                .copied()
+                .unwrap_or(true)
+        {
+            (
+                self.resolve(&workspace_relative)?,
+                workspace_relative,
+                "workspace",
+            )
+        } else {
+            let user_path = user_skill_root().join(name).join("SKILL.md");
+            if !user_path.is_file()
+                || !self
+                    .plugin_config
+                    .skill_enabled
+                    .get(&format!("user:{name}"))
+                    .copied()
+                    .unwrap_or(true)
+            {
+                return Err(ToolError::NotFile(workspace_relative));
+            }
+            (
+                user_path,
+                format!("~/.xcoding/skills/{name}/SKILL.md"),
+                "user",
+            )
+        };
         if !path.is_file() {
-            return Err(ToolError::NotFile(self.relative_path(&path)));
+            return Err(ToolError::NotFile(display_path));
         }
         if path.metadata()?.len() > MAX_READ_BYTES {
             return Err(ToolError::FileTooLarge(self.relative_path(&path)));
@@ -1194,11 +1386,11 @@ impl ToolRegistry {
         } else {
             parsed.body
         };
-        let path = self.relative_path(&path);
         Ok(ToolExecution {
             output: json!({
                 "name": name,
-                "path": path,
+                "path": display_path,
+                "source": source,
                 "description": parsed.description,
                 "content": content,
             }),
@@ -1854,6 +2046,46 @@ impl ToolRegistry {
         Ok(resolved)
     }
 
+    fn validate_git_command_paths(
+        &self,
+        executable: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<(), ToolError> {
+        if !executable.eq_ignore_ascii_case("git") {
+            return Ok(());
+        }
+
+        if let Some(cwd) = cwd {
+            self.resolve(cwd)?;
+        }
+
+        let mut index = 0;
+        while index < args.len() {
+            let arg = &args[index];
+            let option_path: Option<&str> = if arg == "-C"
+                || arg == "--git-dir"
+                || arg == "--work-tree"
+            {
+                index += 1;
+                args.get(index).map(String::as_str)
+            } else if let Some(path) = arg
+                .strip_prefix("--git-dir=")
+                .or_else(|| arg.strip_prefix("--work-tree="))
+            {
+                Some(path)
+            } else {
+                None
+            };
+
+            if let Some(path) = option_path {
+                self.resolve(path).map(|_| ())?;
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
     fn relative_path(&self, path: &Path) -> String {
         let relative = path.strip_prefix(&self.workspace_root).unwrap_or(path);
         let rendered = relative.to_string_lossy().replace('\\', "/");
@@ -1862,6 +2094,40 @@ impl ToolRegistry {
         } else {
             rendered
         }
+    }
+
+    /// Builds the log file a background launch writes to.
+    ///
+    /// One file per launch, named after the executable plus a timestamp, so a
+    /// restart never overwrites the log that explains the previous failure.
+    fn background_log_path(&self, executable: &str) -> Result<PathBuf, ToolError> {
+        let stem = executable
+            .rsplit(|character| character == '/' || character == '\\')
+            .next()
+            .unwrap_or(executable);
+        let stem = stem.split('.').next().unwrap_or(stem);
+        let safe: String = stem
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let safe = if safe.trim_matches('-').is_empty() {
+            "command".to_owned()
+        } else {
+            safe
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or_default();
+        let directory = self.workspace_root.join(BACKGROUND_LOG_DIR);
+        fs::create_dir_all(&directory)?;
+        Ok(directory.join(format!("{safe}-{stamp}.log")))
     }
 }
 
@@ -1902,6 +2168,20 @@ struct RunCommandArgs {
     /// Intended for a project's own background service during local testing.
     #[serde(default)]
     background: bool,
+    /// Workspace-relative directory to run in; defaults to the workspace root.
+    /// A service that resolves its own data by relative path (migrations,
+    /// config, assets) only starts when launched from its own directory.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Local port a background service must accept connections on before the
+    /// launch counts as successful. Only meaningful with `background`.
+    #[serde(default)]
+    ready_port: Option<u16>,
+    /// Bound for waiting on `ready_port`, clamped to
+    /// `1..=MAX_READY_TIMEOUT_SECONDS`; defaults to
+    /// [`DEFAULT_READY_TIMEOUT_SECONDS`].
+    #[serde(default)]
+    ready_timeout_seconds: Option<u64>,
 }
 
 impl RunCommandArgs {
@@ -1910,6 +2190,14 @@ impl RunCommandArgs {
             Some(seconds) => Duration::from_secs(seconds.clamp(1, MAX_COMMAND_TIMEOUT_SECONDS)),
             None => DEFAULT_COMMAND_TIMEOUT,
         }
+    }
+
+    fn effective_ready_timeout(&self) -> Duration {
+        let seconds = self
+            .ready_timeout_seconds
+            .unwrap_or(DEFAULT_READY_TIMEOUT_SECONDS)
+            .clamp(1, MAX_READY_TIMEOUT_SECONDS);
+        Duration::from_secs(seconds)
     }
 }
 
@@ -2248,8 +2536,18 @@ fn skill_fallback_description(body: &str) -> String {
 }
 
 fn is_high_risk_path(path: &str) -> bool {
-    path.split(['/', '\\'])
-        .any(|part| part == ".git" || part == ".xcoding")
+    let parts: Vec<String> = path
+        .split(['/', '\\'])
+        .map(|part| part.to_ascii_lowercase())
+        .collect();
+    let file_name = parts.last().map(String::as_str).unwrap_or("");
+    parts.iter().any(|part| part == ".git" || part == ".xcoding")
+        || parts.windows(2).any(|window| window[0] == ".git" && window[1] == "hooks")
+        || parts.windows(2).any(|window| {
+            window[0] == ".github" && window[1] == "workflows"
+        })
+        || parts.iter().any(|part| part == ".gitlab" || part == ".circleci")
+        || matches!(file_name, ".gitlab-ci.yml" | ".gitlab-ci.yaml" | ".circleci.yml")
 }
 
 fn validate_git_name(kind: &str, value: &str) -> Result<(), ToolError> {
@@ -2326,6 +2624,68 @@ fn git_rev_parse_head(workspace_root: &Path) -> Result<String, ToolError> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Reads the last `limit` bytes of a file, or an empty string when it cannot be
+/// read. A startup failure prints its reason at the end of the log, so the tail
+/// is the part worth reporting.
+fn read_tail(path: &Path, limit: u64) -> String {
+    let Ok(mut file) = fs::File::open(path) else {
+        return String::new();
+    };
+    let length = file.metadata().map(|data| data.len()).unwrap_or(0);
+    if length > limit {
+        use std::io::Seek;
+        if file.seek(std::io::SeekFrom::Start(length - limit)).is_err() {
+            return String::new();
+        }
+    }
+    let mut buffer = Vec::new();
+    if file.read_to_end(&mut buffer).is_err() {
+        return String::new();
+    }
+    truncate_output(&String::from_utf8_lossy(&buffer))
+}
+
+/// Result of waiting for a freshly launched background service's port.
+enum PortReadyOutcome {
+    Ready { waited: Duration },
+    Exited { status: std::process::ExitStatus },
+    TimedOut,
+}
+
+/// Waits until a background service accepts a local connection on `port`.
+///
+/// The child is polled alongside the port so a service that dies while starting
+/// is reported as a real exit instead of running the full timeout.
+fn await_port_ready(
+    child: &mut std::process::Child,
+    port: u16,
+    timeout: Duration,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<PortReadyOutcome, ToolError> {
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    loop {
+        if is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ToolError::Cancelled);
+        }
+        if TcpStream::connect_timeout(&address, READY_CONNECT_TIMEOUT).is_ok() {
+            return Ok(PortReadyOutcome::Ready {
+                waited: started.elapsed(),
+            });
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(PortReadyOutcome::Exited { status });
+        }
+        if Instant::now() >= deadline {
+            return Ok(PortReadyOutcome::TimedOut);
+        }
+        thread::sleep(READY_PROBE_INTERVAL);
+    }
 }
 
 fn truncate_output(value: &str) -> String {
@@ -2616,6 +2976,50 @@ mod tests {
         );
         assert!(bad.is_err());
 
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn loads_user_skill_when_workspace_does_not_have_one() {
+        let root = workspace();
+        let name = format!(
+            "user-only-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock works")
+                .as_nanos()
+        );
+        let skill_dir = user_skill_root().join(&name);
+        fs::create_dir_all(&skill_dir).expect("user skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: User skill for tests\n---\n# User\nUse this user skill.\n"),
+        )
+        .expect("user skill writes");
+
+        let tools = ToolRegistry::new_with_plugin_config(&root, PluginConfig::default())
+            .expect("registry starts");
+        let loaded = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "user_skill_1".to_owned(),
+                    name: ToolName::LoadSkill,
+                    arguments: json!({ "name": name }),
+                },
+            )
+            .expect("user skill loads");
+
+        assert_eq!(loaded.output["source"], "user");
+        assert_eq!(loaded.output["description"], "User skill for tests");
+        assert!(
+            loaded.output["content"]
+                .as_str()
+                .unwrap()
+                .contains("Use this user skill.")
+        );
+
+        fs::remove_dir_all(skill_dir).expect("user skill removes");
         fs::remove_dir_all(root).expect("workspace removes");
     }
 
@@ -3820,6 +4224,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_shell_wrapped_deletes_before_spawn_even_in_background() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        let error = tools
+            .permission_for(&ToolCall {
+                id: "delete-background".to_owned(),
+                name: ToolName::RunCommand,
+                arguments: json!({
+                    "executable": "cmd",
+                    "args": ["/c", "rmdir /s /q E:\\outside"],
+                    "background": true
+                }),
+            })
+            .expect_err("shell-wrapped delete must be hard denied");
+        match &error {
+            ToolError::CommandPolicyDenied { code, .. } => {
+                assert_eq!(code, "denied_shell_destructive_delete");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
     fn marks_high_risk_shell_commands() {
         let root = workspace();
         let tools = ToolRegistry::new(&root).expect("tools");
@@ -3854,6 +4281,30 @@ mod tests {
             .expect("patch");
         assert_eq!(kind, xcoding_policy::PermissionKind::Write);
         assert!(high_risk);
+    }
+
+    #[test]
+    fn marks_hooks_and_ci_paths_high_risk() {
+        for path in [
+            ".git/hooks/pre-commit",
+            ".github/workflows/ci.yml",
+            ".gitlab-ci.yml",
+            ".circleci/config.yml",
+        ] {
+            let call = ToolCall {
+                id: format!("path-{path}"),
+                name: ToolName::ApplyPatch,
+                arguments: serde_json::json!({
+                    "path": path,
+                    "old_text": "",
+                    "new_text": "changed"
+                }),
+            };
+            let root = workspace();
+            let tools = ToolRegistry::new(&root).expect("tools");
+            let (_, high_risk, _) = tools.permission_for(&call).expect("patch");
+            assert!(high_risk, "{path}");
+        }
     }
 
     #[test]
@@ -4086,10 +4537,7 @@ mod tests {
             elapsed.as_secs() < 15,
             "cmd /C start deadlock: took {elapsed:?}"
         );
-        assert!(
-            result.is_ok(),
-            "expected ok, got error: {result:?}"
-        );
+        assert!(result.is_ok(), "expected ok, got error: {result:?}");
         // The call must finish on the child's own exit, not on the timeout path.
         assert_eq!(result.unwrap().output["timed_out"], false);
         // The job object kills `ping` as the call returns, but Windows releases
@@ -4141,6 +4589,152 @@ mod tests {
         assert_eq!(execution.output["timed_out"], true);
         assert_eq!(execution.output["success"], false);
         assert!(execution.summary.contains("timed out"));
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn runs_a_command_in_the_requested_workspace_subdirectory() {
+        let root = workspace();
+        // Stands in for a service that only finds its own migrations, config, or
+        // assets when it is started from its own directory instead of the
+        // workspace root.
+        let service_dir = root.join("server");
+        fs::create_dir_all(&service_dir).expect("service dir creates");
+        let tools = ToolRegistry::new(&root).expect("tools");
+
+        let execution = tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "cwd-check".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({
+                        "executable": "cmd",
+                        "args": ["/C", "cd"],
+                        "cwd": "server"
+                    }),
+                },
+                &|| false,
+            )
+            .expect("command runs in the requested directory");
+
+        assert_eq!(execution.output["success"], true);
+        assert_eq!(execution.output["cwd"], "server");
+        let stdout = execution.output["stdout"].as_str().expect("stdout text");
+        assert!(
+            stdout.trim().to_ascii_lowercase().ends_with("\\server"),
+            "command did not run in the subdirectory: {stdout:?}"
+        );
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn rejects_a_working_directory_that_is_not_a_workspace_directory() {
+        let root = workspace();
+        fs::write(root.join("notes.txt"), b"text").expect("file writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+
+        let outside = tools
+            .run_command(
+                parse_arguments(&json!({
+                    "executable": "cargo",
+                    "args": ["--version"],
+                    "cwd": "../"
+                }))
+                .expect("arguments parse"),
+                &|| false,
+            )
+            .expect_err("parent traversal is refused");
+        assert!(matches!(outside, ToolError::PathOutsideWorkspace(_)));
+
+        let not_a_dir = tools
+            .run_command(
+                parse_arguments(&json!({
+                    "executable": "cargo",
+                    "args": ["--version"],
+                    "cwd": "notes.txt"
+                }))
+                .expect("arguments parse"),
+                &|| false,
+            )
+            .expect_err("a file is not a working directory");
+        assert!(matches!(not_a_dir, ToolError::NotDirectory(_)));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn rejects_git_repository_paths_outside_workspace_before_spawn() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("tools");
+        for args in [
+            vec!["-C", "..", "status"],
+            vec!["--git-dir=..\\other\\.git", "status"],
+            vec!["--work-tree", "..\\other", "status"],
+        ] {
+            let error = tools
+                .run_command(
+                    parse_arguments(&json!({
+                        "executable": "git",
+                        "args": args
+                    }))
+                    .expect("arguments parse"),
+                    &|| false,
+                )
+                .expect_err("git path must stay in workspace");
+            assert!(matches!(error, ToolError::PathOutsideWorkspace(_)), "{error:?}");
+        }
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn reports_why_a_background_service_died_on_startup() {
+        let root = workspace();
+        // Stands in for a service that fails on startup: it prints the reason and
+        // exits, which used to be reported as a successful launch with a pid.
+        fs::write(
+            root.join("broken-service.cmd"),
+            "@echo off\r\necho migrations path not found 1>&2\r\nexit /b 3\r\n",
+        )
+        .expect("script writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+
+        let execution = tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "bg-failure".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({
+                        "executable": "cmd",
+                        "args": ["/C", "broken-service.cmd"],
+                        "background": true
+                    }),
+                },
+                &|| false,
+            )
+            .expect("failed launch is reported, not an error");
+
+        assert_eq!(execution.output["success"], false);
+        assert_eq!(execution.output["exited_immediately"], true);
+        assert_eq!(execution.output["exit_code"], 3);
+        assert!(
+            execution.output["log_tail"]
+                .as_str()
+                .expect("log tail text")
+                .contains("migrations path not found"),
+            "startup failure was not reported: {:?}",
+            execution.output["log_tail"]
+        );
+
+        // The log stays on disk so it can be read again after the call.
+        let log_path = execution.output["log_path"]
+            .as_str()
+            .expect("log path reported");
+        assert!(log_path.starts_with(".xcoding/logs/"));
+        assert!(root.join(log_path).is_file(), "log file kept at {log_path}");
+
         fs::remove_dir_all(root).expect("workspace removes");
     }
 
@@ -4247,6 +4841,7 @@ mod tests {
             start.elapsed()
         );
         assert_eq!(execution.output["background"], true);
+        assert_eq!(execution.output["exited_immediately"], false);
         let pid = execution.output["pid"].as_u64().expect("pid reported");
 
         // `ping` appends a line per second, so a surviving service keeps growing
@@ -4262,6 +4857,182 @@ mod tests {
         );
 
         // Nothing reclaims a background launch, so the test cleans up after itself.
+        let _ = workspace_command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        for attempt in 0..25 {
+            if fs::remove_dir_all(&root).is_ok() {
+                break;
+            }
+            assert!(attempt < 24, "workspace removes");
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Picks a port that is free right now by binding and releasing it.
+    #[cfg(windows)]
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("port binds");
+        listener.local_addr().expect("bound address").port()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn waits_until_a_background_service_accepts_connections() {
+        let root = workspace();
+        let port = free_port();
+        // Stands in for a service with a slow start: the port only opens after a
+        // delay, so a launch reported before that would be reported too early.
+        fs::write(
+            root.join("listen-service.ps1"),
+            format!(
+                "Start-Sleep -Seconds 2\r\n$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, {port})\r\n$listener.Start()\r\nStart-Sleep -Seconds 60\r\n"
+            ),
+        )
+        .expect("script writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+
+        let execution = tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "bg-ready".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({
+                        "executable": "powershell",
+                        "args": ["-NoProfile", "-File", "listen-service.ps1"],
+                        "background": true,
+                        "ready_port": port,
+                        "ready_timeout_seconds": 30
+                    }),
+                },
+                &|| false,
+            )
+            .expect("background launch runs");
+
+        assert_eq!(execution.output["success"], true);
+        assert_eq!(execution.output["ready"], true);
+        assert_eq!(execution.output["ready_port"], port);
+        assert_eq!(
+            execution.output["url"],
+            format!("http://127.0.0.1:{port}").as_str()
+        );
+        // The wait is real: the service only listens after its startup delay.
+        assert!(
+            execution.output["waited_ms"]
+                .as_u64()
+                .expect("waited reported")
+                >= 1_000,
+            "ready reported without waiting: {:?}",
+            execution.output["waited_ms"]
+        );
+        let pid = execution.output["pid"].as_u64().expect("pid reported");
+
+        let _ = workspace_command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        for attempt in 0..25 {
+            if fs::remove_dir_all(&root).is_ok() {
+                break;
+            }
+            assert!(attempt < 24, "workspace removes");
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reports_a_service_that_dies_before_its_port_opens() {
+        let root = workspace();
+        let port = free_port();
+        // A service that fails its own startup checks never reaches listening, so
+        // the launch must fail on the real exit instead of waiting out the timeout.
+        fs::write(
+            root.join("dying-service.cmd"),
+            "@echo off\r\nping 127.0.0.1 -n 2 > nul\r\necho port already in use 1>&2\r\nexit /b 7\r\n",
+        )
+        .expect("script writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+
+        let started = Instant::now();
+        let execution = tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "bg-dies".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({
+                        "executable": "cmd",
+                        "args": ["/C", "dying-service.cmd"],
+                        "background": true,
+                        "ready_port": port,
+                        "ready_timeout_seconds": 30
+                    }),
+                },
+                &|| false,
+            )
+            .expect("failed launch is reported, not an error");
+
+        assert_eq!(execution.output["success"], false);
+        assert_eq!(execution.output["ready"], false);
+        assert_eq!(execution.output["exit_code"], 7);
+        assert!(
+            execution.output["log_tail"]
+                .as_str()
+                .expect("log tail text")
+                .contains("port already in use"),
+            "startup failure was not reported: {:?}",
+            execution.output["log_tail"]
+        );
+        // The exit ends the wait early rather than burning the full timeout.
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "waited for the full timeout after the service died: {:?}",
+            started.elapsed()
+        );
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reports_a_live_service_that_never_opens_its_port() {
+        let root = workspace();
+        let port = free_port();
+        // Alive but never listening: the launch must come back at the timeout with
+        // the pid, so the caller can stop it instead of leaking a half-started service.
+        fs::write(
+            root.join("silent-service.cmd"),
+            "@echo off\r\nping 127.0.0.1 -n 120 > nul\r\n",
+        )
+        .expect("script writes");
+        let tools = ToolRegistry::new(&root).expect("tools");
+
+        let execution = tools
+            .execute_authorized_cancellable(
+                &ToolCall {
+                    id: "bg-silent".to_owned(),
+                    name: ToolName::RunCommand,
+                    arguments: json!({
+                        "executable": "cmd",
+                        "args": ["/C", "silent-service.cmd"],
+                        "background": true,
+                        "ready_port": port,
+                        "ready_timeout_seconds": 2
+                    }),
+                },
+                &|| false,
+            )
+            .expect("timed-out launch is reported, not an error");
+
+        assert_eq!(execution.output["success"], false);
+        assert_eq!(execution.output["ready"], false);
+        assert_eq!(execution.output["ready_timed_out"], true);
+        assert_eq!(execution.output["exited_immediately"], false);
+        let pid = execution.output["pid"].as_u64().expect("pid reported");
+
         let _ = workspace_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
