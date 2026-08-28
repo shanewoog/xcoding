@@ -124,6 +124,7 @@ eady=false 时退出码为 2。
 
 - **ask** — 每条命令都需要审批
 - **auto-edit** — 白名单内安全开发命令可自动执行（内置 + `.xcoding/command-allowlist`）；高风险与非白名单命令仍需审批
+- **full-auto** — 自动执行非网络且未被硬拒绝的工具调用；网络访问与硬拒绝命令仍被拦截，仅用于完全信任的工作区和供应商
 - **工作区黑名单**（`.xcoding/command-denylist`）始终拦截匹配项，即使同时在白名单中
 - **硬拒绝**：format / shutdown / git clean -fdx / 递归删除根路径 / 绝对路径可执行文件等
 - **高风险标注**：`powershell -Command`、`cmd /c`、`git push --force`、`pnpm publish` 等

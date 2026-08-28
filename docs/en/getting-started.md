@@ -124,6 +124,7 @@ eady is false.
 
 - **ask** — every command needs approval
 - **auto-edit** — allowlisted safe developer commands auto-run (builtin plus `.xcoding/command-allowlist`); high-risk and non-allowlisted commands still need approval
+- **full-auto** — auto-runs non-network tool calls that are not hard-denied; network access and hard-denied commands remain blocked, for fully trusted workspaces and providers only
 - **Workspace denylist** (`.xcoding/command-denylist`) always blocks matches, even when also allowlisted
 - **Hard-denies** commands such as format, shutdown, git clean -fdx, recursive root deletes, and absolute executables
 - **Flags high-risk** shells/network-style helpers such as `powershell -Command`, `cmd /c`, `git push --force`, and `pnpm publish`

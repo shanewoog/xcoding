@@ -8,6 +8,8 @@ XCoding persists each session in the local SQLite database at `<workspace>/.xcod
 
 `auto-edit` applies ordinary file patches without a prompt. A small allowlist of safe developer commands (for example `cargo test`, `git status`, `pnpm test`) may also auto-run. Non-allowlisted commands, shell interpreters, and high-risk paths such as `.git` and `.xcoding` still require approval. Use this mode only for a workspace you are ready to let XCoding modify.
 
+`full-auto` runs every non-network tool call that is not hard-denied, including high-risk path patches and non-allowlisted commands. With a relay provider, enable it only when you fully trust both the relay and the workspace; sensitive-content blocking, network denial, and hard-denied destructive commands still apply.
+
 ## Workspace Defaults
 
 Each workspace has local defaults for mode, provider, and model. Only the `openai` OpenAI-compatible cloud provider is available in V1. The defaults contain no credentials.
@@ -93,9 +95,10 @@ This does not prove that a relay is trustworthy. Prefer local or verified offici
 - File deletion commands are denied when wrapped by a shell, when targeting absolute paths or parent traversal, or when recursive deletion reaches a drive root or user directory. Relative workspace deletion remains subject to the normal pattern and approval policies.
 - Git denies remote ref deletion (including `--delete`, `-d`, and `:ref`), reference deletion, forced worktree/submodule deletion, and history or reference destruction through `filter-branch`, `filter-repo`, `gc`, `prune`, `repack`, `replace`, or reflog expiry/deletion.
 - **Workspace denylist** (`.xcoding/command-denylist`) always blocks matching patterns, even if they also appear on the allowlist.
-- High-risk shells and force-push style invocations always need approval and are labeled **HIGH-RISK** in the approval summary (with a structured policy code).
+- High-risk shells and force-push style invocations need approval under `ask` / `auto-edit` and are labeled **HIGH-RISK** in the approval summary (with a structured policy code); under `full-auto`, they still face hard-deny rules but do not enter the approval queue.
 - Under `ask`, every remaining command still needs approval.
 - Under `auto-edit`, only allowlisted safe commands auto-run; everything else still needs approval.
+- Under `full-auto`, non-network commands that are not hard-denied auto-run; network access and hard-denied commands remain blocked.
 
 Allowlisted families include read-only `git` inspection, `cargo`/`go`/`dotnet` build-test helpers, package-manager `test`/`build`/`lint`/`exec` (not `publish`), plus `tsc` and `pytest`. Arguments containing shell metacharacters are never allowlisted.
 
@@ -131,4 +134,4 @@ During a task, tool activity summaries show how policy decided:
 - `Running ...` — allowed immediately (reads, or approved execution path)
 - `Blocked ...` — hard-denied by policy
 
-Ordinary patches and allowlisted commands under `auto-edit` never emit `approval_requested`. Non-allowlisted commands, high-risk commands, and writes under `.git` / `.xcoding` still require approval.
+Ordinary patches and allowlisted commands under `auto-edit` never emit `approval_requested`. Non-allowlisted commands, high-risk commands, and writes under `.git` / `.xcoding` still require approval. Under `full-auto`, non-network patches and commands that are not hard-denied do not emit `approval_requested`.

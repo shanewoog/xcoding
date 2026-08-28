@@ -8,6 +8,8 @@ XCoding 会把每个会话持久化到本地 SQLite 数据库：CLI 使用 `<wor
 
 `auto-edit` 会自动应用普通文件补丁。少量安全开发命令（例如 `cargo test`、`git status`、`pnpm test`）也可自动执行。非白名单命令、Shell 解释器，以及 `.git` / `.xcoding` 等高风险路径仍需审批。只应在允许 XCoding 修改的工作区中启用该模式。
 
+`full-auto` 会自动执行所有非网络且未被硬拒绝的工具调用，包括高风险路径补丁和非白名单命令。使用中转站时仍建议只在完全信任该中转站及工作区的前提下启用；涉密内容拦截、网络拒绝和破坏性命令硬拒绝仍然生效。
+
 ## 工作区默认配置
 
 每个工作区都有本地的模式、供应商和模型默认配置。V1 仅支持名为 `openai` 的 OpenAI 兼容云供应商，配置中不会包含任何凭据。
@@ -88,9 +90,10 @@ export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1" # optional
 - 文件删除命令会拒绝 Shell 包裹的删除、绝对路径删除、路径穿越，以及指向盘符根目录或用户目录的递归删除；工作区内的相对路径删除仍受模式和审批策略约束。
 - Git 会拒绝远端 ref 删除（包括 `--delete`、`-d` 和 `:ref`）、引用删除、强制删除 worktree/submodule，以及 `filter-branch`、`filter-repo`、`gc`、`prune`、`repack`、`replace`、reflog 过期/删除等历史或引用破坏操作。
 - **工作区黑名单**（`.xcoding/command-denylist`）：匹配模式一律拦截，即使同时出现在白名单中。
-- Shell / force-push 等高风险调用始终需要审批，并在审批摘要中标注 **HIGH-RISK**（含结构化策略码）。
+- Shell / force-push 等高风险调用在 `ask` / `auto-edit` 下需要审批，并在审批摘要中标注 **HIGH-RISK**（含结构化策略码）；`full-auto` 下仍受硬拒绝规则约束但不会进入审批队列。
 - 在 `ask` 模式下，其余命令仍全部需要审批。
 - 在 `auto-edit` 模式下，仅白名单内的安全命令可自动执行，其他命令仍需审批。
+- 在 `full-auto` 模式下，非网络且未被硬拒绝的命令会自动执行；网络访问和硬拒绝命令仍被拦截。
 
 白名单覆盖只读 `git` 查询、`cargo`/`go`/`dotnet` 构建测试类命令、包管理器的 `test`/`build`/`lint`/`exec`（不含 `publish`），以及 `tsc`、`pytest`。参数中含有 shell 元字符的调用不会进入白名单。
 
@@ -126,7 +129,7 @@ Desktop 会用徽章、完整命令文本和更醒目的确认按钮突出高风
 - `Running ...` — 立即允许（只读，或已获准执行路径）
 - `Blocked ...` — 被策略硬拒绝
 
-`auto-edit` 下的普通补丁与白名单命令不会发出 `approval_requested`。非白名单命令、高风险命令，以及 `.git` / `.xcoding` 路径的写入仍需审批。
+`auto-edit` 下的普通补丁与白名单命令不会发出 `approval_requested`。非白名单命令、高风险命令，以及 `.git` / `.xcoding` 路径的写入仍需审批。`full-auto` 下，非网络且未被硬拒绝的补丁和命令不会发出 `approval_requested`。
 
 ## 工作区 Skills
 

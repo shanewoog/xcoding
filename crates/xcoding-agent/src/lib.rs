@@ -212,18 +212,21 @@ fn messages_contain_sensitive_data(messages: &[ChatMessage]) -> bool {
 }
 
 fn enforce_relay_tool_confirmation(
+    mode: &xcoding_protocol::Mode,
     trust_level: ProviderTrustLevel,
     decision: PermissionDecision,
     kind: PermissionKind,
     tool_call: &ToolCall,
 ) -> PermissionDecision {
-    if trust_level == ProviderTrustLevel::Relay
+    if !matches!(mode, xcoding_protocol::Mode::FullAuto)
+        && trust_level == ProviderTrustLevel::Relay
         && decision == PermissionDecision::Allow
         && matches!(kind, PermissionKind::Write | PermissionKind::Exec)
     {
         return PermissionDecision::AskUser;
     }
-    if trust_level == ProviderTrustLevel::Relay
+    if !matches!(mode, xcoding_protocol::Mode::FullAuto)
+        && trust_level == ProviderTrustLevel::Relay
         && decision == PermissionDecision::Allow
         && tool_call.name == ToolName::Mcp
     {
@@ -1469,6 +1472,7 @@ impl<'a> AgentService<'a> {
                     &tool_call,
                 );
                 let decision = enforce_relay_tool_confirmation(
+                    &session.mode,
                     primary_candidate.trust_level,
                     decision,
                     kind,

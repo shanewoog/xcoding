@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,8 +15,24 @@ async function main() {
   const workspace = await mkdtemp(resolve(tmpdir(), "xcoding-full-auto-"));
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-full-auto-db-"));
   const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-full-auto-home-"));
+  const configDirectory = resolve(homeDirectory, ".xcoding");
   await cp(fixtureSource, workspace, { recursive: true });
   const mock = await startMockProvider();
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    resolve(configDirectory, "config.json"),
+    `${JSON.stringify(
+      {
+        provider_fallback_enabled: false,
+        providers: [
+          { id: "default", name: "openai", base_url: mock.baseUrl, api_key: "e2e-test-key", trust_level: "official" },
+        ],
+        active_provider_id: "default",
+      },
+      null,
+    )}\n`,
+    "utf8",
+  );
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
@@ -192,9 +208,10 @@ async function startMockProvider() {
       if (hasToolResult) {
         writeText(response, "Command ran without approval.");
       } else {
-        const executable = process.platform === "win32" ? "cmd" : "echo";
-        const args = process.platform === "win32" ? ["/c", "echo", "trusted"] : ["trusted"];
-        writeTool(response, "call_cmd", "run_command", { executable, args });
+        writeTool(response, "call_cargo", "run_command", {
+          executable: "cargo",
+          args: ["--version"],
+        });
       }
       response.end("data: [DONE]\n\n");
       return;

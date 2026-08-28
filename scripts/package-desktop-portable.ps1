@@ -176,6 +176,13 @@ $releaseGitPaths = @(
   "apps/desktop/src-tauri/tauri.conf.json",
   "apps/desktop/src-tauri/src/main.rs",
   "tests/e2e/desktop-config.mjs",
+  "crates/xcoding-agent/src/lib.rs",
+  "crates/xcoding-policy/src/lib.rs",
+  "docs/en/getting-started.md",
+  "docs/en/session-safety.md",
+  "docs/zh/getting-started.md",
+  "docs/zh/session-safety.md",
+  "tests/e2e/full-auto-mode.mjs",
   "scripts/package-desktop-portable.ps1"
 )
 

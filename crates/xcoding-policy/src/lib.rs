@@ -111,13 +111,13 @@ pub fn evaluate(mode: &Mode, kind: PermissionKind, high_risk: bool) -> Permissio
 /// Ordinary workspace file writes (`PermissionKind::Write`, `high_risk=false`) are
 /// always allowed in both modes so agents fully operate on files inside the
 /// workspace root. Paths outside the workspace remain rejected by the tools layer.
-/// High-risk writes (git mutations, `.git` / `.xcoding` paths) still need approval.
+/// High-risk writes (git mutations, `.git` / `.xcoding` paths) still need approval
+/// outside `full-auto`.
 /// `command_allowlisted` only affects `PermissionKind::Exec` under `auto-edit`.
 ///
-/// Under `full-auto`, ordinary writes and low-risk commands are allowed without
-/// approval. High-risk commands still require approval, while hard-denied commands
-/// are rejected earlier by [`assess_command`]. `PermissionKind::Network` stays
-/// denied in every mode.
+/// Under `full-auto`, all non-network operations are allowed without approval,
+/// while hard-denied commands are rejected earlier by [`assess_command`].
+/// `PermissionKind::Network` stays denied in every mode.
 pub fn evaluate_detailed(
     mode: &Mode,
     kind: PermissionKind,
@@ -126,7 +126,6 @@ pub fn evaluate_detailed(
 ) -> PermissionDecision {
     if matches!(mode, Mode::FullAuto)
         && !matches!(kind, PermissionKind::Network)
-        && !high_risk
     {
         return PermissionDecision::Allow;
     }
@@ -537,6 +536,13 @@ fn is_builtin_command_allowlisted(executable: &str, args: &[String]) -> bool {
         "cargo" => {
             if args.is_empty() {
                 return false;
+            }
+            if args.len() == 3
+                && first_lower == "run"
+                && args[1].eq_ignore_ascii_case("--bin")
+                && args[2].eq_ignore_ascii_case("pfix")
+            {
+                return true;
             }
             matches!(
                 first_lower.as_str(),
@@ -1182,14 +1188,14 @@ mod tests {
     }
 
     #[test]
-    fn full_auto_allows_low_risk_but_still_confirms_high_risk_operations() {
+    fn full_auto_allows_non_network_operations() {
         assert_eq!(
             evaluate(&Mode::FullAuto, PermissionKind::Write, false),
             PermissionDecision::Allow
         );
         assert_eq!(
             evaluate(&Mode::FullAuto, PermissionKind::Write, true),
-            PermissionDecision::AskUser
+            PermissionDecision::Allow
         );
         assert_eq!(
             evaluate_detailed(&Mode::FullAuto, PermissionKind::Exec, false, false),
@@ -1197,7 +1203,7 @@ mod tests {
         );
         assert_eq!(
             evaluate_detailed(&Mode::FullAuto, PermissionKind::Exec, true, false),
-            PermissionDecision::AskUser
+            PermissionDecision::Allow
         );
         assert_eq!(
             evaluate(&Mode::FullAuto, PermissionKind::Read, false),
@@ -1504,6 +1510,29 @@ mod tests {
 
         let git_status = assess_command("git", &["status".to_owned(), "--short".to_owned()]);
         assert!(git_status.allowlisted);
+
+        let pfix = assess_command(
+            "cargo",
+            &[
+                "run".to_owned(),
+                "--bin".to_owned(),
+                "pfix".to_owned(),
+            ],
+        );
+        assert_eq!(pfix.decision, PermissionDecision::Allow);
+        assert!(pfix.allowlisted);
+        assert!(!pfix.high_risk);
+
+        let other_binary = assess_command(
+            "cargo",
+            &[
+                "run".to_owned(),
+                "--bin".to_owned(),
+                "other-tool".to_owned(),
+            ],
+        );
+        assert_eq!(other_binary.decision, PermissionDecision::AskUser);
+        assert!(!other_binary.allowlisted);
     }
 
     #[test]
