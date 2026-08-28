@@ -16,6 +16,7 @@ async function main() {
   await assertRetryThenFail();
   await assertRetryThenSucceed();
   await assertFallsBackToAnotherConfiguredProvider();
+  await assertRotatesToAnotherKeyOfTheSameProvider();
   await assertSupportsMoreThanElevenToolRounds();
   await assertSkipsModelIncompatibleProviderWithinSession();
   await assertReconnectAfterSseDisconnect();
@@ -312,6 +313,90 @@ async function assertFallsBackToAnotherConfiguredProvider() {
     await rpc.close();
     await primary.close();
     await backup.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertRotatesToAnotherKeyOfTheSameProvider() {
+  const mock = await startFlakyProvider({
+    succeedAfter: 1,
+    alwaysStatus: 503,
+    rejectedApiKeys: ["primary-key-secret-aaaa"],
+  });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-provider-keypool-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-provider-keypool-home-"));
+  const configDirectory = resolve(homeDirectory, ".xcoding");
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    resolve(configDirectory, "config.json"),
+    JSON.stringify({
+      locale: "en",
+      mode: "ask",
+      provider: "openai",
+      model: "fixture-model",
+      max_provider_retries: 0,
+      circuit_failure_threshold: 1,
+      stream_first_event_timeout_secs: 120,
+      stream_idle_timeout_secs: 120,
+      circuit_recovery_success_threshold: 2,
+      circuit_recovery_wait_secs: 60,
+      circuit_error_rate_threshold_percent: 100,
+      circuit_min_request_count: 100,
+      provider_fallback_enabled: false,
+      base_url: mock.baseUrl,
+      providers: [
+        {
+          id: "pool",
+          name: "Pool",
+          base_url: mock.baseUrl,
+          // The higher weight is selected first, so the rejected credential is
+          // guaranteed to be the one that opens the turn.
+          api_keys: [
+            { id: "key-a", label: "Account A", key: "primary-key-secret-aaaa", weight: 5, enabled: true },
+            { id: "key-b", label: "Account B", key: "primary-key-secret-bbbb", weight: 1, enabled: true },
+          ],
+        },
+      ],
+      active_provider_id: "pool",
+    }, null, 2) + "\n",
+    "utf8",
+  );
+  const { OPENAI_API_KEY, XCODING_OPENAI_BASE_URL, ...environment } = process.env;
+  const rpc = startRpcClient({
+    databasePath: resolve(databaseDirectory, "xcoding.db"),
+    environment: {
+      ...environment,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
+    },
+  });
+
+  try {
+    const result = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Rotate to the healthy account",
+      model: "fixture-model",
+    });
+    assert.equal(result.session.status, "done");
+    assert.match(result.message?.content ?? "", /hello after retries/i);
+    assert.deepEqual(
+      mock.bearers,
+      ["primary-key-secret-aaaa", "primary-key-secret-bbbb"],
+      "the rejected key must be tried first and then handed over to the other account",
+    );
+    const switchEvent = rpc.events.find(
+      (event) => event.type === "retrying" && /credential was rejected/i.test(event.message),
+    );
+    assert.ok(switchEvent, "expected a visible credential-rotation event");
+    assert.ok(
+      !switchEvent.message.includes("primary-key-secret"),
+      "rotation messages must never carry the secret",
+    );
+    assert.match(switchEvent.message, /key key-a \.\.\.aaaa/, "expected a masked key hint");
+  } finally {
+    await rpc.close();
+    await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
     await rm(homeDirectory, { recursive: true, force: true });
   }
@@ -684,9 +769,10 @@ function startRpcClient({ databasePath, environment }) {
 }
 
 /**
- * @param {{ succeedAfter: number | null, alwaysStatus: number, disconnectBeforeDone?: number, emptyDone?: boolean, toolRoundsBeforeAnswer?: number, errorBody?: object }} options
+ * @param {{ succeedAfter: number | null, alwaysStatus: number, disconnectBeforeDone?: number, emptyDone?: boolean, toolRoundsBeforeAnswer?: number, errorBody?: object, rejectedApiKeys?: string[] }} options
  * succeedAfter: 1-based attempt number that starts returning SSE success.
  * null means never succeed.
+ * rejectedApiKeys: bearer values answered with 401 regardless of attempt count.
  */
 async function startFlakyProvider({
   succeedAfter,
@@ -696,15 +782,26 @@ async function startFlakyProvider({
   emptyDone = false,
   toolRoundsBeforeAnswer = 0,
   errorBody = { error: { message: "temporary upstream failure", type: "server_error" } },
+  rejectedApiKeys = [],
 }) {
   const requests = [];
+  const bearers = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) {
       chunks.push(chunk);
     }
     requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    const bearer = (request.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+    bearers.push(bearer);
     const attempt = requests.length;
+    // A rejected credential must be answered per key, not per attempt, so the
+    // rotation has to move to another key to finish the turn.
+    if (rejectedApiKeys.includes(bearer)) {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "invalid api key", type: "invalid_request_error" } }));
+      return;
+    }
     // Streams a visible answer prefix and then drops the connection, which is how
     // a gateway that stops forwarding events mid-answer looks to the client.
     if (attempt <= partialTextBeforeDisconnect) {
@@ -755,6 +852,7 @@ async function startFlakyProvider({
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requests,
+    bearers,
     close: () =>
       new Promise((resolveClose, rejectClose) =>
         server.close((error) => (error ? rejectClose(error) : resolveClose())),

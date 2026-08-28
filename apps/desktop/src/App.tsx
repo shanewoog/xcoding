@@ -30,6 +30,8 @@ import type {
   LocalPluginItem,
   ProjectDir,
   ProviderAuthStatus,
+  ProviderApiKey,
+  ProviderKeyStatus,
   ProviderModel,
   UserConfig,
   VisionDelegateConfig,
@@ -212,6 +214,35 @@ function providerId(): string {
   return globalThis.crypto?.randomUUID?.() || `provider-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const MIN_PROVIDER_KEY_WEIGHT = 0;
+const MAX_PROVIDER_KEY_WEIGHT = 1000;
+
+function providerKeyId(): string {
+  return globalThis.crypto?.randomUUID?.() || `key-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Keeps the stored key pool well formed: stable ids, bounded weights, no blank entries. */
+function normalizeProviderApiKeys(items: ProviderApiKey[] | undefined): ProviderApiKey[] {
+  return (items || [])
+    .filter((item) => item && typeof item.key === "string")
+    .map((item, index) => ({
+      id: (typeof item.id === "string" ? item.id.trim() : "") || `key-${index + 1}`,
+      label: item.label?.trim() || undefined,
+      key: item.key.trim(),
+      weight: normalizeBoundedInteger(item.weight, 1, MIN_PROVIDER_KEY_WEIGHT, MAX_PROVIDER_KEY_WEIGHT),
+      enabled: item.enabled !== false,
+    }))
+    .filter((item) => item.key.length > 0);
+}
+
+/** Key actually used for single-key flows such as the model list probe. */
+function primaryProviderKey(provider: CloudProviderConfig | null | undefined): string {
+  if (!provider) return "";
+  const pool = (provider.api_keys || []).filter((item) => item.enabled !== false && (item.key || "").trim());
+  if (pool.length > 0) return (pool[0].key || "").trim();
+  return (provider.api_key || "").trim();
+}
+
 function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[]; activeProviderId: string } {
   const configured = (config.providers || [])
     .filter((item) => item && typeof item.id === "string")
@@ -222,6 +253,7 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
       wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
       trust_level: item.trust_level === "local" || item.trust_level === "official" ? item.trust_level : "relay" as const,
       api_key: item.api_key || undefined,
+      api_keys: normalizeProviderApiKeys(item.api_keys),
     }));
   const providers = configured.length > 0
     ? configured
@@ -232,6 +264,7 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
         wire_api: "chat_completions" as const,
         trust_level: "relay" as const,
         api_key: config.api_key || undefined,
+        api_keys: [],
       }];
   const activeProviderId = providers.some((item) => item.id === config.active_provider_id)
     ? config.active_provider_id!
@@ -1310,6 +1343,7 @@ export function App() {
   const [taskSummary, setTaskSummary] = useState<TaskSummary | null>(null);
   const [replaySteps, setReplaySteps] = useState<ReplayStep[]>([]);
   const [providerStatus, setProviderStatus] = useState<ProviderAuthStatus | null>(null);
+  const [providerKeyStatuses, setProviderKeyStatuses] = useState<ProviderKeyStatus[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [modelCallLogs, setModelCallLogs] = useState<ModelCallLog[]>([]);
   const [modelCallLogsLoading, setModelCallLogsLoading] = useState(false);
@@ -1430,11 +1464,44 @@ export function App() {
     [activeProvider, providers, selectedProviderId],
   );
   const selectedProviderModels = selectedProvider ? providerModelsById[selectedProvider.id] ?? [] : [];
+  const providerKeyStatusById = useMemo(() => {
+    const map = new Map<string, ProviderKeyStatus>();
+    for (const status of providerKeyStatuses) {
+      map.set(`${status.provider_id}|${status.key_id}`, status);
+    }
+    return map;
+  }, [providerKeyStatuses]);
   const selectedProviderModelsLoading = selectedProvider ? Boolean(providerModelsLoadingById[selectedProvider.id]) : false;
   const selectedProviderModelsError = selectedProvider ? providerModelErrorsById[selectedProvider.id] : undefined;
 
   function updateProvider(id: string, patch: Partial<CloudProviderConfig>): void {
     setProviders((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  }
+
+  function updateProviderKeys(
+    id: string,
+    update: (keys: ProviderApiKey[]) => ProviderApiKey[],
+  ): void {
+    setProviders((current) => current.map((item) => (
+      item.id === id ? { ...item, api_keys: update(item.api_keys || []) } : item
+    )));
+  }
+
+  function addProviderKey(id: string): void {
+    updateProviderKeys(id, (keys) => [
+      ...keys,
+      { id: providerKeyId(), label: "", key: "", weight: 1, enabled: true },
+    ]);
+  }
+
+  function updateProviderKey(providerId: string, keyId: string, patch: Partial<ProviderApiKey>): void {
+    updateProviderKeys(providerId, (keys) => keys.map((item) => (
+      item.id === keyId ? { ...item, ...patch } : item
+    )));
+  }
+
+  function deleteProviderKey(providerId: string, keyId: string): void {
+    updateProviderKeys(providerId, (keys) => keys.filter((item) => item.id !== keyId));
   }
 
   function addProvider(): void {
@@ -1695,6 +1762,17 @@ export function App() {
     }
   }, []);
 
+  const refreshProviderKeyStatuses = useCallback(async () => {
+    if (!isTauriRuntime) return;
+    try {
+      const statuses = await invoke<ProviderKeyStatus[]>("provider_key_status");
+      setProviderKeyStatuses(Array.isArray(statuses) ? statuses : []);
+    } catch {
+      // Rotation stats are advisory; a failure here must not block the settings view.
+      setProviderKeyStatuses([]);
+    }
+  }, []);
+
   const maskApiKeyHint = useCallback((key: string): string | undefined => {
     const trimmed = key.trim();
     if (!trimmed) return undefined;
@@ -1710,7 +1788,7 @@ export function App() {
     const provider = options?.provider ?? activeProvider;
     const providerId = provider?.id;
     const configuredBase = normalizeProviderBaseUrl(provider?.base_url) || DEFAULT_PROVIDER_BASE_URL;
-    const configuredKey = provider?.api_key || "";
+    const configuredKey = primaryProviderKey(provider);
     const silent = Boolean(options?.silent);
     const updateComposerModels = options?.updateComposerModels
       ?? (!options?.provider || provider?.id === activeProvider?.id);
@@ -1985,6 +2063,16 @@ export function App() {
       void loadLocalMemoryCount();
     }
   }, [view, settingsTab, workspaceRoot, loadLocalMemoryCount]);
+
+  useEffect(() => {
+    if (view !== "settings" || settingsTab !== "provider") return;
+    void refreshProviderKeyStatuses();
+    // Cooldown counters tick down locally, so poll while the pane is visible.
+    const timer = window.setInterval(() => {
+      void refreshProviderKeyStatuses();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [view, settingsTab, refreshProviderKeyStatuses]);
 
   useEffect(() => {
     if (view === "settings" && settingsTab === "plugins") {
@@ -3639,6 +3727,7 @@ export function App() {
         wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
         trust_level: item.trust_level === "local" || item.trust_level === "official" ? item.trust_level : "relay" as const,
         api_key: item.api_key?.trim() || undefined,
+        api_keys: normalizeProviderApiKeys(item.api_keys),
       }));
       const selectedProvider = normalizedProviders.find((item) => item.id === activeProviderId) ?? normalizedProviders[0];
       if (!selectedProvider) {
@@ -4156,20 +4245,138 @@ export function App() {
                     placeholder={t(locale, "field.baseUrlPlaceholder")}
                   />
                   <label className="field-label" htmlFor={`provider-api-key-${selectedProvider.id}`}>{t(locale, "field.apiKey")}</label>
-                  <div className="secret-field">
-                    <input
-                      id={`provider-api-key-${selectedProvider.id}`}
-                      type={showApiKey ? "text" : "password"}
-                      value={selectedProvider.api_key || ""}
-                      onChange={(event) => updateProvider(selectedProvider.id, { api_key: event.target.value })}
+                  {(selectedProvider.api_keys || []).length === 0 ? (
+                    <div className="secret-field">
+                      <input
+                        id={`provider-api-key-${selectedProvider.id}`}
+                        type={showApiKey ? "text" : "password"}
+                        value={selectedProvider.api_key || ""}
+                        onChange={(event) => updateProvider(selectedProvider.id, { api_key: event.target.value })}
+                        disabled={anySessionRunning || isSavingConfig}
+                        spellCheck={false}
+                        autoComplete="off"
+                        placeholder={t(locale, "field.apiKeyPlaceholder")}
+                      />
+                      <button type="button" className="quiet-button" onClick={() => setShowApiKey((current) => !current)}>
+                        {showApiKey ? t(locale, "action.hideKey") : t(locale, "action.showKey")}
+                      </button>
+                    </div>
+                  ) : null}
+                  <div className="provider-key-pool" id={`provider-key-pool-${selectedProvider.id}`}>
+                    {(selectedProvider.api_keys || []).map((keyEntry, keyIndex) => {
+                      const keyStatus = providerKeyStatusById.get(`${selectedProvider.id}|${keyEntry.id}`);
+                      const stateLabelKey: MessageKey = keyStatus?.state === "rejected"
+                        ? "keyState.rejected"
+                        : keyStatus?.state === "rate_limited"
+                          ? "keyState.rateLimited"
+                          : keyStatus?.state === "unstable"
+                            ? "keyState.unstable"
+                            : keyStatus?.state === "disabled"
+                              ? "keyState.disabled"
+                              : "keyState.ready";
+                      return (
+                      <div className="provider-key-entry" key={keyEntry.id}>
+                      <div className={`provider-key-row ${keyEntry.enabled === false ? "disabled" : ""}`}>
+                        <input
+                          className="provider-key-label"
+                          value={keyEntry.label || ""}
+                          onChange={(event) => updateProviderKey(selectedProvider.id, keyEntry.id, { label: event.target.value })}
+                          disabled={anySessionRunning || isSavingConfig}
+                          spellCheck={false}
+                          placeholder={t(locale, "field.keyLabelPlaceholder", { index: String(keyIndex + 1) })}
+                          aria-label={t(locale, "field.keyLabel")}
+                        />
+                        <input
+                          className="provider-key-secret"
+                          type={showApiKey ? "text" : "password"}
+                          value={keyEntry.key || ""}
+                          onChange={(event) => updateProviderKey(selectedProvider.id, keyEntry.id, { key: event.target.value })}
+                          disabled={anySessionRunning || isSavingConfig}
+                          spellCheck={false}
+                          autoComplete="off"
+                          placeholder={t(locale, "field.apiKeyPlaceholder")}
+                          aria-label={t(locale, "field.apiKey")}
+                        />
+                        <input
+                          className="provider-key-weight"
+                          type="number"
+                          min={MIN_PROVIDER_KEY_WEIGHT}
+                          max={MAX_PROVIDER_KEY_WEIGHT}
+                          step={1}
+                          value={keyEntry.weight ?? 1}
+                          onChange={(event) => updateProviderKey(selectedProvider.id, keyEntry.id, {
+                            weight: normalizeBoundedInteger(Number(event.target.value), 1, MIN_PROVIDER_KEY_WEIGHT, MAX_PROVIDER_KEY_WEIGHT),
+                          })}
+                          disabled={anySessionRunning || isSavingConfig}
+                          aria-label={t(locale, "field.keyWeight")}
+                          title={t(locale, "field.keyWeight")}
+                        />
+                        <label className="provider-key-enabled">
+                          <input
+                            type="checkbox"
+                            checked={keyEntry.enabled !== false}
+                            onChange={(event) => updateProviderKey(selectedProvider.id, keyEntry.id, { enabled: event.target.checked })}
+                            disabled={anySessionRunning || isSavingConfig}
+                          />
+                          <span>{t(locale, "field.keyEnabled")}</span>
+                        </label>
+                        <button
+                          type="button"
+                          className="quiet-button"
+                          onClick={() => deleteProviderKey(selectedProvider.id, keyEntry.id)}
+                          disabled={anySessionRunning || isSavingConfig}
+                          title={t(locale, "action.deleteApiKey")}
+                          aria-label={t(locale, "action.deleteApiKey")}
+                        >
+                          x
+                        </button>
+                      </div>
+                      {keyStatus ? (
+                        <div className={`provider-key-status ${keyStatus.state}`}>
+                          <span className="provider-key-state">{t(locale, stateLabelKey)}</span>
+                          <span className="provider-key-usage">
+                            {t(locale, "keyStats.usage", {
+                              ok: String(keyStatus.success_count),
+                              fail: String(keyStatus.failure_count),
+                            })}
+                          </span>
+                          {keyStatus.cooldown_secs ? (
+                            <span className="provider-key-cooldown">
+                              {t(locale, "keyStats.cooldown", { seconds: String(keyStatus.cooldown_secs) })}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      </div>
+                      );
+                    })}
+                  </div>
+                  <div className="provider-key-pool-actions">
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      onClick={() => {
+                        const legacy = (selectedProvider.api_key || "").trim();
+                        const pool = selectedProvider.api_keys || [];
+                        if (pool.length === 0 && legacy) {
+                          // Promote the single configured key so the weighted pool starts from
+                          // the credential that already works, then add the new empty row.
+                          updateProvider(selectedProvider.id, {
+                            api_key: undefined,
+                            api_keys: [
+                              { id: providerKeyId(), label: "", key: legacy, weight: 1, enabled: true },
+                              { id: providerKeyId(), label: "", key: "", weight: 1, enabled: true },
+                            ],
+                          });
+                          return;
+                        }
+                        addProviderKey(selectedProvider.id);
+                      }}
                       disabled={anySessionRunning || isSavingConfig}
-                      spellCheck={false}
-                      autoComplete="off"
-                      placeholder={t(locale, "field.apiKeyPlaceholder")}
-                    />
-                    <button type="button" className="quiet-button" onClick={() => setShowApiKey((current) => !current)}>
-                      {showApiKey ? t(locale, "action.hideKey") : t(locale, "action.showKey")}
+                    >
+                      {t(locale, "action.addApiKey")}
                     </button>
+                    <span className="provider-key-pool-hint">{t(locale, "help.apiKeyPool")}</span>
                   </div>
                   </div>
                 ) : null}

@@ -43,6 +43,7 @@ pub const DEFAULT_CIRCUIT_MIN_REQUEST_COUNT: u32 = 10;
 pub const MIN_CIRCUIT_MIN_REQUEST_COUNT: u32 = 1;
 pub const MAX_CIRCUIT_MIN_REQUEST_COUNT: u32 = 100;
 pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4_000;
+pub const MAX_PROVIDER_KEY_WEIGHT: u32 = 1_000;
 pub const MAX_LOCAL_MEMORY_CHARS: usize = 600;
 pub const DEFAULT_PERSONALITY: &str = "default";
 /// Reply tones accepted by `UserConfig::personality`.
@@ -452,6 +453,30 @@ pub struct ProviderAuthStatus {
     pub message: String,
 }
 
+/// Runtime rotation state for one configured provider credential. Built for the
+/// settings view, so it carries only the masked hint and never the secret.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ProviderKeyStatus {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub key_id: String,
+    pub label: String,
+    /// Masked tail such as `...ab12`, or `env` when the value comes from the
+    /// environment instead of the configuration file.
+    pub key_hint: String,
+    pub weight: u32,
+    pub enabled: bool,
+    /// One of `ready`, `rejected`, `rate_limited`, `unstable`, `disabled`.
+    pub state: String,
+    /// Remaining cooldown in seconds for the time-based blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_secs: Option<u64>,
+    /// Turns this process completed with this credential.
+    pub success_count: u64,
+    /// Attempts this process failed with this credential.
+    pub failure_count: u64,
+}
+
 /// One model entry from an OpenAI-compatible `/models` response.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProviderModel {
@@ -517,6 +542,32 @@ pub struct ModelCapabilities {
 
 /// One OpenAI-compatible cloud provider endpoint in Desktop settings.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ProviderApiKey {
+    /// Stable identifier used by runtime health tracking and UI updates.
+    pub id: String,
+    /// Human-readable account label; never use the secret as a label.
+    #[serde(default)]
+    pub label: String,
+    /// Full API key. Never log this value.
+    pub key: String,
+    /// Relative share in the provider's smooth weighted rotation.
+    #[serde(default = "default_provider_key_weight")]
+    pub weight: u32,
+    /// Disabled keys remain configured but are excluded from rotation.
+    #[serde(default = "default_provider_key_enabled")]
+    pub enabled: bool,
+}
+
+fn default_provider_key_weight() -> u32 {
+    1
+}
+
+fn default_provider_key_enabled() -> bool {
+    true
+}
+
+/// One OpenAI-compatible cloud provider endpoint in Desktop settings.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CloudProviderConfig {
     pub id: String,
     /// Display name shown in the Desktop provider manager.
@@ -532,6 +583,10 @@ pub struct CloudProviderConfig {
     /// Full API key when configured. Never log this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Multiple accounts for this endpoint. When present, this takes precedence
+    /// over the legacy single `api_key` field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<ProviderApiKey>,
 }
 
 /// User-level Desktop/CLI preferences stored under `~/.xcoding/config.json`.
@@ -643,6 +698,7 @@ impl Default for UserConfig {
             wire_api: ProviderWireApi::default(),
             trust_level: ProviderTrustLevel::Relay,
             api_key: None,
+            api_keys: Vec::new(),
         };
         Self {
             locale: default_locale(),

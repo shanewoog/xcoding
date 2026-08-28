@@ -72,6 +72,38 @@ export interface ListModelsResult {
 export type ProviderWireApi = "chat_completions" | "responses";
 export type ProviderTrustLevel = "local" | "official" | "relay";
 
+/** One credential inside a provider key pool. */
+export interface ProviderApiKey {
+  /** Stable id used by rotation state and log labels. */
+  id: string;
+  /** Optional human label, for example the account this key belongs to. */
+  label?: string;
+  /** Full API key. Never log this value. */
+  key: string;
+  /** Relative share in the weighted rotation. 0 keeps the key out. */
+  weight?: number;
+  /** Disabled keys stay out of the rotation without losing their configuration. */
+  enabled?: boolean;
+}
+
+/** Rotation health for one configured credential, as shown in the settings view. */
+export interface ProviderKeyStatus {
+  provider_id: string;
+  provider_name: string;
+  key_id: string;
+  label: string;
+  /** Masked tail of the key. Never contains the full secret. */
+  key_hint: string;
+  weight: number;
+  enabled: boolean;
+  /** One of ready | rejected | rate_limited | unstable | disabled. */
+  state: string;
+  /** Remaining cooldown in seconds, only while the key is blocked. */
+  cooldown_secs?: number;
+  success_count: number;
+  failure_count: number;
+}
+
 export interface CloudProviderConfig {
   id: string;
   /** Display name shown in the Desktop provider manager. */
@@ -84,6 +116,8 @@ export interface CloudProviderConfig {
   trust_level?: ProviderTrustLevel;
   /** Full API key when configured. Never log this value. */
   api_key?: string;
+  /** Weighted key pool for this provider. Falls back to api_key when empty. */
+  api_keys?: ProviderApiKey[];
 }
 
 /** Vision delegate configuration for models without native vision support. */

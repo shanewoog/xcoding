@@ -107,6 +107,16 @@ pnpm cli -- auth --workspace .
 
 Desktop shows the same readiness state (ready / API key missing, base URL, masked key hint) in Settings and as a compact badge on the left panel. Configure the API key under **Settings → Cloud provider**.
 
+## Multiple Keys For One Provider
+
+One provider entry can hold several API keys from different accounts. Under **Settings → Cloud provider**, use **Add key** to build the pool, then give each key a label and a weight.
+
+- Selection is smooth weighted round-robin, decided once per user turn. Weights `6 / 3 / 1` send roughly 60% / 30% / 10% of turns to each key.
+- Weight `0` or an unchecked **Enabled** box keeps a key configured but out of rotation.
+- A key refused with 401/403 is dropped for the rest of the process until its value changes in the configuration. A 429 cools down for 30/60/120s, honouring `Retry-After` when the upstream sends it. Timeouts and 5xx first consume `max_provider_retries`, then cool down for 10/30/60s.
+- If every key of a provider is cooling down, the cooldowns are released early so the turn can still run. Refused keys are never released this way.
+- Each key row shows its rotation state, success/failure counters, and the remaining cooldown. Logs and events carry only the key id and the masked tail, never the secret.
+
 ## Environment Doctor
 
 Check workspace, server binary, core RPC, cloud credentials, workspace config, and git in one shot:

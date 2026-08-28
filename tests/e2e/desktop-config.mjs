@@ -296,6 +296,36 @@ async function main() {
   assert.ok(appearanceSource.includes("document.documentElement.style.fontSize"), "appearance.ts must apply the UI font size at the document root");
   assert.ok(cssSource.includes(".provider-list-item"), "styles.css missing provider list item styles");
   assert.ok(cssSource.includes(".provider-editor"), "styles.css missing selected provider editor styles");
+  // Weighted multi-key pool for one provider endpoint.
+  assert.ok(appSource.includes("function normalizeProviderApiKeys"), "App must normalize the provider key pool before saving");
+  assert.ok(appSource.includes("provider-key-pool"), "provider editor should render a key pool");
+  assert.ok(appSource.includes("provider-key-row"), "key pool should render one row per key");
+  assert.ok(appSource.includes('t(locale, "action.addApiKey")'), "key pool needs an add-key action");
+  assert.ok(appSource.includes('t(locale, "action.deleteApiKey")'), "key pool needs a remove-key action");
+  assert.ok(appSource.includes('aria-label={t(locale, "field.keyWeight")}'), "weight input needs an accessible label");
+  assert.ok(appSource.includes("max={MAX_PROVIDER_KEY_WEIGHT}"), "weight input must be bounded");
+  assert.ok(cssSource.includes(".provider-key-row"), "styles.css missing key pool row layout");
+  // Rotation stats for each key of a shared endpoint.
+  assert.ok(appSource.includes('invoke<ProviderKeyStatus[]>("provider_key_status")'), "App must read per-key rotation health from the backend");
+  assert.ok(appSource.includes("providerKeyStatusById"), "App must index key health by provider and key id");
+  assert.ok(appSource.includes("provider-key-status"), "key pool should render a health row per key");
+  assert.ok(cssSource.includes(".provider-key-status"), "styles.css missing key health row styles");
+  for (const needle of [
+    '"field.keyLabel"',
+    '"field.keyWeight"',
+    '"field.keyEnabled"',
+    '"action.addApiKey"',
+    '"action.deleteApiKey"',
+    '"help.apiKeyPool"',
+    '"keyState.rejected"',
+    '"keyState.rateLimited"',
+    '"keyStats.usage"',
+    '"keyStats.cooldown"',
+  ]) {
+    assert.ok(i18nSource.includes(needle), "i18n.ts missing " + needle);
+  }
+  const keyPoolLabelCount = (i18nSource.match(/"field\.keyWeight":/g) || []).length;
+  assert.equal(keyPoolLabelCount, 2, "key pool labels must exist in both en and zh-CN catalogs");
   assert.ok(!cssSource.includes(".provider-entry {"), "legacy expanded provider cards should be removed");
   assert.ok(appSource.includes("xcoding.cachedModels.v1"), "App should cache provider models for fast startup");
   assert.ok(appSource.includes("silent: true"), "startup model refresh should be silent/deferred");
@@ -341,6 +371,8 @@ async function main() {
     "external project copies must run off the desktop event thread",
   );
   assert.ok(desktopMainSource.includes("TrayIconBuilder"), "desktop should create a system tray icon");
+  assert.ok(desktopMainSource.includes("fn provider_key_status()"), "desktop must expose the per-key rotation status command");
+  assert.match(desktopMainSource, /generate_handler!\[[\s\S]*?provider_key_status/, "provider_key_status must be registered as a Tauri command");
   assert.ok(desktopMainSource.includes('MenuItem::with_id(app, "show", "显示 XCoding"'), "tray should provide a show action");
   assert.ok(desktopMainSource.includes('MenuItem::with_id(app, "quit", "退出"'), "tray should provide a quit action");
   assert.ok(desktopMainSource.includes("show_menu_on_left_click(false)"), "tray left click should restore the window instead of opening the menu");

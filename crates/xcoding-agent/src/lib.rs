@@ -20,7 +20,8 @@ use xcoding_protocol::{
     ChatParams, ChatResult, CloudProviderConfig, ContextCompaction, LocalMemory,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_LOCAL_MEMORY_CHARS,
     MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, Message, MessageRole, ModelCapabilities, PlanStep,
-    ProviderTrustLevel, ProviderWireApi, ResolveActionParams, ResolveActionResult, RollbackRestorePointParams,
+    ProviderApiKey, ProviderKeyStatus, ProviderTrustLevel, ProviderWireApi, ResolveActionParams,
+    ResolveActionResult, RollbackRestorePointParams,
     RollbackRestorePointResult, Session, SessionEvent, SessionStatus, ToolCall, ToolName,
     UserConfig,
 };
@@ -117,11 +118,33 @@ pub enum AgentError {
 #[derive(Clone)]
 struct ProviderCandidate {
     id: String,
+    key_id: String,
     name: String,
     base_url: String,
     wire_api: ProviderWireApi,
     trust_level: ProviderTrustLevel,
     api_key: Option<String>,
+}
+
+impl ProviderCandidate {
+    fn health_id(&self) -> String {
+        provider_key_health_id(&self.id, &self.key_id, self.api_key.as_deref())
+    }
+
+    /// Label used in switch messages. Providers with a single credential keep
+    /// their plain name so existing messages are unchanged.
+    fn display_label(&self, multi_key: bool) -> String {
+        if multi_key {
+            format!(
+                "{} [key {} {}]",
+                self.name,
+                self.key_id,
+                provider_key_hint(self.api_key.as_deref())
+            )
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +170,349 @@ struct ProviderAttemptFailure {
     error: AgentError,
     output_chars: usize,
     tool_calls: usize,
+}
+
+/// Smooth weighted round-robin state for one provider's independent accounts.
+/// The state is process-local; configured weights remain immutable and are
+/// restored automatically after a temporary key cooldown expires.
+#[derive(Default)]
+struct ProviderKeyRotation {
+    current_weights: HashMap<String, i64>,
+}
+
+impl ProviderKeyRotation {
+    fn select<'a>(&mut self, keys: &'a [ProviderApiKey]) -> Option<&'a ProviderApiKey> {
+        let usable: Vec<&ProviderApiKey> = keys
+            .iter()
+            .filter(|key| key.enabled && key.weight > 0 && !key.key.trim().is_empty())
+            .collect();
+        let total_weight: i64 = usable.iter().map(|key| key.weight as i64).sum();
+        if total_weight == 0 {
+            return None;
+        }
+
+        let mut selected = None;
+        let mut selected_weight = i64::MIN;
+        for key in &usable {
+            let current = self.current_weights.entry(key.id.clone()).or_default();
+            *current += key.weight as i64;
+            if *current > selected_weight {
+                selected = Some(*key);
+                selected_weight = *current;
+            }
+        }
+        if let Some(key) = selected {
+            if let Some(current) = self.current_weights.get_mut(&key.id) {
+                *current -= total_weight;
+            }
+        }
+        self.current_weights
+            .retain(|id, _| usable.iter().any(|key| key.id == *id));
+        selected
+    }
+}
+
+static PROVIDER_KEY_ROTATIONS: OnceLock<Mutex<HashMap<String, ProviderKeyRotation>>> =
+    OnceLock::new();
+
+/// Why a key is currently excluded from rotation. Only the reason and the
+/// masked hint are ever surfaced; the secret itself never leaves this module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderKeyBlock {
+    /// 401/403: the credential itself is wrong. Retrying costs quota and
+    /// usually trips upstream abuse counters, so the key stays out until the
+    /// user edits the configuration (which changes the key value, and with it
+    /// the fingerprint this state is filed under).
+    Rejected,
+    /// 429: quota or rate limit. Cools down and returns on its own.
+    RateLimited,
+    /// Timeouts and 5xx after the per-provider retries are spent.
+    Unstable,
+}
+
+#[derive(Default)]
+struct ProviderKeyHealth {
+    block: Option<ProviderKeyBlock>,
+    blocked_until: Option<Instant>,
+    /// Consecutive cooldowns of the same class, used to pick the backoff step.
+    cooldown_strikes: u32,
+    /// Turns completed with this credential in this process.
+    success_count: u64,
+    /// Attempts that failed with this credential in this process.
+    failure_count: u64,
+}
+
+/// Cooldown ladders. Both are short on purpose: a key that is merely busy
+/// should come back inside one conversation, and a longer pause is the
+/// circuit breaker's job, not this table's.
+const RATE_LIMIT_COOLDOWNS_SECS: [u64; 3] = [30, 60, 120];
+const UNSTABLE_COOLDOWNS_SECS: [u64; 3] = [10, 30, 60];
+
+fn cooldown_step(ladder: &[u64; 3], strikes: u32) -> Duration {
+    let index = (strikes.max(1) as usize - 1).min(ladder.len() - 1);
+    Duration::from_secs(ladder[index])
+}
+
+static PROVIDER_KEY_HEALTH: OnceLock<Mutex<HashMap<String, ProviderKeyHealth>>> = OnceLock::new();
+
+/// Health is filed under the key value's fingerprint, not its id: editing a
+/// rejected key in settings must clear its `Rejected` state without any
+/// explicit invalidation step, while renaming a label must not.
+fn provider_key_health_id(provider_id: &str, key_id: &str, api_key: Option<&str>) -> String {
+    let fingerprint = api_key.map(api_key_fingerprint).unwrap_or_default();
+    format!("{provider_id}|{key_id}|{fingerprint}")
+}
+
+/// Stable non-reversible short digest of a key value. Only used to detect that
+/// the configured value changed; never logged or emitted.
+fn api_key_fingerprint(api_key: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in api_key.trim().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Masked tail of a key, for operator-facing messages. Mirrors the provider
+/// crate's `mask_api_key` shape.
+fn provider_key_hint(api_key: Option<&str>) -> String {
+    let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return "env".to_owned();
+    };
+    let chars: Vec<char> = api_key.chars().collect();
+    if chars.len() <= 4 {
+        return "****".to_owned();
+    }
+    let suffix: String = chars[chars.len().saturating_sub(4)..].iter().collect();
+    format!("...{suffix}")
+}
+
+fn provider_key_is_available(candidate: &ProviderCandidate) -> bool {
+    let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut health) = health.lock() else {
+        return true;
+    };
+    let state = health.entry(candidate.health_id()).or_default();
+    match state.block {
+        None => true,
+        Some(ProviderKeyBlock::Rejected) => false,
+        Some(_) => match state.blocked_until {
+            Some(until) if Instant::now() < until => false,
+            _ => {
+                state.block = None;
+                state.blocked_until = None;
+                true
+            }
+        },
+    }
+}
+
+fn record_provider_key_success(candidate: &ProviderCandidate) {
+    let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut health) = health.lock() else {
+        return;
+    };
+    // Clear the block but keep the counters: the settings view reports what this
+    // process actually did with each account.
+    let state = health.entry(candidate.health_id()).or_default();
+    state.block = None;
+    state.blocked_until = None;
+    state.cooldown_strikes = 0;
+    state.success_count = state.success_count.saturating_add(1);
+}
+
+/// Classifies one exhausted attempt and, when it points at the credential
+/// rather than the request, blocks the key. Returns the block that was applied
+/// so the caller can explain the switch.
+fn record_provider_key_failure(
+    candidate: &ProviderCandidate,
+    error: &AgentError,
+) -> Option<ProviderKeyBlock> {
+    let retry_after = match error {
+        AgentError::Provider(provider_error) => provider_error.retry_after(),
+        _ => None,
+    };
+    let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let block = classify_provider_key_failure(error);
+    let Ok(mut health) = health.lock() else {
+        return block;
+    };
+    let state = health.entry(candidate.health_id()).or_default();
+    state.failure_count = state.failure_count.saturating_add(1);
+    // A request-level failure (unknown model, oversized payload) says nothing
+    // about the account, so it is counted but never blocks the key.
+    let Some(block) = block else {
+        return None;
+    };
+    if state.block == Some(block) {
+        state.cooldown_strikes = state.cooldown_strikes.saturating_add(1);
+    } else {
+        state.cooldown_strikes = 1;
+    }
+    state.block = Some(block);
+    state.blocked_until = match block {
+        ProviderKeyBlock::Rejected => None,
+        ProviderKeyBlock::RateLimited => Some(
+            Instant::now()
+                + retry_after.unwrap_or_else(|| {
+                    cooldown_step(&RATE_LIMIT_COOLDOWNS_SECS, state.cooldown_strikes)
+                }),
+        ),
+        ProviderKeyBlock::Unstable => {
+            Some(Instant::now() + cooldown_step(&UNSTABLE_COOLDOWNS_SECS, state.cooldown_strikes))
+        }
+    };
+    Some(block)
+}
+
+fn classify_provider_key_failure(error: &AgentError) -> Option<ProviderKeyBlock> {
+    match error {
+        AgentError::ProviderStreamFirstEventTimeout(_)
+        | AgentError::ProviderStreamIdleTimeout(_) => Some(ProviderKeyBlock::Unstable),
+        AgentError::Provider(ProviderError::HttpStatus { status, .. }) => {
+            match status.as_u16() {
+                401 | 403 => Some(ProviderKeyBlock::Rejected),
+                429 => Some(ProviderKeyBlock::RateLimited),
+                // 5xx is the endpoint failing, not this credential, but a key
+                // whose account is being throttled server-side often shows up
+                // this way too, so a short pause is still worth taking.
+                500 | 502 | 503 | 504 => Some(ProviderKeyBlock::Unstable),
+                _ => None,
+            }
+        }
+        AgentError::Provider(ProviderError::Http(_)) => Some(ProviderKeyBlock::Unstable),
+        _ => None,
+    }
+}
+
+/// Mirrors `release_circuits_when_all_are_open` for key cooldowns: when every
+/// remaining candidate is cooling down, the round would end without a single
+/// request. Cooldowns that are merely time-based are released so one real
+/// attempt stays available; a `Rejected` key is left blocked, since resending a
+/// credential the endpoint refused cannot succeed.
+fn release_key_cooldowns_when_all_are_blocked<'a>(
+    candidates: impl IntoIterator<Item = &'a ProviderCandidate>,
+) {
+    let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut health) = health.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    let ids: Vec<String> = candidates
+        .into_iter()
+        .map(ProviderCandidate::health_id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let all_blocked = ids.iter().all(|id| {
+        health.get(id).is_some_and(|state| match state.block {
+            None => false,
+            Some(ProviderKeyBlock::Rejected) => true,
+            Some(_) => state.blocked_until.is_some_and(|until| now < until),
+        })
+    });
+    if !all_blocked {
+        return;
+    }
+    for id in ids {
+        if let Some(state) = health.get_mut(&id) {
+            if state.block != Some(ProviderKeyBlock::Rejected) {
+                state.block = None;
+                state.blocked_until = None;
+            }
+        }
+    }
+}
+
+/// Snapshot of the rotation state for every configured credential, for the
+/// settings view. Reads process-local health only: nothing here touches the
+/// network, and the secrets stay behind `provider_key_hint`.
+pub fn provider_key_statuses(config: &UserConfig) -> Vec<ProviderKeyStatus> {
+    let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let health = health.lock().ok();
+    let now = Instant::now();
+    let mut statuses = Vec::new();
+    for provider in &config.providers {
+        let entries: Vec<ProviderApiKey> = if provider.api_keys.is_empty() {
+            provider
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(|key| {
+                    vec![ProviderApiKey {
+                        id: "legacy".to_owned(),
+                        label: String::new(),
+                        key: key.to_owned(),
+                        weight: 1,
+                        enabled: true,
+                    }]
+                })
+                .unwrap_or_default()
+        } else {
+            provider.api_keys.clone()
+        };
+        for entry in entries {
+            let id = provider_key_health_id(&provider.id, &entry.id, Some(&entry.key));
+            let state = health.as_ref().and_then(|health| health.get(&id));
+            let usable = entry.enabled && entry.weight > 0 && !entry.key.trim().is_empty();
+            let (label, cooldown_secs) = match state.and_then(|state| state.block) {
+                _ if !usable => ("disabled", None),
+                Some(ProviderKeyBlock::Rejected) => ("rejected", None),
+                Some(ProviderKeyBlock::RateLimited) | Some(ProviderKeyBlock::Unstable) => {
+                    let remaining = state
+                        .and_then(|state| state.blocked_until)
+                        .filter(|until| *until > now)
+                        .map(|until| until.saturating_duration_since(now).as_secs().max(1));
+                    match (state.and_then(|state| state.block), remaining) {
+                        // An expired cooldown is already back in rotation; the
+                        // stale block flag is cleared on the next selection.
+                        (_, None) => ("ready", None),
+                        (Some(ProviderKeyBlock::RateLimited), seconds) => ("rate_limited", seconds),
+                        (_, seconds) => ("unstable", seconds),
+                    }
+                }
+                None => ("ready", None),
+            };
+            statuses.push(ProviderKeyStatus {
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
+                key_id: entry.id.clone(),
+                label: entry.label.clone(),
+                key_hint: provider_key_hint(Some(&entry.key)),
+                weight: entry.weight,
+                enabled: entry.enabled,
+                state: label.to_owned(),
+                cooldown_secs,
+                success_count: state.map(|state| state.success_count).unwrap_or(0),
+                failure_count: state.map(|state| state.failure_count).unwrap_or(0),
+            });
+        }
+    }
+    statuses
+}
+
+fn select_provider_key(provider: &CloudProviderConfig) -> Option<(String, String)> {
+    let keys = if provider.api_keys.is_empty() {
+        provider.api_key.as_ref().map(|key| {
+            vec![ProviderApiKey {
+                id: "legacy".to_owned(),
+                label: "default".to_owned(),
+                key: key.clone(),
+                weight: 1,
+                enabled: true,
+            }]
+        })?
+    } else {
+        provider.api_keys.clone()
+    };
+    let rotations = PROVIDER_KEY_ROTATIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut rotations = rotations.lock().ok()?;
+    let rotation = rotations.entry(provider.id.clone()).or_default();
+    let selected = rotation.select(&keys)?;
+    Some((selected.id.clone(), selected.key.clone()))
 }
 
 static PROVIDER_CIRCUITS: OnceLock<Mutex<HashMap<String, CircuitState>>> = OnceLock::new();
@@ -261,7 +627,7 @@ fn provider_candidates(config: &UserConfig) -> Vec<ProviderCandidate> {
 
     ordered
         .into_iter()
-        .filter_map(|provider| {
+        .flat_map(|provider| {
             let api_key = provider
                 .api_key
                 .as_deref()
@@ -277,17 +643,50 @@ fn provider_candidates(config: &UserConfig) -> Vec<ProviderCandidate> {
                         .filter(|key| !key.is_empty())
                         .map(str::to_owned)
                 });
-            if api_key.is_none() && Some(provider.id.as_str()) != active_id {
-                return None;
+            let mut keys = if provider.api_keys.is_empty() {
+                api_key.map(|key| vec![("legacy".to_owned(), key)])
+                    .unwrap_or_default()
+            } else {
+                provider
+                    .api_keys
+                    .iter()
+                    .filter(|key| key.enabled && key.weight > 0 && !key.key.trim().is_empty())
+                    .map(|key| (key.id.clone(), key.key.clone()))
+                    .collect()
+            };
+            if keys.is_empty() && Some(provider.id.as_str()) != active_id {
+                return Vec::new();
             }
-            Some(ProviderCandidate {
-                id: provider.id.clone(),
-                name: provider.name.clone(),
-                base_url: provider.base_url.clone(),
-                wire_api: provider.wire_api,
-                trust_level: provider.trust_level,
-                api_key,
-            })
+            if keys.is_empty() {
+                return vec![ProviderCandidate {
+                    id: provider.id.clone(),
+                    key_id: "environment".to_owned(),
+                    name: provider.name.clone(),
+                    base_url: provider.base_url.clone(),
+                    wire_api: provider.wire_api,
+                    trust_level: provider.trust_level,
+                    api_key: None,
+                }];
+            }
+            if keys.len() > 1 {
+                if let Some((selected_id, _)) = select_provider_key(provider) {
+                    if let Some(index) = keys.iter().position(|(id, _)| *id == selected_id) {
+                        let selected = keys.remove(index);
+                        keys.insert(0, selected);
+                    }
+                }
+            }
+            keys.into_iter()
+                .map(|(key_id, api_key)| ProviderCandidate {
+                    id: provider.id.clone(),
+                    key_id,
+                    name: provider.name.clone(),
+                    base_url: provider.base_url.clone(),
+                    wire_api: provider.wire_api,
+                    trust_level: provider.trust_level,
+                    api_key: Some(api_key),
+                })
+                .collect()
         })
         .collect()
 }
@@ -305,9 +704,10 @@ fn open_provider(candidate: &ProviderCandidate) -> Result<OpenAiCompatibleProvid
 
 fn provider_circuit_key(candidate: &ProviderCandidate) -> String {
     format!(
-        "{}|{}",
+        "{}|{}|{}",
         candidate.id,
-        candidate.base_url.trim().to_ascii_lowercase()
+        candidate.base_url.trim().to_ascii_lowercase(),
+        candidate.key_id
     )
 }
 
@@ -442,7 +842,7 @@ fn stream_restart_discards_partial_output(error: &AgentError) -> bool {
 /// Identifies explicit per-provider model rejections for the current session only.
 /// This deliberately does not persist or bind a model to provider configuration.
 fn provider_rejected_selected_model(error: &AgentError) -> bool {
-    let AgentError::Provider(ProviderError::HttpStatus { status, body }) = error else {
+    let AgentError::Provider(ProviderError::HttpStatus { status, body, .. }) = error else {
         return false;
     };
     if !matches!(status.as_u16(), 400 | 404) {
@@ -880,6 +1280,19 @@ impl<'a> AgentService<'a> {
             McpRuntime::prepare_with_plugin_config(&session.workspace_root, &plugin_config)?;
         let user_config = load_user_config();
         let candidates = provider_candidates(&user_config);
+        // Providers that contributed more than one credential this turn. Only
+        // those get key-qualified labels, so single-key messages stay as-is.
+        let multi_key_provider_ids: HashSet<String> = candidates
+            .iter()
+            .filter(|candidate| {
+                candidates
+                    .iter()
+                    .filter(|other| other.id == candidate.id)
+                    .count()
+                    > 1
+            })
+            .map(|candidate| candidate.id.clone())
+            .collect();
         let primary_candidate = candidates.first().ok_or_else(|| {
             AgentError::ProviderFallbackExhausted(
                 "no configured provider has credentials".to_owned(),
@@ -1120,18 +1533,59 @@ impl<'a> AgentService<'a> {
                             !model_incompatible_provider_ids.contains(&candidate.id)
                         }),
                 );
+                // Same guard for key cooldowns: a turn whose every key is
+                // cooling down must still get one attempt rather than fail with
+                // "all configured providers are unavailable".
+                release_key_cooldowns_when_all_are_blocked(
+                    candidates
+                        .iter()
+                        .filter(|candidate| {
+                            !model_incompatible_provider_ids.contains(&candidate.id)
+                        }),
+                );
                 for (candidate_index, candidate) in candidates.iter().enumerate() {
                     let next_candidate = candidates.get(candidate_index + 1);
+                    let candidate_is_multi_key = multi_key_provider_ids.contains(&candidate.id);
+                    let candidate_label = candidate.display_label(candidate_is_multi_key);
+                    let next_candidate_label = next_candidate.map(|next| {
+                        next.display_label(multi_key_provider_ids.contains(&next.id))
+                    });
                     if model_incompatible_provider_ids.contains(&candidate.id) {
                         failures.push(format!(
                             "{} does not support selected model {}",
-                            candidate.name, session.model
+                            candidate_label, session.model
                         ));
                         continue;
                     }
+                    if !provider_key_is_available(candidate) {
+                        failures.push(format!("{candidate_label} key is unavailable"));
+                        if let Some(next_label) = next_candidate_label.as_deref() {
+                            self.emit(
+                                on_event,
+                                SessionEvent::Retrying {
+                                    session_id: session.id,
+                                    attempt: max_provider_attempts,
+                                    max_attempts: max_provider_attempts,
+                                    // Credential wording only helps when a provider holds
+                                    // several keys; a single-key provider keeps the
+                                    // established provider-level message.
+                                    message: if candidate_is_multi_key {
+                                        format!(
+                                            "Credential for \"{candidate_label}\" is unavailable; switching to \"{next_label}\"."
+                                        )
+                                    } else {
+                                        format!(
+                                            "Provider \"{candidate_label}\" is temporarily unavailable; switching to backup provider \"{next_label}\"."
+                                        )
+                                    },
+                                },
+                            );
+                        }
+                        continue;
+                    }
                     if !circuit_allows(candidate) {
-                        failures.push(format!("{} circuit is open", candidate.name));
-                        if let Some(next_candidate) = next_candidate {
+                        failures.push(format!("{candidate_label} circuit is open"));
+                        if let Some(next_label) = next_candidate_label.as_deref() {
                             self.emit(
                                 on_event,
                                 SessionEvent::Retrying {
@@ -1140,7 +1594,7 @@ impl<'a> AgentService<'a> {
                                     max_attempts: max_provider_attempts,
                                     message: format!(
                                         "Provider \"{}\" is temporarily unavailable; switching to backup provider \"{}\".",
-                                        candidate.name, next_candidate.name
+                                        candidate_label, next_label
                                     ),
                                 },
                             );
@@ -1174,8 +1628,8 @@ impl<'a> AgentService<'a> {
                                 Some(message.clone()),
                             );
                             record_provider_failure(candidate, circuit_settings);
-                            failures.push(format!("{}: {}", candidate.name, message));
-                            if let Some(next_candidate) = next_candidate {
+                            failures.push(format!("{candidate_label}: {message}"));
+                            if let Some(next_label) = next_candidate_label.as_deref() {
                                 self.emit(
                                     on_event,
                                     SessionEvent::Retrying {
@@ -1184,7 +1638,7 @@ impl<'a> AgentService<'a> {
                                         max_attempts: max_provider_attempts,
                                         message: format!(
                                             "Provider \"{}\" is unavailable; switching to backup provider \"{}\".",
-                                            candidate.name, next_candidate.name
+                                            candidate_label, next_label
                                         ),
                                     },
                                 );
@@ -1232,6 +1686,7 @@ impl<'a> AgentService<'a> {
                                     model_reported,
                                 );
                                 record_provider_success(candidate, circuit_settings);
+                                record_provider_key_success(candidate);
                                 completed = Some((content, tool_calls));
                                 break;
                             }
@@ -1322,6 +1777,11 @@ impl<'a> AgentService<'a> {
 
                                 let rejected_selected_model =
                                     provider_rejected_selected_model(&failure.error);
+                                let key_block = if rejected_selected_model {
+                                    None
+                                } else {
+                                    record_provider_key_failure(candidate, &failure.error)
+                                };
                                 if rejected_selected_model {
                                     model_incompatible_provider_ids.insert(candidate.id.clone());
                                 } else {
@@ -1345,8 +1805,8 @@ impl<'a> AgentService<'a> {
                                         None => return Err(failure.error),
                                     }
                                 }
-                                failures.push(format!("{}: {}", candidate.name, message));
-                                if let Some(next_candidate) = next_candidate {
+                                failures.push(format!("{candidate_label}: {message}"));
+                                if let Some(next_label) = next_candidate_label.as_deref() {
                                     self.emit(
                                         on_event,
                                         SessionEvent::Retrying {
@@ -1356,12 +1816,26 @@ impl<'a> AgentService<'a> {
                                             message: if rejected_selected_model {
                                                 format!(
                                                     "Provider \"{}\" does not support model \"{}\"; skipping it for this session and switching to backup provider \"{}\".",
-                                                    candidate.name, session.model, next_candidate.name
+                                                    candidate_label, session.model, next_label
+                                                )
+                                            } else if let Some(block) =
+                                                key_block.filter(|_| candidate_is_multi_key)
+                                            {
+                                                format!(
+                                                    "{} for \"{candidate_label}\"; switching to \"{next_label}\".",
+                                                    match block {
+                                                        ProviderKeyBlock::Rejected =>
+                                                            "Credential was rejected",
+                                                        ProviderKeyBlock::RateLimited =>
+                                                            "Credential hit a rate limit",
+                                                        ProviderKeyBlock::Unstable =>
+                                                            "Credential is temporarily unstable",
+                                                    }
                                                 )
                                             } else {
                                                 format!(
                                                     "Provider \"{}\" is unavailable; switching to backup provider \"{}\".",
-                                                    candidate.name, next_candidate.name
+                                                    candidate_label, next_label
                                                 )
                                             },
                                         },
@@ -3701,6 +4175,7 @@ fn resolve_vision_delegate(config: &UserConfig, session_model: &str) -> Option<V
         .find(|provider| provider.id == delegate.provider_id.trim())?;
     let candidate = ProviderCandidate {
         id: provider_config.id.clone(),
+        key_id: "legacy".to_owned(),
         name: provider_config.name.clone(),
         base_url: provider_config.base_url.clone(),
         wire_api: provider_config.wire_api,
@@ -3973,6 +4448,7 @@ fn sanitize_chat_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xcoding_providers::StatusCode;
 
     fn empty_windows() -> BTreeMap<String, usize> {
         BTreeMap::new()
@@ -4131,6 +4607,7 @@ mod tests {
                 wire_api: ProviderWireApi::ChatCompletions,
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("primary-key".to_owned()),
+                api_keys: Vec::new(),
             },
             CloudProviderConfig {
                 id: "backup".to_owned(),
@@ -4139,6 +4616,7 @@ mod tests {
                 wire_api: ProviderWireApi::Responses,
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("backup-key".to_owned()),
+                api_keys: Vec::new(),
             },
         ];
         config.active_provider_id = Some("backup".to_owned());
@@ -4169,6 +4647,7 @@ mod tests {
                 wire_api: ProviderWireApi::ChatCompletions,
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("primary-key".to_owned()),
+                api_keys: Vec::new(),
             },
             CloudProviderConfig {
                 id: "backup".to_owned(),
@@ -4177,6 +4656,7 @@ mod tests {
                 wire_api: ProviderWireApi::Responses,
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("backup-key".to_owned()),
+                api_keys: Vec::new(),
             },
         ];
         config.active_provider_id = Some("primary".to_owned());
@@ -4203,6 +4683,7 @@ mod tests {
                 wire_api: ProviderWireApi::ChatCompletions,
                 trust_level: ProviderTrustLevel::Official,
                 api_key: Some("official-key".to_owned()),
+                api_keys: Vec::new(),
             },
             CloudProviderConfig {
                 id: "relay".to_owned(),
@@ -4211,6 +4692,7 @@ mod tests {
                 wire_api: ProviderWireApi::ChatCompletions,
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("relay-key".to_owned()),
+                api_keys: Vec::new(),
             },
         ];
         config.active_provider_id = Some("official".to_owned());
@@ -4231,6 +4713,7 @@ mod tests {
             wire_api: ProviderWireApi::ChatCompletions,
             trust_level: ProviderTrustLevel::Relay,
             api_key: None,
+            api_keys: Vec::new(),
         }];
         config.active_provider_id = Some("relay".to_owned());
 
@@ -4260,6 +4743,7 @@ mod tests {
     fn circuit_recovers_after_the_configured_half_open_successes() {
         let candidate = ProviderCandidate {
             id: format!("circuit-test-{}", std::process::id()),
+            key_id: "legacy".to_owned(),
             name: "Circuit test".to_owned(),
             base_url: "https://circuit.example.test".to_owned(),
             wire_api: ProviderWireApi::ChatCompletions,
@@ -4312,6 +4796,7 @@ mod tests {
     fn open_circuits_are_released_when_no_candidate_can_be_tried() {
         let single = ProviderCandidate {
             id: format!("circuit-lockout-{}", std::process::id()),
+            key_id: "legacy".to_owned(),
             name: "Circuit lockout".to_owned(),
             base_url: "https://lockout.example.test".to_owned(),
             wire_api: ProviderWireApi::ChatCompletions,
@@ -4359,6 +4844,7 @@ mod tests {
     fn open_circuits_are_kept_while_another_candidate_is_still_usable() {
         let open = ProviderCandidate {
             id: format!("circuit-open-{}", std::process::id()),
+            key_id: "legacy".to_owned(),
             name: "Open".to_owned(),
             base_url: "https://open.example.test".to_owned(),
             wire_api: ProviderWireApi::ChatCompletions,
@@ -4367,6 +4853,7 @@ mod tests {
         };
         let healthy = ProviderCandidate {
             id: format!("circuit-healthy-{}", std::process::id()),
+            key_id: "legacy".to_owned(),
             name: "Healthy".to_owned(),
             base_url: "https://healthy.example.test".to_owned(),
             wire_api: ProviderWireApi::ChatCompletions,
@@ -4401,6 +4888,385 @@ mod tests {
         let mut circuits = circuits.lock().expect("circuit state lock");
         circuits.remove(&open_key);
         circuits.remove(&healthy_key);
+    }
+
+    fn test_key(id: &str, weight: u32) -> ProviderApiKey {
+        ProviderApiKey {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            key: format!("sk-{id}"),
+            weight,
+            enabled: true,
+        }
+    }
+
+    fn key_candidate(provider_id: &str, key_id: &str, api_key: &str) -> ProviderCandidate {
+        ProviderCandidate {
+            id: provider_id.to_owned(),
+            key_id: key_id.to_owned(),
+            name: "Pool".to_owned(),
+            base_url: "https://pool.example.test".to_owned(),
+            wire_api: ProviderWireApi::ChatCompletions,
+            trust_level: ProviderTrustLevel::Relay,
+            api_key: Some(api_key.to_owned()),
+        }
+    }
+
+    fn clear_key_health(candidates: &[&ProviderCandidate]) {
+        let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut health = health.lock().expect("key health lock");
+        for candidate in candidates {
+            health.remove(&candidate.health_id());
+        }
+    }
+
+    fn http_status_error(status: u16) -> AgentError {
+        AgentError::Provider(ProviderError::HttpStatus {
+            status: StatusCode::from_u16(status).expect("status"),
+            body: "upstream".to_owned(),
+            retry_after_secs: None,
+        })
+    }
+
+    #[test]
+    fn weighted_rotation_matches_the_configured_share() {
+        let keys = vec![test_key("a", 6), test_key("b", 3), test_key("c", 1)];
+        let mut rotation = ProviderKeyRotation::default();
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        for _ in 0..100 {
+            let selected = rotation.select(&keys).expect("a key is selected");
+            *counts.entry(selected.id.clone()).or_default() += 1;
+        }
+        assert_eq!(counts.get("a").copied(), Some(60));
+        assert_eq!(counts.get("b").copied(), Some(30));
+        assert_eq!(counts.get("c").copied(), Some(10));
+    }
+
+    #[test]
+    fn weighted_rotation_is_deterministic_across_equal_states() {
+        let keys = vec![test_key("a", 2), test_key("b", 1)];
+        let sequence = |rotation: &mut ProviderKeyRotation| {
+            (0..6)
+                .map(|_| rotation.select(&keys).expect("selected").id.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut first = ProviderKeyRotation::default();
+        let mut second = ProviderKeyRotation::default();
+        assert_eq!(sequence(&mut first), sequence(&mut second));
+    }
+
+    #[test]
+    fn zero_weight_disabled_and_blank_keys_stay_out_of_rotation() {
+        let mut rotation = ProviderKeyRotation::default();
+        let mut zero_weight = test_key("zero", 0);
+        zero_weight.weight = 0;
+        let mut disabled = test_key("disabled", 5);
+        disabled.enabled = false;
+        let mut blank = test_key("blank", 5);
+        blank.key = "   ".to_owned();
+        let usable = test_key("usable", 1);
+        let keys = vec![zero_weight, disabled, blank, usable];
+        for _ in 0..5 {
+            assert_eq!(rotation.select(&keys).expect("selected").id, "usable");
+        }
+
+        let mut all_unusable = ProviderKeyRotation::default();
+        let mut only_disabled = test_key("only", 3);
+        only_disabled.enabled = false;
+        assert!(all_unusable.select(&[only_disabled]).is_none());
+        assert!(all_unusable.select(&[]).is_none());
+    }
+
+    #[test]
+    fn single_legacy_api_key_behaviour_is_unchanged_by_the_key_pool() {
+        let mut config = UserConfig::default();
+        config.providers = vec![CloudProviderConfig {
+            id: "solo".to_owned(),
+            name: "Solo".to_owned(),
+            base_url: "https://solo.example.test".to_owned(),
+            wire_api: ProviderWireApi::ChatCompletions,
+            trust_level: ProviderTrustLevel::Relay,
+            api_key: Some("solo-key".to_owned()),
+            api_keys: Vec::new(),
+        }];
+        config.active_provider_id = Some("solo".to_owned());
+
+        let candidates = provider_candidates(&config);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].api_key.as_deref(), Some("solo-key"));
+        assert_eq!(candidates[0].key_id, "legacy");
+    }
+
+    #[test]
+    fn provider_candidates_expand_every_configured_key_of_one_provider() {
+        let mut config = UserConfig::default();
+        config.providers = vec![CloudProviderConfig {
+            id: "pool".to_owned(),
+            name: "Pool".to_owned(),
+            base_url: "https://pool.example.test".to_owned(),
+            wire_api: ProviderWireApi::ChatCompletions,
+            trust_level: ProviderTrustLevel::Relay,
+            api_key: None,
+            api_keys: vec![test_key("a", 3), test_key("b", 1)],
+        }];
+        config.active_provider_id = Some("pool".to_owned());
+
+        let candidates = provider_candidates(&config);
+        assert_eq!(candidates.len(), 2, "both keys stay available as fallbacks");
+        assert!(candidates.iter().all(|candidate| candidate.id == "pool"));
+        let mut ids: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.key_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a", "b"]);
+        // Each key gets its own circuit so one bad account cannot open the
+        // breaker for the healthy ones.
+        assert_ne!(
+            provider_circuit_key(&candidates[0]),
+            provider_circuit_key(&candidates[1])
+        );
+    }
+
+    #[test]
+    fn rejected_credentials_stay_out_until_the_configured_value_changes() {
+        let provider_id = format!("key-rejected-{}", std::process::id());
+        let candidate = key_candidate(&provider_id, "a", "sk-old");
+        let rotated = key_candidate(&provider_id, "a", "sk-new");
+        clear_key_health(&[&candidate, &rotated]);
+
+        assert!(provider_key_is_available(&candidate));
+        assert_eq!(
+            record_provider_key_failure(&candidate, &http_status_error(401)),
+            Some(ProviderKeyBlock::Rejected)
+        );
+        assert!(
+            !provider_key_is_available(&candidate),
+            "a refused credential must not be retried"
+        );
+        assert!(
+            provider_key_is_available(&rotated),
+            "editing the key in settings must clear the block without a restart"
+        );
+
+        clear_key_health(&[&candidate, &rotated]);
+        assert_eq!(
+            record_provider_key_failure(&candidate, &http_status_error(403)),
+            Some(ProviderKeyBlock::Rejected)
+        );
+        assert!(!provider_key_is_available(&candidate));
+        clear_key_health(&[&candidate, &rotated]);
+    }
+
+    #[test]
+    fn rate_limited_credentials_cool_down_and_return_on_their_own() {
+        let provider_id = format!("key-throttled-{}", std::process::id());
+        let candidate = key_candidate(&provider_id, "a", "sk-throttled");
+        clear_key_health(&[&candidate]);
+
+        assert_eq!(
+            record_provider_key_failure(&candidate, &http_status_error(429)),
+            Some(ProviderKeyBlock::RateLimited)
+        );
+        assert!(!provider_key_is_available(&candidate));
+
+        let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let mut health = health.lock().expect("key health lock");
+            let state = health
+                .get_mut(&candidate.health_id())
+                .expect("cooldown state");
+            assert_eq!(state.cooldown_strikes, 1);
+            state.blocked_until = Some(Instant::now() - Duration::from_secs(1));
+        }
+        assert!(
+            provider_key_is_available(&candidate),
+            "an expired cooldown returns the key at its configured weight"
+        );
+
+        // A repeat inside the same process backs off further.
+        record_provider_key_failure(&candidate, &http_status_error(429));
+        record_provider_key_failure(&candidate, &http_status_error(429));
+        {
+            let health = health.lock().expect("key health lock");
+            assert_eq!(
+                health
+                    .get(&candidate.health_id())
+                    .expect("cooldown state")
+                    .cooldown_strikes,
+                2
+            );
+        }
+
+        record_provider_key_success(&candidate);
+        assert!(provider_key_is_available(&candidate));
+        clear_key_health(&[&candidate]);
+    }
+
+    #[test]
+    fn retry_after_header_drives_the_rate_limit_cooldown() {
+        let provider_id = format!("key-retry-after-{}", std::process::id());
+        let candidate = key_candidate(&provider_id, "a", "sk-retry-after");
+        clear_key_health(&[&candidate]);
+
+        let error = AgentError::Provider(ProviderError::HttpStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "slow down".to_owned(),
+            retry_after_secs: Some(90),
+        });
+        assert_eq!(
+            record_provider_key_failure(&candidate, &error),
+            Some(ProviderKeyBlock::RateLimited)
+        );
+        let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+        let remaining = {
+            let health = health.lock().expect("key health lock");
+            health
+                .get(&candidate.health_id())
+                .and_then(|state| state.blocked_until)
+                .expect("cooldown deadline")
+                .saturating_duration_since(Instant::now())
+        };
+        assert!(
+            remaining > Duration::from_secs(60),
+            "the endpoint's own Retry-After must win over the default ladder"
+        );
+        clear_key_health(&[&candidate]);
+    }
+
+    #[test]
+    fn request_level_failures_do_not_block_the_credential() {
+        // A model the endpoint does not serve, or an oversized request, says
+        // nothing about the account, so the key must stay in rotation.
+        assert!(classify_provider_key_failure(&http_status_error(404)).is_none());
+        assert!(classify_provider_key_failure(&http_status_error(400)).is_none());
+        assert!(classify_provider_key_failure(&AgentError::EmptyProviderResponse).is_none());
+        assert_eq!(
+            classify_provider_key_failure(&http_status_error(503)),
+            Some(ProviderKeyBlock::Unstable)
+        );
+        assert_eq!(
+            classify_provider_key_failure(&AgentError::ProviderStreamIdleTimeout(30)),
+            Some(ProviderKeyBlock::Unstable)
+        );
+    }
+
+    #[test]
+    fn cooling_keys_are_released_when_nothing_else_can_be_tried() {
+        let provider_id = format!("key-lockout-{}", std::process::id());
+        let cooling = key_candidate(&provider_id, "cooling", "sk-cooling");
+        let rejected = key_candidate(&provider_id, "rejected", "sk-rejected");
+        clear_key_health(&[&cooling, &rejected]);
+
+        record_provider_key_failure(&cooling, &http_status_error(429));
+        record_provider_key_failure(&rejected, &http_status_error(401));
+        assert!(!provider_key_is_available(&cooling));
+        assert!(!provider_key_is_available(&rejected));
+
+        release_key_cooldowns_when_all_are_blocked([&cooling, &rejected]);
+        assert!(
+            provider_key_is_available(&cooling),
+            "a timed cooldown must yield one attempt rather than a dead turn"
+        );
+        assert!(
+            !provider_key_is_available(&rejected),
+            "a refused credential is never released by the lockout guard"
+        );
+        clear_key_health(&[&cooling, &rejected]);
+    }
+
+    #[test]
+    fn cooling_keys_are_kept_while_another_key_is_usable() {
+        let provider_id = format!("key-partial-{}", std::process::id());
+        let cooling = key_candidate(&provider_id, "cooling", "sk-cooling");
+        let healthy = key_candidate(&provider_id, "healthy", "sk-healthy");
+        clear_key_health(&[&cooling, &healthy]);
+
+        record_provider_key_failure(&cooling, &http_status_error(429));
+        release_key_cooldowns_when_all_are_blocked([&cooling, &healthy]);
+        assert!(
+            !provider_key_is_available(&cooling),
+            "a usable sibling key means the cooldown keeps running"
+        );
+        clear_key_health(&[&cooling, &healthy]);
+    }
+
+    #[test]
+    fn key_labels_never_carry_the_secret() {
+        let candidate = key_candidate("pool", "second-account", "sk-live-abcdefgh1234");
+        let label = candidate.display_label(true);
+        assert!(label.contains("second-account"));
+        assert!(label.contains("...1234"));
+        assert!(!label.contains("sk-live-abcdefgh1234"));
+        assert_eq!(candidate.display_label(false), "Pool");
+        assert_eq!(provider_key_hint(None), "env");
+        assert_eq!(provider_key_hint(Some("abcd")), "****");
+    }
+
+    #[test]
+    fn key_statuses_report_rotation_health_without_the_secret() {
+        let provider_id = format!("key-status-{}", std::process::id());
+        let mut rejected = test_key("a", 3);
+        rejected.key = "sk-live-rejected-aaaa".to_owned();
+        let mut healthy = test_key("b", 1);
+        healthy.key = "sk-live-healthy-bbbb".to_owned();
+        let mut disabled = test_key("c", 2);
+        disabled.key = "sk-live-disabled-cccc".to_owned();
+        disabled.enabled = false;
+        let mut config = UserConfig::default();
+        config.providers = vec![CloudProviderConfig {
+            id: provider_id.clone(),
+            name: "Pool".to_owned(),
+            base_url: "https://pool.example.test".to_owned(),
+            wire_api: ProviderWireApi::ChatCompletions,
+            trust_level: ProviderTrustLevel::Relay,
+            api_key: None,
+            api_keys: vec![rejected.clone(), healthy.clone(), disabled.clone()],
+        }];
+        let rejected_candidate = key_candidate(&provider_id, &rejected.id, &rejected.key);
+        let healthy_candidate = key_candidate(&provider_id, &healthy.id, &healthy.key);
+        let disabled_candidate = key_candidate(&provider_id, &disabled.id, &disabled.key);
+        clear_key_health(&[
+            &rejected_candidate,
+            &healthy_candidate,
+            &disabled_candidate,
+        ]);
+
+        record_provider_key_failure(&rejected_candidate, &http_status_error(401));
+        record_provider_key_success(&healthy_candidate);
+
+        let statuses = provider_key_statuses(&config);
+        assert_eq!(statuses.len(), 3);
+        let by_id = |key_id: &str| {
+            statuses
+                .iter()
+                .find(|status| status.key_id == key_id)
+                .expect("status for key")
+        };
+
+        let first = by_id("a");
+        assert_eq!(first.state, "rejected");
+        assert_eq!(first.failure_count, 1);
+        assert_eq!(first.success_count, 0);
+        assert_eq!(first.weight, 3);
+        assert_eq!(first.key_hint, "...aaaa");
+        assert!(!first.key_hint.contains("sk-live"));
+        assert_eq!(first.provider_name, "Pool");
+
+        let second = by_id("b");
+        assert_eq!(second.state, "ready");
+        assert_eq!(second.success_count, 1);
+        assert_eq!(second.failure_count, 0);
+
+        let third = by_id("c");
+        assert_eq!(third.state, "disabled");
+        assert!(!third.enabled);
+
+        clear_key_health(&[
+            &rejected_candidate,
+            &healthy_candidate,
+            &disabled_candidate,
+        ]);
     }
 
     #[test]
@@ -5114,6 +5980,7 @@ mod tests {
             status: xcoding_providers::StatusCode::BAD_REQUEST,
             body: r#"{"error":{"message":"Input exceeds the model's context window. Please shorten your input and try again.","type":"invalid_request_error"}}"#
                 .to_owned(),
+            retry_after_secs: None,
         });
         assert!(is_context_overflow_error(&error));
         // Overflow needs a smaller payload, not a plain resend.
@@ -5125,6 +5992,7 @@ mod tests {
         let error = AgentError::Provider(ProviderError::HttpStatus {
             status: xcoding_providers::StatusCode::BAD_REQUEST,
             body: r#"{"error":{"message":"unsupported model"}}"#.to_owned(),
+            retry_after_secs: None,
         });
         assert!(!is_context_overflow_error(&error));
         assert!(provider_rejected_selected_model(&error));
@@ -5161,6 +6029,7 @@ mod tests {
             wire_api: ProviderWireApi::ChatCompletions,
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some("vision-key".to_owned()),
+            api_keys: Vec::new(),
         }];
         config.vision_delegate = Some(xcoding_protocol::VisionDelegateConfig {
             enabled: true,
@@ -5357,6 +6226,7 @@ mod tests {
             error: AgentError::Provider(ProviderError::HttpStatus {
                 status: xcoding_providers::StatusCode::INTERNAL_SERVER_ERROR,
                 body: "upstream error".to_owned(),
+                retry_after_secs: None,
             }),
             output_chars: 100,
             tool_calls: 5,

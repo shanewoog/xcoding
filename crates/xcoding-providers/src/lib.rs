@@ -2,7 +2,13 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::{collections::BTreeMap, env, fs, path::PathBuf, pin::Pin, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    path::PathBuf,
+    pin::Pin,
+    time::Duration,
+};
 
 use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
@@ -17,7 +23,8 @@ use xcoding_protocol::{
     MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
     MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES,
-    MAX_MAX_TOOL_ROUNDS, MAX_NON_STREAM_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+    MAX_MAX_TOOL_ROUNDS, MAX_NON_STREAM_TIMEOUT_SECS, MAX_PROVIDER_KEY_WEIGHT,
+    MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
     MAX_STREAM_IDLE_TIMEOUT_SECS, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
     MIN_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_MIN_REQUEST_COUNT,
     MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
@@ -192,7 +199,12 @@ pub enum ProviderError {
     #[error("invalid provider response: {0}")]
     InvalidResponse(String),
     #[error("{}", format_http_status_message(status, body))]
-    HttpStatus { status: StatusCode, body: String },
+    HttpStatus {
+        status: StatusCode,
+        body: String,
+        /// `Retry-After` delta-seconds when the endpoint supplied one.
+        retry_after_secs: Option<u64>,
+    },
     #[error("{}", format_empty_stream_message(status, body))]
     EmptyStream { status: StatusCode, body: String },
     #[error("invalid UTF-8 in provider stream: {0}")]
@@ -241,13 +253,24 @@ impl ProviderError {
     /// the caller must shrink the history before it retries.
     pub fn is_context_overflow(&self) -> bool {
         match self {
-            Self::HttpStatus { status, body } => {
+            Self::HttpStatus { status, body, .. } => {
                 *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body)
             }
             // Responses API reports some request rejections as a successful SSE
             // connection followed by `response.failed`, rather than HTTP 400.
             Self::InvalidResponse(message) => body_indicates_context_overflow(message),
             _ => false,
+        }
+    }
+
+    /// Cooldown the endpoint asked for, when it sent one. Callers may still
+    /// apply their own backoff; this is only the upstream's own hint.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::HttpStatus {
+                retry_after_secs, ..
+            } => retry_after_secs.map(Duration::from_secs),
+            _ => None,
         }
     }
 }
@@ -325,6 +348,22 @@ fn format_stream_body_sample(sample: &[u8], truncated: bool) -> String {
     } else {
         body
     }
+}
+
+/// Reads `Retry-After` as delta-seconds. HTTP-date form is ignored on purpose:
+/// callers already have their own backoff, and a clock-skewed absolute date is
+/// worse than no hint at all. The value is clamped so a hostile or broken
+/// gateway cannot park a key for hours.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    const MAX_RETRY_AFTER_SECS: u64 = 300;
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| seconds.min(MAX_RETRY_AFTER_SECS))
 }
 
 fn format_http_status_message(status: &StatusCode, body: &str) -> String {
@@ -518,6 +557,7 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
             wire_api: ProviderWireApi::default(),
             trust_level: xcoding_protocol::ProviderTrustLevel::Relay,
             api_key: config.api_key.clone(),
+            api_keys: Vec::new(),
         });
         config.active_provider_id = Some(id);
     }
@@ -547,6 +587,7 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
                 *key = trimmed;
             }
         }
+        normalize_provider_api_keys(provider);
     }
 
     let active_id = config
@@ -590,6 +631,33 @@ fn uuid_like() -> String {
         .map(|value| value.as_millis())
         .unwrap_or(0);
     format!("{millis:x}")
+}
+
+/// Keep the weighted key pool well formed: stable ids, trimmed secrets, bounded
+/// weights, no blank entries. Weight 0 is preserved because it is the documented
+/// way to park a key without deleting it.
+fn normalize_provider_api_keys(provider: &mut CloudProviderConfig) {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut index = 0usize;
+    provider.api_keys.retain_mut(|entry| {
+        index += 1;
+        entry.key = entry.key.trim().to_owned();
+        if entry.key.is_empty() {
+            return false;
+        }
+        entry.id = entry.id.trim().to_owned();
+        if entry.id.is_empty() || seen.contains(&entry.id) {
+            entry.id = format!("key-{index}");
+        }
+        while seen.contains(&entry.id) {
+            index += 1;
+            entry.id = format!("key-{index}");
+        }
+        seen.insert(entry.id.clone());
+        entry.label = entry.label.trim().to_owned();
+        entry.weight = entry.weight.min(MAX_PROVIDER_KEY_WEIGHT);
+        true
+    });
 }
 
 fn resolve_provider_credentials(
@@ -806,8 +874,13 @@ impl OpenAiCompatibleProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after_secs = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::HttpStatus { status, body });
+            return Err(ProviderError::HttpStatus {
+                status,
+                body,
+                retry_after_secs,
+            });
         }
 
         let body = response.text().await?;
@@ -938,8 +1011,13 @@ impl OpenAiCompatibleProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after_secs = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::HttpStatus { status, body });
+            return Err(ProviderError::HttpStatus {
+                status,
+                body,
+                retry_after_secs,
+            });
         }
 
         Ok(response)
@@ -2120,6 +2198,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 body: "slow down".to_owned(),
+                retry_after_secs: None,
             }
             .is_retryable()
         );
@@ -2127,6 +2206,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::BAD_GATEWAY,
                 body: "bad gateway".to_owned(),
+                retry_after_secs: None,
             }
             .is_retryable()
         );
@@ -2134,6 +2214,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 body: "unavailable".to_owned(),
+                retry_after_secs: None,
             }
             .is_retryable()
         );
@@ -2141,6 +2222,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::UNAUTHORIZED,
                 body: "transient auth error".to_owned(),
+                retry_after_secs: None,
             }
             .is_retryable()
         );
@@ -2148,6 +2230,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::FORBIDDEN,
                 body: "forbidden".to_owned(),
+                retry_after_secs: None,
             }
             .is_retryable()
         );
@@ -2155,6 +2238,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::NOT_FOUND,
                 body: "not found".to_owned(),
+                retry_after_secs: None,
             }
             .is_retryable()
         );
@@ -2162,6 +2246,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::BAD_REQUEST,
                 body: "bad request".to_owned(),
+                retry_after_secs: None,
             }
             .is_retryable()
         );
@@ -2198,6 +2283,7 @@ mod tests {
         let message = ProviderError::HttpStatus {
             status: StatusCode::UNAUTHORIZED,
             body: r#"{"code":"INVALID_API_KEY","message":"Invalid API key"}"#.to_owned(),
+            retry_after_secs: None,
         }
         .to_string();
         assert!(message.contains("Cloud provider authentication failed (HTTP 401)"));
@@ -2212,6 +2298,7 @@ mod tests {
         let message = ProviderError::HttpStatus {
             status: StatusCode::BAD_GATEWAY,
             body: long_body,
+            retry_after_secs: None,
         }
         .to_string();
         assert!(message.contains("Cloud provider request failed (HTTP 502)"));
@@ -2225,6 +2312,7 @@ mod tests {
         let overflow = ProviderError::HttpStatus {
             status: StatusCode::BAD_REQUEST,
             body: r#"{"error":{"message":"Input exceeds the model's context window. Please shorten your input and try again.","type":"invalid_request_error"}}"#.to_owned(),
+            retry_after_secs: None,
         };
         assert!(overflow.is_context_overflow());
         // Resending the same oversized payload cannot succeed, so plain retry stays off.
@@ -2234,6 +2322,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::BAD_REQUEST,
                 body: "maximum context length is 128000 tokens".to_owned(),
+                retry_after_secs: None,
             }
             .is_context_overflow()
         );
@@ -2241,6 +2330,7 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::BAD_REQUEST,
                 body: "too many tokens in request".to_owned(),
+                retry_after_secs: None,
             }
             .is_context_overflow()
         );
@@ -2252,6 +2342,7 @@ mod tests {
             !ProviderError::HttpStatus {
                 status: StatusCode::BAD_REQUEST,
                 body: r#"{"error":{"message":"unsupported model"}}"#.to_owned(),
+                retry_after_secs: None,
             }
             .is_context_overflow()
         );
@@ -2260,6 +2351,7 @@ mod tests {
             !ProviderError::HttpStatus {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 body: "input exceeds the model's context window".to_owned(),
+                retry_after_secs: None,
             }
             .is_context_overflow()
         );
@@ -2286,6 +2378,7 @@ mod tests {
             body:
                 "Input exceeds the model's context window. Please shorten your input and try again."
                     .to_owned(),
+            retry_after_secs: None,
         }
         .to_string();
         assert!(message.contains("Context window exceeded (HTTP 400)"));
