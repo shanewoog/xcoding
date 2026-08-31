@@ -17,6 +17,9 @@ async function main() {
   await assertRetryThenSucceed();
   await assertFallsBackToAnotherConfiguredProvider();
   await assertRotatesToAnotherKeyOfTheSameProvider();
+  await assertBalancesOneModelAcrossProviders();
+  await assertRoutingLeavesAProviderWhoseKeysAreRejected();
+  await assertRouteOverrideRequestsTheUpstreamAlias();
   await assertSupportsMoreThanElevenToolRounds();
   await assertSkipsModelIncompatibleProviderWithinSession();
   await assertReconnectAfterSseDisconnect();
@@ -401,6 +404,221 @@ async function assertRotatesToAnotherKeyOfTheSameProvider() {
     await rm(homeDirectory, { recursive: true, force: true });
   }
 }
+
+// Baseline config for the multi-provider routing cases: one logical model, a
+// weighted route per provider, no legacy fallback so only the routes decide.
+function routingConfig({ providers, routes, activeProviderId }) {
+  return {
+    locale: "en",
+    mode: "ask",
+    provider: "openai",
+    model: "fixture-model",
+    max_provider_retries: 0,
+    circuit_failure_threshold: 100,
+    stream_first_event_timeout_secs: 120,
+    stream_idle_timeout_secs: 120,
+    circuit_recovery_success_threshold: 2,
+    circuit_recovery_wait_secs: 60,
+    circuit_error_rate_threshold_percent: 100,
+    circuit_min_request_count: 100,
+    provider_fallback_enabled: false,
+    base_url: providers[0].base_url,
+    providers,
+    active_provider_id: activeProviderId,
+    model_routes: { "fixture-model": routes },
+  };
+}
+
+async function writeRoutingConfig(homeDirectory, config) {
+  const configDirectory = resolve(homeDirectory, ".xcoding");
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(resolve(configDirectory, "config.json"), JSON.stringify(config, null, 2) + "\n", "utf8");
+}
+
+function startRoutingRpcClient(databaseDirectory, homeDirectory) {
+  const { OPENAI_API_KEY, XCODING_OPENAI_BASE_URL, ...environment } = process.env;
+  return startRpcClient({
+    databasePath: resolve(databaseDirectory, "xcoding.db"),
+    environment: {
+      ...environment,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
+    },
+  });
+}
+
+async function assertBalancesOneModelAcrossProviders() {
+  const alpha = await startFlakyProvider({ succeedAfter: 1, alwaysStatus: 503 });
+  const beta = await startFlakyProvider({ succeedAfter: 1, alwaysStatus: 503 });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-balance-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-balance-home-"));
+  await writeRoutingConfig(
+    homeDirectory,
+    routingConfig({
+      activeProviderId: "alpha",
+      providers: [
+        {
+          id: "alpha",
+          name: "Alpha",
+          base_url: alpha.baseUrl,
+          trust_level: "official",
+          api_key: "alpha-test-key",
+        },
+        {
+          id: "beta",
+          name: "Beta",
+          base_url: beta.baseUrl,
+          trust_level: "official",
+          api_key: "beta-test-key",
+        },
+      ],
+      routes: [
+        { provider_id: "alpha", weight: 1, enabled: true },
+        { provider_id: "beta", weight: 1, enabled: true },
+      ],
+    }),
+  );
+  const rpc = startRoutingRpcClient(databaseDirectory, homeDirectory);
+
+  try {
+    for (let turn = 0; turn < 4; turn += 1) {
+      const result = await rpc.request("session.chat", {
+        workspace_root: fixtureRoot,
+        message: `Balanced turn ${turn}`,
+        model: "fixture-model",
+      });
+      assert.equal(result.session.status, "done");
+    }
+    // Equal weights must split the four turns evenly instead of pinning the
+    // model to whichever provider happens to be active.
+    assert.equal(alpha.requests.length, 2, "alpha should serve half of the equally weighted turns");
+    assert.equal(beta.requests.length, 2, "beta should serve half of the equally weighted turns");
+    assert.deepEqual(alpha.bearers, ["alpha-test-key", "alpha-test-key"]);
+    assert.deepEqual(beta.bearers, ["beta-test-key", "beta-test-key"]);
+  } finally {
+    await rpc.close();
+    await alpha.close();
+    await beta.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertRoutingLeavesAProviderWhoseKeysAreRejected() {
+  const alpha = await startFlakyProvider({
+    succeedAfter: null,
+    alwaysStatus: 503,
+    rejectedApiKeys: ["alpha-key-aaaa", "alpha-key-bbbb"],
+  });
+  const beta = await startFlakyProvider({ succeedAfter: 1, alwaysStatus: 503 });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-drain-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-drain-home-"));
+  await writeRoutingConfig(
+    homeDirectory,
+    routingConfig({
+      activeProviderId: "alpha",
+      providers: [
+        {
+          id: "alpha",
+          name: "Alpha",
+          base_url: alpha.baseUrl,
+          trust_level: "official",
+          api_keys: [
+            { id: "key-a", label: "Account A", key: "alpha-key-aaaa", weight: 5, enabled: true },
+            { id: "key-b", label: "Account B", key: "alpha-key-bbbb", weight: 1, enabled: true },
+          ],
+        },
+        {
+          id: "beta",
+          name: "Beta",
+          base_url: beta.baseUrl,
+          trust_level: "official",
+          api_key: "beta-test-key",
+        },
+      ],
+      // Alpha opens the turn, so the rotation has to drain both of its accounts
+      // before the model is allowed to leave for beta.
+      routes: [
+        { provider_id: "alpha", weight: 9, enabled: true },
+        { provider_id: "beta", weight: 1, enabled: true },
+      ],
+    }),
+  );
+  const rpc = startRoutingRpcClient(databaseDirectory, homeDirectory);
+
+  try {
+    const result = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Leave the exhausted provider",
+      model: "fixture-model",
+    });
+    assert.equal(result.session.status, "done");
+    assert.match(result.message?.content ?? "", /hello after retries/i);
+    assert.deepEqual(
+      alpha.bearers,
+      ["alpha-key-aaaa", "alpha-key-bbbb"],
+      "both alpha accounts must be tried before the route moves on",
+    );
+    assert.equal(beta.requests.length, 1, "beta should serve the turn after alpha ran out of accounts");
+    assert.deepEqual(beta.bearers, ["beta-test-key"]);
+    const leakedSecret = rpc.events.some(
+      (event) => typeof event.message === "string" && event.message.includes("alpha-key-"),
+    );
+    assert.ok(!leakedSecret, "routing events must never carry a credential");
+  } finally {
+    await rpc.close();
+    await alpha.close();
+    await beta.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertRouteOverrideRequestsTheUpstreamAlias() {
+  const relay = await startFlakyProvider({ succeedAfter: 1, alwaysStatus: 503 });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-alias-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-alias-home-"));
+  await writeRoutingConfig(
+    homeDirectory,
+    routingConfig({
+      activeProviderId: "relay",
+      providers: [
+        {
+          id: "relay",
+          name: "Relay",
+          base_url: relay.baseUrl,
+          trust_level: "official",
+          api_key: "relay-test-key",
+        },
+      ],
+      routes: [
+        { provider_id: "relay", weight: 1, enabled: true, model_override: "upstream-alias-model" },
+      ],
+    }),
+  );
+  const rpc = startRoutingRpcClient(databaseDirectory, homeDirectory);
+
+  try {
+    const result = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Ask the aliased upstream model",
+      model: "fixture-model",
+    });
+    assert.equal(result.session.status, "done");
+    assert.equal(relay.requests.length, 1);
+    assert.equal(
+      relay.requests[0].model,
+      "upstream-alias-model",
+      "the route override must replace the model id sent upstream",
+    );
+  } finally {
+    await rpc.close();
+    await relay.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
 async function assertSupportsMoreThanElevenToolRounds() {
   const mock = await startFlakyProvider({
     succeedAfter: 1,

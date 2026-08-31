@@ -477,6 +477,29 @@ pub struct ProviderKeyStatus {
     pub failure_count: u64,
 }
 
+/// Runtime state of one model route, aggregated over that provider's credentials.
+/// Built for the settings view: no secrets, only masked-free identifiers.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ModelRouteStatus {
+    /// Normalized model id this route belongs to.
+    pub model: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub weight: u32,
+    pub enabled: bool,
+    /// Upstream model id actually requested from this provider.
+    pub effective_model: String,
+    /// One of `ready`, `disabled`, `unknown_provider`, `no_credential`,
+    /// `blocked`, `cooling_down`, or `trust_mismatch`.
+    pub state: String,
+    /// Credentials of this provider currently usable for the route.
+    pub usable_key_count: u32,
+    /// Turns this process completed through this route's provider.
+    pub success_count: u64,
+    /// Attempts this process failed through this route's provider.
+    pub failure_count: u64,
+}
+
 /// One model entry from an OpenAI-compatible `/models` response.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProviderModel {
@@ -589,6 +612,25 @@ pub struct CloudProviderConfig {
     pub api_keys: Vec<ProviderApiKey>,
 }
 
+/// One provider share for a single logical model. Several routes of the same
+/// model spread that model's turns across independent providers, and each route
+/// may rename the model for its own endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelRoute {
+    /// Id of a provider in `UserConfig::providers`.
+    pub provider_id: String,
+    /// Relative share in the model's smooth weighted provider rotation.
+    #[serde(default = "default_provider_key_weight")]
+    pub weight: u32,
+    /// Disabled routes stay configured but are excluded from the rotation.
+    #[serde(default = "default_provider_key_enabled")]
+    pub enabled: bool,
+    /// Upstream model id to request from this provider when its catalog uses a
+    /// different alias than the selected model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+}
+
 /// User-level Desktop/CLI preferences stored under `~/.xcoding/config.json`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct UserConfig {
@@ -687,6 +729,10 @@ pub struct UserConfig {
     /// Model capability flags keyed by normalized model id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_capabilities: BTreeMap<String, ModelCapabilities>,
+    /// Multi-provider routes keyed by normalized (trimmed, lowercased) model id.
+    /// A model without routes keeps the active-provider-plus-backup behaviour.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_routes: BTreeMap<String, Vec<ModelRoute>>,
 }
 
 impl Default for UserConfig {
@@ -733,6 +779,7 @@ impl Default for UserConfig {
             context_compaction_threshold_percent: DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
             vision_delegate: None,
             model_capabilities: BTreeMap::new(),
+            model_routes: BTreeMap::new(),
         }
     }
 }
@@ -1261,6 +1308,60 @@ mod tests {
         let decoded: UserConfig =
             serde_json::from_value(json).expect("configured config round-trips");
         assert_eq!(decoded.model_context_windows["gpt-5.5"], 272_000);
+    }
+
+    #[test]
+    fn default_user_config_has_no_model_routes() {
+        let config = UserConfig::default();
+        assert!(config.model_routes.is_empty());
+        assert!(
+            serde_json::to_value(&config)
+                .expect("default config serializes")
+                .get("model_routes")
+                .is_none(),
+            "an unrouted config must not grow a model_routes key on disk"
+        );
+    }
+
+    #[test]
+    fn defaults_and_round_trips_model_routes() {
+        let configured = UserConfig {
+            model_routes: BTreeMap::from([(
+                "claude-opus-5-thinking".to_owned(),
+                vec![
+                    ModelRoute {
+                        provider_id: "official".to_owned(),
+                        weight: 5,
+                        enabled: true,
+                        model_override: None,
+                    },
+                    ModelRoute {
+                        provider_id: "relay".to_owned(),
+                        weight: 3,
+                        enabled: true,
+                        model_override: Some("claude-opus-5".to_owned()),
+                    },
+                ],
+            )]),
+            ..UserConfig::default()
+        };
+        let json = serde_json::to_value(&configured).expect("routed config serializes");
+        assert_eq!(
+            json["model_routes"]["claude-opus-5-thinking"][1]["model_override"],
+            "claude-opus-5"
+        );
+        let decoded: UserConfig = serde_json::from_value(json).expect("routed config round-trips");
+        assert_eq!(decoded.model_routes["claude-opus-5-thinking"].len(), 2);
+        assert_eq!(decoded.model_routes["claude-opus-5-thinking"][0].weight, 5);
+    }
+
+    #[test]
+    fn model_route_defaults_weight_and_enabled() {
+        let route: ModelRoute = serde_json::from_value(json!({ "provider_id": "official" }))
+            .expect("minimal model route parses");
+        assert_eq!(route.weight, 1);
+        assert!(route.enabled);
+        assert!(route.model_override.is_none());
     }
 
     #[test]

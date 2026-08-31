@@ -326,6 +326,30 @@ async function main() {
   }
   const keyPoolLabelCount = (i18nSource.match(/"field\.keyWeight":/g) || []).length;
   assert.equal(keyPoolLabelCount, 2, "key pool labels must exist in both en and zh-CN catalogs");
+  // Weighted multi-provider routing for one logical model.
+  assert.ok(appSource.includes("function modelRouteMapFromEntries"), "App must convert the routing form into model_routes");
+  assert.ok(appSource.includes("function modelRouteEntriesFromMap"), "App must hydrate the routing form from model_routes");
+  assert.ok(appSource.includes('invoke<ModelRouteStatus[]>("model_route_status")'), "App must read routing health from the backend");
+  assert.ok(appSource.includes("modelRouteStatusByKey"), "App must index routing health by model and provider");
+  assert.ok(appSource.includes("model-route-row"), "routing table should render one row per route");
+  assert.ok(appSource.includes('t(locale, "action.addModelRoute")'), "routing table needs an add-route action");
+  assert.ok(appSource.includes('t(locale, "action.deleteModelRoute")'), "routing table needs a remove-route action");
+  assert.ok(cssSource.includes(".model-route-row"), "styles.css missing routing row layout");
+  assert.ok(cssSource.includes(".model-route-status"), "styles.css missing routing health row styles");
+  const routeSaveCount = (appSource.match(/model_routes: modelRouteMapFromEntries\(modelRouteEntries\)/g) || []).length;
+  assert.equal(routeSaveCount, 1, "saving settings must submit model_routes exactly once");
+  for (const needle of [
+    '"settings.modelRoutes.title"',
+    '"settings.modelRoutes.help"',
+    '"field.routeProvider"',
+    '"field.routeOverride"',
+    '"routeState.trustMismatch"',
+    '"routeState.noCredential"',
+  ]) {
+    assert.ok(i18nSource.includes(needle), "i18n.ts missing " + needle);
+  }
+  const routeTitleCount = (i18nSource.match(/"settings\.modelRoutes\.title":/g) || []).length;
+  assert.equal(routeTitleCount, 2, "routing labels must exist in both en and zh-CN catalogs");
   assert.ok(!cssSource.includes(".provider-entry {"), "legacy expanded provider cards should be removed");
   assert.ok(appSource.includes("xcoding.cachedModels.v1"), "App should cache provider models for fast startup");
   assert.ok(appSource.includes("silent: true"), "startup model refresh should be silent/deferred");
@@ -373,6 +397,8 @@ async function main() {
   assert.ok(desktopMainSource.includes("TrayIconBuilder"), "desktop should create a system tray icon");
   assert.ok(desktopMainSource.includes("fn provider_key_status()"), "desktop must expose the per-key rotation status command");
   assert.match(desktopMainSource, /generate_handler!\[[\s\S]*?provider_key_status/, "provider_key_status must be registered as a Tauri command");
+  assert.ok(desktopMainSource.includes("fn model_route_status()"), "desktop must expose the model routing status command");
+  assert.match(desktopMainSource, /generate_handler!\[[\s\S]*?model_route_status/, "model_route_status must be registered as a Tauri command");
   assert.ok(desktopMainSource.includes('MenuItem::with_id(app, "show", "显示 XCoding"'), "tray should provide a show action");
   assert.ok(desktopMainSource.includes('MenuItem::with_id(app, "quit", "退出"'), "tray should provide a quit action");
   assert.ok(desktopMainSource.includes("show_menu_on_left_click(false)"), "tray left click should restore the window instead of opening the menu");

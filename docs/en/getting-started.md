@@ -117,6 +117,28 @@ One provider entry can hold several API keys from different accounts. Under **Se
 - If every key of a provider is cooling down, the cooldowns are released early so the turn can still run. Refused keys are never released this way.
 - Each key row shows its rotation state, success/failure counters, and the remaining cooldown. Logs and events carry only the key id and the masked tail, never the secret.
 
+## Balancing One Model Across Providers
+
+One logical model can be spread across independent providers. Under **Settings → Model routing**, add a route per provider with a weight and an optional upstream model name.
+
+```json
+{
+  "model_routes": {
+    "claude-opus-5-thinking": [
+      { "provider_id": "gorouter", "weight": 3, "enabled": true },
+      { "provider_id": "backup-relay", "weight": 1, "enabled": true, "model_override": "claude-opus-5-thinking-20250101" }
+    ]
+  }
+}
+```
+
+- One decision per user turn: smooth weighted round-robin picks a route, then the provider's own key rotation picks a key. A single request goes out; answers are never fanned out or merged across providers.
+- Failover order is other keys of the same provider first, then the next route. Cooldown and refusal rules match the single-provider key pool.
+- `model_override` rewrites only the `model` field sent to that provider, for relays that alias the same model. Sessions and logs keep the logical model name.
+- Routes never cross trust levels: a provider whose `trust_level` differs from the level in use is marked **Trust level mismatch** and skipped. Confidential-content blocking and relay tool confirmation are unchanged.
+- Weight `0` or an unchecked route stays configured but out of rotation. Models without routes keep using the active provider and its fallbacks.
+- Each route shows its state (ready / out of rotation / provider missing / no usable key / all keys rejected / cooling down / trust level mismatch). Logs carry the logical model name, provider id, key id, weight, and result.
+
 ## Environment Doctor
 
 Check workspace, server binary, core RPC, cloud credentials, workspace config, and git in one shot:

@@ -20,7 +20,9 @@ use xcoding_protocol::{
     ChatParams, ChatResult, CloudProviderConfig, ContextCompaction, LocalMemory,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_LOCAL_MEMORY_CHARS,
     MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, Message, MessageRole, ModelCapabilities, PlanStep,
-    ProviderApiKey, ProviderKeyStatus, ProviderTrustLevel, ProviderWireApi, ResolveActionParams,
+    ModelRoute, ModelRouteStatus, ProviderApiKey, ProviderKeyStatus, ProviderTrustLevel,
+    ProviderWireApi,
+    ResolveActionParams,
     ResolveActionResult, RollbackRestorePointParams,
     RollbackRestorePointResult, Session, SessionEvent, SessionStatus, ToolCall, ToolName,
     UserConfig,
@@ -124,11 +126,19 @@ struct ProviderCandidate {
     wire_api: ProviderWireApi,
     trust_level: ProviderTrustLevel,
     api_key: Option<String>,
+    /// Upstream model id this candidate must request instead of the session
+    /// model, set by a model route whose provider uses a different alias.
+    model_override: Option<String>,
 }
 
 impl ProviderCandidate {
     fn health_id(&self) -> String {
         provider_key_health_id(&self.id, &self.key_id, self.api_key.as_deref())
+    }
+
+    /// Model id to send upstream for this candidate.
+    fn model_for<'a>(&'a self, session_model: &'a str) -> &'a str {
+        self.model_override.as_deref().unwrap_or(session_model)
     }
 
     /// Label used in switch messages. Providers with a single credential keep
@@ -186,33 +196,51 @@ impl ProviderKeyRotation {
             .iter()
             .filter(|key| key.enabled && key.weight > 0 && !key.key.trim().is_empty())
             .collect();
-        let total_weight: i64 = usable.iter().map(|key| key.weight as i64).sum();
+        let entries: Vec<(String, u32)> = usable
+            .iter()
+            .map(|key| (key.id.clone(), key.weight))
+            .collect();
+        let selected_id = self.select_weighted(&entries)?;
+        usable.into_iter().find(|key| key.id == selected_id)
+    }
+
+    /// Smooth weighted round-robin over `(id, weight)` pairs. Shared by the key
+    /// pool and the per-model provider routes so both honour weights the same
+    /// way; entries with weight 0 must already be filtered out by the caller.
+    fn select_weighted(&mut self, entries: &[(String, u32)]) -> Option<String> {
+        let total_weight: i64 = entries.iter().map(|(_, weight)| *weight as i64).sum();
         if total_weight == 0 {
             return None;
         }
 
-        let mut selected = None;
+        let mut selected: Option<String> = None;
         let mut selected_weight = i64::MIN;
-        for key in &usable {
-            let current = self.current_weights.entry(key.id.clone()).or_default();
-            *current += key.weight as i64;
+        for (id, weight) in entries {
+            let current = self.current_weights.entry(id.clone()).or_default();
+            *current += *weight as i64;
             if *current > selected_weight {
-                selected = Some(*key);
+                selected = Some(id.clone());
                 selected_weight = *current;
             }
         }
-        if let Some(key) = selected {
-            if let Some(current) = self.current_weights.get_mut(&key.id) {
+        if let Some(id) = selected.as_ref() {
+            if let Some(current) = self.current_weights.get_mut(id) {
                 *current -= total_weight;
             }
         }
         self.current_weights
-            .retain(|id, _| usable.iter().any(|key| key.id == *id));
+            .retain(|id, _| entries.iter().any(|(entry_id, _)| entry_id == id));
         selected
     }
 }
 
 static PROVIDER_KEY_ROTATIONS: OnceLock<Mutex<HashMap<String, ProviderKeyRotation>>> =
+    OnceLock::new();
+
+/// Provider-level rotation state per logical model, keyed by the normalized
+/// model id. Independent from the key-level rotations so a model's provider
+/// share stays stable while each provider spreads its own accounts.
+static MODEL_ROUTE_ROTATIONS: OnceLock<Mutex<HashMap<String, ProviderKeyRotation>>> =
     OnceLock::new();
 
 /// Why a key is currently excluded from rotation. Only the reason and the
@@ -494,6 +522,91 @@ pub fn provider_key_statuses(config: &UserConfig) -> Vec<ProviderKeyStatus> {
     statuses
 }
 
+/// Per-model provider routes with the state Desktop settings shows. Read-only:
+/// it never mutates rotation or health state, so opening the settings view
+/// cannot change which provider the next turn picks.
+pub fn model_route_statuses(config: &UserConfig) -> Vec<ModelRouteStatus> {
+    let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let health = health.lock().ok();
+    let now = Instant::now();
+    let active_id = config.active_provider_id.as_deref();
+    let active_trust_level = active_id
+        .and_then(|active_id| {
+            config
+                .providers
+                .iter()
+                .find(|provider| provider.id == active_id)
+        })
+        .map(|provider| provider.trust_level);
+    let mut statuses = Vec::new();
+    for (model, routes) in &config.model_routes {
+        for route in routes {
+            let provider = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == route.provider_id);
+            let effective_model = route
+                .model_override
+                .as_deref()
+                .unwrap_or(model.as_str())
+                .to_owned();
+            let mut usable_key_count = 0u32;
+            let mut blocked_key_count = 0u32;
+            let mut cooling_key_count = 0u32;
+            let mut success_count = 0u64;
+            let mut failure_count = 0u64;
+            if let Some(provider) = provider {
+                for (key_id, api_key) in provider_credential_list(config, provider, active_id) {
+                    let id = provider_key_health_id(&provider.id, &key_id, api_key.as_deref());
+                    let state = health.as_ref().and_then(|health| health.get(&id));
+                    success_count += state.map(|state| state.success_count).unwrap_or(0);
+                    failure_count += state.map(|state| state.failure_count).unwrap_or(0);
+                    match state.and_then(|state| state.block) {
+                        None => usable_key_count += 1,
+                        Some(ProviderKeyBlock::Rejected) => blocked_key_count += 1,
+                        Some(_) => {
+                            let still_cooling = state
+                                .and_then(|state| state.blocked_until)
+                                .is_some_and(|until| until > now);
+                            if still_cooling {
+                                cooling_key_count += 1;
+                            } else {
+                                usable_key_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let state = match provider {
+                None => "unknown_provider",
+                Some(_) if !route.enabled || route.weight == 0 => "disabled",
+                Some(provider) if Some(provider.trust_level) != active_trust_level => {
+                    "trust_mismatch"
+                }
+                Some(_) if usable_key_count > 0 => "ready",
+                Some(_) if cooling_key_count > 0 => "cooling_down",
+                Some(_) if blocked_key_count > 0 => "blocked",
+                Some(_) => "no_credential",
+            };
+            statuses.push(ModelRouteStatus {
+                model: model.clone(),
+                provider_id: route.provider_id.clone(),
+                provider_name: provider
+                    .map(|provider| provider.name.clone())
+                    .unwrap_or_default(),
+                weight: route.weight,
+                enabled: route.enabled,
+                effective_model,
+                state: state.to_owned(),
+                usable_key_count,
+                success_count,
+                failure_count,
+            });
+        }
+    }
+    statuses
+}
+
 fn select_provider_key(provider: &CloudProviderConfig) -> Option<(String, String)> {
     let keys = if provider.api_keys.is_empty() {
         provider.api_key.as_ref().map(|key| {
@@ -601,93 +714,211 @@ fn enforce_relay_tool_confirmation(
     decision
 }
 
-fn provider_candidates(config: &UserConfig) -> Vec<ProviderCandidate> {
+/// Model ids are compared the way the per-model configuration maps are keyed.
+fn normalized_model_id(model: &str) -> String {
+    model.trim().to_ascii_lowercase()
+}
+
+/// Routes eligible to serve `model` this turn: enabled, weighted, pointing at a
+/// provider that still exists, and inside the active provider's trust boundary.
+/// Balancing must never move a turn across `official` / `local` / `relay`, so a
+/// route outside that boundary is dropped rather than silently downgrading the
+/// sensitive-data rules that the active provider established.
+fn eligible_model_routes<'a>(
+    config: &'a UserConfig,
+    model: &str,
+) -> Vec<(&'a CloudProviderConfig, &'a ModelRoute)> {
+    let Some(routes) = config.model_routes.get(&normalized_model_id(model)) else {
+        return Vec::new();
+    };
+    let active_trust_level = config
+        .active_provider_id
+        .as_deref()
+        .and_then(|active_id| {
+            config
+                .providers
+                .iter()
+                .find(|provider| provider.id == active_id)
+        })
+        .map(|provider| provider.trust_level);
+    routes
+        .iter()
+        .filter(|route| route.enabled && route.weight > 0)
+        .filter_map(|route| {
+            let provider = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == route.provider_id)?;
+            (Some(provider.trust_level) == active_trust_level).then_some((provider, route))
+        })
+        .collect()
+}
+
+/// Credentials one provider can contribute, in configuration order and without
+/// touching any rotation state. Returns an empty list when the provider has
+/// nothing usable, except for the active provider without configured keys,
+/// which keeps the environment credential path.
+fn provider_credential_list(
+    config: &UserConfig,
+    provider: &CloudProviderConfig,
+    active_id: Option<&str>,
+) -> Vec<(String, Option<String>)> {
+    let api_key = provider
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            (Some(provider.id.as_str()) == active_id
+                && provider.trust_level != ProviderTrustLevel::Relay)
+                .then(|| config.api_key.as_deref())
+                .flatten()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(str::to_owned)
+        });
+    let keys: Vec<(String, Option<String>)> = if provider.api_keys.is_empty() {
+        api_key
+            .map(|key| vec![("legacy".to_owned(), Some(key))])
+            .unwrap_or_default()
+    } else {
+        provider
+            .api_keys
+            .iter()
+            .filter(|key| key.enabled && key.weight > 0 && !key.key.trim().is_empty())
+            .map(|key| (key.id.clone(), Some(key.key.clone())))
+            .collect()
+    };
+    if keys.is_empty() {
+        if Some(provider.id.as_str()) != active_id {
+            return Vec::new();
+        }
+        return vec![("environment".to_owned(), None)];
+    }
+    keys
+}
+
+/// Credentials one provider contributes this turn, rotation winner first.
+fn provider_candidate_keys(
+    config: &UserConfig,
+    provider: &CloudProviderConfig,
+    active_id: Option<&str>,
+) -> Vec<(String, Option<String>)> {
+    let mut keys = provider_credential_list(config, provider, active_id);
+    if keys.len() > 1 {
+        if let Some((selected_id, _)) = select_provider_key(provider) {
+            if let Some(index) = keys.iter().position(|(id, _)| *id == selected_id) {
+                let selected = keys.remove(index);
+                keys.insert(0, selected);
+            }
+        }
+    }
+    keys
+}
+
+fn expand_provider_candidates(
+    config: &UserConfig,
+    provider: &CloudProviderConfig,
+    active_id: Option<&str>,
+    model_override: Option<&str>,
+) -> Vec<ProviderCandidate> {
+    provider_candidate_keys(config, provider, active_id)
+        .into_iter()
+        .map(|(key_id, api_key)| ProviderCandidate {
+            id: provider.id.clone(),
+            key_id,
+            name: provider.name.clone(),
+            base_url: provider.base_url.clone(),
+            wire_api: provider.wire_api,
+            trust_level: provider.trust_level,
+            api_key,
+            model_override: model_override.map(str::to_owned),
+        })
+        .collect()
+}
+
+/// Providers to try for `model`, best first. When the model has configured
+/// routes the order comes from a smooth weighted rotation over those providers;
+/// otherwise it stays the established active-provider-plus-backup order.
+fn provider_candidates(config: &UserConfig, model: &str) -> Vec<ProviderCandidate> {
     let active_id = config.active_provider_id.as_deref();
+    let routes = eligible_model_routes(config, model);
+    if !routes.is_empty() {
+        return routed_provider_candidates(config, model, routes, active_id);
+    }
+
     let mut ordered: Vec<&CloudProviderConfig> = config
         .providers
         .iter()
         .filter(|provider| Some(provider.id.as_str()) == active_id)
         .collect();
-        if config.provider_fallback_enabled {
-            ordered.extend(
-                config
+    if config.provider_fallback_enabled {
+        ordered.extend(config.providers.iter().filter(|provider| {
+            Some(provider.id.as_str()) != active_id
+                && config
                     .providers
                     .iter()
-                    .filter(|provider| {
-                        Some(provider.id.as_str()) != active_id
-                            && config
-                                .providers
-                                .iter()
-                                .find(|active| Some(active.id.as_str()) == active_id)
-                                .map(|active| active.trust_level == provider.trust_level)
-                                .unwrap_or(false)
-                    }),
-        );
+                    .find(|active| Some(active.id.as_str()) == active_id)
+                    .map(|active| active.trust_level == provider.trust_level)
+                    .unwrap_or(false)
+        }));
     }
 
     ordered
         .into_iter()
-        .flat_map(|provider| {
-            let api_key = provider
-                .api_key
-                .as_deref()
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-                .map(str::to_owned)
-                .or_else(|| {
-                    (Some(provider.id.as_str()) == active_id
-                        && provider.trust_level != ProviderTrustLevel::Relay)
-                        .then(|| config.api_key.as_deref())
-                        .flatten()
-                        .map(str::trim)
-                        .filter(|key| !key.is_empty())
-                        .map(str::to_owned)
-                });
-            let mut keys = if provider.api_keys.is_empty() {
-                api_key.map(|key| vec![("legacy".to_owned(), key)])
-                    .unwrap_or_default()
-            } else {
-                provider
-                    .api_keys
-                    .iter()
-                    .filter(|key| key.enabled && key.weight > 0 && !key.key.trim().is_empty())
-                    .map(|key| (key.id.clone(), key.key.clone()))
-                    .collect()
-            };
-            if keys.is_empty() && Some(provider.id.as_str()) != active_id {
-                return Vec::new();
-            }
-            if keys.is_empty() {
-                return vec![ProviderCandidate {
-                    id: provider.id.clone(),
-                    key_id: "environment".to_owned(),
-                    name: provider.name.clone(),
-                    base_url: provider.base_url.clone(),
-                    wire_api: provider.wire_api,
-                    trust_level: provider.trust_level,
-                    api_key: None,
-                }];
-            }
-            if keys.len() > 1 {
-                if let Some((selected_id, _)) = select_provider_key(provider) {
-                    if let Some(index) = keys.iter().position(|(id, _)| *id == selected_id) {
-                        let selected = keys.remove(index);
-                        keys.insert(0, selected);
-                    }
-                }
-            }
-            keys.into_iter()
-                .map(|(key_id, api_key)| ProviderCandidate {
-                    id: provider.id.clone(),
-                    key_id,
-                    name: provider.name.clone(),
-                    base_url: provider.base_url.clone(),
-                    wire_api: provider.wire_api,
-                    trust_level: provider.trust_level,
-                    api_key: Some(api_key),
-                })
-                .collect()
+        .flat_map(|provider| expand_provider_candidates(config, provider, active_id, None))
+        .collect()
+}
+
+fn routed_provider_candidates(
+    config: &UserConfig,
+    model: &str,
+    routes: Vec<(&CloudProviderConfig, &ModelRoute)>,
+    active_id: Option<&str>,
+) -> Vec<ProviderCandidate> {
+    // A route whose provider has no usable credential must not take a rotation
+    // slot, otherwise its weight would silently consume the model's share.
+    let mut expanded: Vec<(&ModelRoute, Vec<ProviderCandidate>)> = routes
+        .into_iter()
+        .map(|(provider, route)| {
+            (
+                route,
+                expand_provider_candidates(
+                    config,
+                    provider,
+                    active_id,
+                    route.model_override.as_deref(),
+                ),
+            )
         })
+        .filter(|(_, candidates)| !candidates.is_empty())
+        .collect();
+    if expanded.len() > 1 {
+        let entries: Vec<(String, u32)> = expanded
+            .iter()
+            .map(|(route, _)| (route.provider_id.clone(), route.weight))
+            .collect();
+        let rotations = MODEL_ROUTE_ROTATIONS.get_or_init(|| Mutex::new(HashMap::new()));
+        let selected = rotations.lock().ok().and_then(|mut rotations| {
+            rotations
+                .entry(normalized_model_id(model))
+                .or_default()
+                .select_weighted(&entries)
+        });
+        if let Some(selected) = selected {
+            if let Some(index) = expanded
+                .iter()
+                .position(|(route, _)| route.provider_id == selected)
+            {
+                let winner = expanded.remove(index);
+                expanded.insert(0, winner);
+            }
+        }
+    }
+    expanded
+        .into_iter()
+        .flat_map(|(_, candidates)| candidates)
         .collect()
 }
 
@@ -1099,6 +1330,7 @@ impl<'a> AgentService<'a> {
         &self,
         session: &Session,
         provider: &OpenAiCompatibleProvider,
+        model: &str,
         messages: Vec<ChatMessage>,
         definitions: &[ToolDefinition],
         reasoning_effort: Option<&str>,
@@ -1117,7 +1349,7 @@ impl<'a> AgentService<'a> {
         let estimated_prompt_tokens = estimate_chat_request_tokens(&messages, definitions);
         let mut stream = match tokio::time::timeout(
             stream_first_event_timeout,
-            provider.stream_chat(&session.model, messages, definitions, reasoning_effort),
+            provider.stream_chat(model, messages, definitions, reasoning_effort),
         )
         .await
         {
@@ -1166,20 +1398,9 @@ impl<'a> AgentService<'a> {
                             }
                             match event {
                                 ProviderEvent::ModelReported(reported) => {
-                                    let requested = session.model.trim();
                                     let reported = reported.trim();
                                     if model_reported.is_none() && !reported.is_empty() {
                                         model_reported = Some(reported.to_owned());
-                                    }
-                                    if !reported.is_empty() && reported != requested {
-                                        return Err(ProviderAttemptFailure {
-                                            error: AgentError::ModelMismatch {
-                                                requested: requested.to_owned(),
-                                                reported: reported.to_owned(),
-                                            },
-                                            output_chars: content.chars().count(),
-                                            tool_calls: tool_calls.len(),
-                                        });
                                     }
                                 }
                                 ProviderEvent::TextDelta(delta) => {
@@ -1279,7 +1500,7 @@ impl<'a> AgentService<'a> {
         let mut mcp =
             McpRuntime::prepare_with_plugin_config(&session.workspace_root, &plugin_config)?;
         let user_config = load_user_config();
-        let candidates = provider_candidates(&user_config);
+        let candidates = provider_candidates(&user_config, &session.model);
         // Providers that contributed more than one credential this turn. Only
         // those get key-qualified labels, so single-key messages stay as-is.
         let multi_key_provider_ids: HashSet<String> = candidates
@@ -1659,6 +1880,7 @@ impl<'a> AgentService<'a> {
                             .stream_provider_attempt(
                                 session,
                                 &provider,
+                                candidate.model_for(&session.model),
                                 messages.clone(),
                                 &definitions,
                                 reasoning_effort.as_deref(),
@@ -1844,6 +2066,12 @@ impl<'a> AgentService<'a> {
                                 break;
                             }
                         }
+                    }
+                    // A finished attempt ends the round. Without this the loop
+                    // walks on to the remaining candidates and sends the same
+                    // request to every backup provider of the rotation.
+                    if completed.is_some() {
+                        break;
                     }
                 }
                 match completed {
@@ -4181,6 +4409,7 @@ fn resolve_vision_delegate(config: &UserConfig, session_model: &str) -> Option<V
         wire_api: provider_config.wire_api,
         trust_level: provider_config.trust_level,
         api_key: provider_api_key(config, provider_config),
+        model_override: None,
     };
     let provider = open_provider(&candidate).ok()?;
     Some(VisionDelegate {
@@ -4623,7 +4852,7 @@ mod tests {
         // Fallback is off by default now, so the ordering assertion has to enable it.
         config.provider_fallback_enabled = true;
 
-        let candidates = provider_candidates(&config);
+        let candidates = provider_candidates(&config, "test-model");
         assert_eq!(
             candidates
                 .iter()
@@ -4662,7 +4891,7 @@ mod tests {
         config.active_provider_id = Some("primary".to_owned());
         config.provider_fallback_enabled = false;
 
-        let candidates = provider_candidates(&config);
+        let candidates = provider_candidates(&config, "test-model");
         assert_eq!(
             candidates
                 .iter()
@@ -4698,7 +4927,7 @@ mod tests {
         config.active_provider_id = Some("official".to_owned());
         config.provider_fallback_enabled = true;
 
-        let candidates = provider_candidates(&config);
+        let candidates = provider_candidates(&config, "test-model");
         assert_eq!(candidates.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec!["official"]);
     }
 
@@ -4717,7 +4946,7 @@ mod tests {
         }];
         config.active_provider_id = Some("relay".to_owned());
 
-        let candidates = provider_candidates(&config);
+        let candidates = provider_candidates(&config, "test-model");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].api_key, None);
         assert_eq!(provider_api_key(&config, &config.providers[0]), None);
@@ -4749,6 +4978,7 @@ mod tests {
             wire_api: ProviderWireApi::ChatCompletions,
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some("test-key".to_owned()),
+            model_override: None,
         };
         let settings = CircuitSettings {
             failure_threshold: 2,
@@ -4802,6 +5032,7 @@ mod tests {
             wire_api: ProviderWireApi::ChatCompletions,
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some("test-key".to_owned()),
+            model_override: None,
         };
         let settings = CircuitSettings {
             failure_threshold: 1,
@@ -4850,6 +5081,7 @@ mod tests {
             wire_api: ProviderWireApi::ChatCompletions,
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some("test-key".to_owned()),
+            model_override: None,
         };
         let healthy = ProviderCandidate {
             id: format!("circuit-healthy-{}", std::process::id()),
@@ -4859,6 +5091,7 @@ mod tests {
             wire_api: ProviderWireApi::ChatCompletions,
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some("test-key".to_owned()),
+            model_override: None,
         };
         let settings = CircuitSettings {
             failure_threshold: 1,
@@ -4909,6 +5142,7 @@ mod tests {
             wire_api: ProviderWireApi::ChatCompletions,
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some(api_key.to_owned()),
+            model_override: None,
         }
     }
 
@@ -4991,7 +5225,7 @@ mod tests {
         }];
         config.active_provider_id = Some("solo".to_owned());
 
-        let candidates = provider_candidates(&config);
+        let candidates = provider_candidates(&config, "test-model");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].api_key.as_deref(), Some("solo-key"));
         assert_eq!(candidates[0].key_id, "legacy");
@@ -5011,7 +5245,7 @@ mod tests {
         }];
         config.active_provider_id = Some("pool".to_owned());
 
-        let candidates = provider_candidates(&config);
+        let candidates = provider_candidates(&config, "test-model");
         assert_eq!(candidates.len(), 2, "both keys stay available as fallbacks");
         assert!(candidates.iter().all(|candidate| candidate.id == "pool"));
         let mut ids: Vec<&str> = candidates
@@ -5026,6 +5260,211 @@ mod tests {
             provider_circuit_key(&candidates[0]),
             provider_circuit_key(&candidates[1])
         );
+    }
+
+    fn relay_provider(id: &str, key: Option<&str>) -> CloudProviderConfig {
+        CloudProviderConfig {
+            id: id.to_owned(),
+            name: id.to_uppercase(),
+            base_url: format!("https://{id}.example.test"),
+            wire_api: ProviderWireApi::ChatCompletions,
+            trust_level: ProviderTrustLevel::Relay,
+            api_key: key.map(str::to_owned),
+            api_keys: Vec::new(),
+        }
+    }
+
+    fn model_route(provider_id: &str, weight: u32) -> ModelRoute {
+        ModelRoute {
+            provider_id: provider_id.to_owned(),
+            weight,
+            enabled: true,
+            model_override: None,
+        }
+    }
+
+    /// Rotation state is process-global, so every routing test needs its own
+    /// model id to stay independent of the others.
+    fn routing_model(name: &str) -> String {
+        format!("route-{name}-{}", std::process::id())
+    }
+
+    #[test]
+    fn routed_providers_are_picked_in_the_configured_share() {
+        let model = routing_model("share");
+        let mut config = UserConfig::default();
+        config.providers = vec![
+            relay_provider("alpha", Some("alpha-key")),
+            relay_provider("beta", Some("beta-key")),
+            relay_provider("gamma", Some("gamma-key")),
+        ];
+        config.active_provider_id = Some("alpha".to_owned());
+        config.model_routes.insert(
+            model.clone(),
+            vec![
+                model_route("alpha", 6),
+                model_route("beta", 3),
+                model_route("gamma", 1),
+            ],
+        );
+
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        for _ in 0..100 {
+            let candidates = provider_candidates(&config, &model);
+            assert_eq!(candidates.len(), 3, "every route stays available as fallback");
+            *counts.entry(candidates[0].id.clone()).or_default() += 1;
+        }
+        assert_eq!(counts.get("alpha").copied(), Some(60));
+        assert_eq!(counts.get("beta").copied(), Some(30));
+        assert_eq!(counts.get("gamma").copied(), Some(10));
+    }
+
+    #[test]
+    fn model_routes_never_cross_the_trust_boundary() {
+        let model = routing_model("trust");
+        let mut config = UserConfig::default();
+        let mut official = relay_provider("official", Some("official-key"));
+        official.trust_level = ProviderTrustLevel::Official;
+        config.providers = vec![relay_provider("relay", Some("relay-key")), official];
+        config.active_provider_id = Some("relay".to_owned());
+        config.model_routes.insert(
+            model.clone(),
+            vec![model_route("relay", 1), model_route("official", 9)],
+        );
+
+        let candidates = provider_candidates(&config, &model);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["relay"],
+            "an official provider must not serve a relay session through a route"
+        );
+    }
+
+    #[test]
+    fn a_route_alias_replaces_the_model_id_sent_upstream() {
+        let model = routing_model("alias");
+        let mut config = UserConfig::default();
+        config.providers = vec![relay_provider("aliased", Some("aliased-key"))];
+        config.active_provider_id = Some("aliased".to_owned());
+        let mut route = model_route("aliased", 1);
+        route.model_override = Some("upstream-name".to_owned());
+        config.model_routes.insert(model.clone(), vec![route]);
+
+        let candidates = provider_candidates(&config, &model);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].model_for(&model), "upstream-name");
+
+        let plain = provider_candidates(&config, "unrouted-model");
+        assert_eq!(
+            plain[0].model_for("unrouted-model"),
+            "unrouted-model",
+            "models without a route keep sending their own id"
+        );
+    }
+
+    #[test]
+    fn routes_without_a_usable_credential_do_not_consume_the_share() {
+        let model = routing_model("nocred");
+        let mut config = UserConfig::default();
+        config.providers = vec![
+            relay_provider("with-key", Some("present-key")),
+            relay_provider("no-key", None),
+        ];
+        config.active_provider_id = Some("with-key".to_owned());
+        config.model_routes.insert(
+            model.clone(),
+            vec![model_route("no-key", 9), model_route("with-key", 1)],
+        );
+
+        for _ in 0..5 {
+            let candidates = provider_candidates(&config, &model);
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["with-key"],
+                "a route with no credential must not win turns"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_and_unknown_routes_fall_back_to_the_established_order() {
+        let model = routing_model("disabled");
+        let mut config = UserConfig::default();
+        config.providers = vec![
+            relay_provider("active", Some("active-key")),
+            relay_provider("backup", Some("backup-key")),
+        ];
+        config.active_provider_id = Some("active".to_owned());
+        config.provider_fallback_enabled = true;
+        let mut disabled = model_route("backup", 5);
+        disabled.enabled = false;
+        config.model_routes.insert(
+            model.clone(),
+            vec![disabled, model_route("does-not-exist", 5)],
+        );
+
+        let candidates = provider_candidates(&config, &model);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active", "backup"]
+        );
+    }
+
+    #[test]
+    fn route_statuses_report_configuration_problems_without_mutating_state() {
+        let model = routing_model("status");
+        let mut config = UserConfig::default();
+        let mut official = relay_provider("official", Some("official-key"));
+        official.trust_level = ProviderTrustLevel::Official;
+        config.providers = vec![
+            relay_provider("ready", Some("ready-key")),
+            relay_provider("empty", None),
+            official,
+        ];
+        config.active_provider_id = Some("ready".to_owned());
+        let mut aliased = model_route("ready", 3);
+        aliased.model_override = Some("upstream-name".to_owned());
+        let mut disabled = model_route("empty", 2);
+        disabled.enabled = false;
+        config.model_routes.insert(
+            model.clone(),
+            vec![
+                aliased,
+                disabled,
+                model_route("official", 1),
+                model_route("missing", 1),
+            ],
+        );
+
+        let statuses = model_route_statuses(&config);
+        let states: Vec<(&str, &str)> = statuses
+            .iter()
+            .map(|status| (status.provider_id.as_str(), status.state.as_str()))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("ready", "ready"),
+                ("empty", "disabled"),
+                ("official", "trust_mismatch"),
+                ("missing", "unknown_provider"),
+            ]
+        );
+        assert_eq!(statuses[0].effective_model, "upstream-name");
+        assert_eq!(statuses[0].usable_key_count, 1);
+        assert_eq!(statuses[3].provider_name, "");
+        // Reading statuses twice must give the same answer: the view is a
+        // report, not a rotation step.
+        assert_eq!(model_route_statuses(&config), statuses);
     }
 
     #[test]

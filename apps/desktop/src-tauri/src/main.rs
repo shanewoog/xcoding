@@ -29,7 +29,8 @@ use xcoding_mcp::{
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
     CreateProjectResult, ImportProjectParams, ImportProjectResult, ListModelsResult, PingResult,
-    ProjectDir, ProviderAuthStatus, ProviderKeyStatus, ReplaySessionResult, ResolveActionParams,
+    ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus, ReplaySessionResult,
+    ResolveActionParams,
     ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session,
     SessionDetail, SetConfigParams, UserConfig, WorkspaceConfig,
 };
@@ -412,6 +413,11 @@ fn provider_status() -> Result<ProviderAuthStatus, String> {
 #[tauri::command]
 fn provider_key_status() -> Result<Vec<ProviderKeyStatus>, String> {
     Ok(xcoding_agent::provider_key_statuses(&load_user_config()))
+}
+
+#[tauri::command]
+fn model_route_status() -> Result<Vec<ModelRouteStatus>, String> {
+    Ok(xcoding_agent::model_route_statuses(&load_user_config()))
 }
 
 #[tauri::command]
@@ -848,6 +854,7 @@ fn main() {
             show_main_window,
             provider_status,
             provider_key_status,
+            model_route_status,
             get_user_config,
             list_provider_models,
             set_user_config,

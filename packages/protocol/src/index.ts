@@ -120,6 +120,43 @@ export interface CloudProviderConfig {
   api_keys?: ProviderApiKey[];
 }
 
+/**
+ * One provider share for a single logical model. Several routes of the same
+ * model spread that model's turns across independent providers, and each route
+ * may rename the model for its own endpoint.
+ */
+export interface ModelRoute {
+  /** Id of a provider in UserConfig.providers. */
+  provider_id: string;
+  /** Relative share in the model's weighted provider rotation. 0 keeps it out. */
+  weight?: number;
+  /** Disabled routes stay configured but are excluded from the rotation. */
+  enabled?: boolean;
+  /** Upstream model id to request instead of the logical model name. */
+  model_override?: string;
+}
+
+/** Runtime state of one model route, aggregated over that provider's credentials. */
+export interface ModelRouteStatus {
+  /** Normalized model id this route belongs to. */
+  model: string;
+  provider_id: string;
+  provider_name: string;
+  weight: number;
+  enabled: boolean;
+  /** Upstream model id actually requested from this provider. */
+  effective_model: string;
+  /**
+   * One of ready | disabled | unknown_provider | no_credential | blocked |
+   * cooling_down | trust_mismatch.
+   */
+  state: string;
+  /** Credentials of this provider currently usable for the route. */
+  usable_key_count: number;
+  success_count: number;
+  failure_count: number;
+}
+
 /** Vision delegate configuration for models without native vision support. */
 export interface VisionDelegateConfig {
   /** Whether vision delegation is enabled. */
@@ -200,6 +237,8 @@ export interface UserConfig {
   vision_delegate?: VisionDelegateConfig;
   /** Per-model capability overrides keyed by normalized (trimmed, lowercased) model id. */
   model_capabilities?: Record<string, ModelCapabilities>;
+  /** Per-model provider routes keyed by normalized (trimmed, lowercased) model id. */
+  model_routes?: Record<string, ModelRoute[]>;
 }
 
 export interface ProjectDir {

@@ -30,7 +30,8 @@ use xcoding_protocol::{
     MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
     MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES,
     MIN_MAX_TOOL_ROUNDS, MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS,
-    MIN_STREAM_IDLE_TIMEOUT_SECS, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
+    MIN_STREAM_IDLE_TIMEOUT_SECS, ModelRoute, ProviderAuthStatus, ProviderModel, ProviderWireApi,
+    UserConfig,
 };
 
 pub type ProviderEventStream =
@@ -621,7 +622,51 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
         }
     }
 
+    normalize_model_routes(&mut config);
+
     config
+}
+
+/// Keeps multi-provider routes consistent with the provider list: model keys are
+/// normalized like the other per-model maps, routes pointing at a removed
+/// provider are dropped, duplicates collapse to the first entry, and weights are
+/// bounded exactly like key weights. Weight 0 is preserved as the documented way
+/// to park a route without deleting it.
+fn normalize_model_routes(config: &mut UserConfig) {
+    let known_provider_ids: BTreeSet<String> = config
+        .providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect();
+    let routes = std::mem::take(&mut config.model_routes);
+    config.model_routes = routes
+        .into_iter()
+        .filter_map(|(model, entries)| {
+            let model = model.trim().to_ascii_lowercase();
+            if model.is_empty() {
+                return None;
+            }
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            let entries: Vec<ModelRoute> = entries
+                .into_iter()
+                .filter_map(|mut route| {
+                    route.provider_id = route.provider_id.trim().to_owned();
+                    if !known_provider_ids.contains(&route.provider_id)
+                        || !seen.insert(route.provider_id.clone())
+                    {
+                        return None;
+                    }
+                    route.weight = route.weight.min(MAX_PROVIDER_KEY_WEIGHT);
+                    route.model_override = route
+                        .model_override
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty());
+                    Some(route)
+                })
+                .collect();
+            (!entries.is_empty()).then_some((model, entries))
+        })
+        .collect();
 }
 
 fn uuid_like() -> String {
@@ -2515,6 +2560,92 @@ mod tests {
             MAX_CONTEXT_WINDOW_TOKENS
         );
         assert!(!normalized.model_context_windows.contains_key(""));
+    }
+
+    #[test]
+    fn normalizes_model_routes_against_the_provider_list() {
+        let mut config = UserConfig::default();
+        config.providers = vec![
+            CloudProviderConfig {
+                id: "official".to_owned(),
+                name: "official".to_owned(),
+                base_url: "https://api.openai.com".to_owned(),
+                wire_api: ProviderWireApi::ChatCompletions,
+                trust_level: xcoding_protocol::ProviderTrustLevel::Official,
+                api_key: Some("sk-official".to_owned()),
+                api_keys: Vec::new(),
+            },
+            CloudProviderConfig {
+                id: "relay".to_owned(),
+                name: "relay".to_owned(),
+                base_url: "https://gorouter.app".to_owned(),
+                wire_api: ProviderWireApi::ChatCompletions,
+                trust_level: xcoding_protocol::ProviderTrustLevel::Relay,
+                api_key: Some("sk-relay".to_owned()),
+                api_keys: Vec::new(),
+            },
+        ];
+        config.active_provider_id = Some("official".to_owned());
+        config.model_routes = BTreeMap::from([
+            (
+                "  Claude-Opus-5-Thinking ".to_owned(),
+                vec![
+                    ModelRoute {
+                        provider_id: " official ".to_owned(),
+                        weight: MAX_PROVIDER_KEY_WEIGHT + 10,
+                        enabled: true,
+                        model_override: Some("   ".to_owned()),
+                    },
+                    ModelRoute {
+                        provider_id: "official".to_owned(),
+                        weight: 4,
+                        enabled: true,
+                        model_override: None,
+                    },
+                    ModelRoute {
+                        provider_id: "removed".to_owned(),
+                        weight: 4,
+                        enabled: true,
+                        model_override: None,
+                    },
+                    ModelRoute {
+                        provider_id: "relay".to_owned(),
+                        weight: 3,
+                        enabled: true,
+                        model_override: Some(" claude-opus-5 ".to_owned()),
+                    },
+                ],
+            ),
+            (
+                "gpt-5.5".to_owned(),
+                vec![ModelRoute {
+                    provider_id: "gone".to_owned(),
+                    weight: 1,
+                    enabled: true,
+                    model_override: None,
+                }],
+            ),
+            (
+                "   ".to_owned(),
+                vec![ModelRoute {
+                    provider_id: "official".to_owned(),
+                    weight: 1,
+                    enabled: true,
+                    model_override: None,
+                }],
+            ),
+        ]);
+
+        let normalized = normalize_user_config(config);
+
+        assert_eq!(normalized.model_routes.len(), 1);
+        let routes = &normalized.model_routes["claude-opus-5-thinking"];
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].provider_id, "official");
+        assert_eq!(routes[0].weight, MAX_PROVIDER_KEY_WEIGHT);
+        assert!(routes[0].model_override.is_none());
+        assert_eq!(routes[1].provider_id, "relay");
+        assert_eq!(routes[1].model_override.as_deref(), Some("claude-opus-5"));
     }
 
     #[test]

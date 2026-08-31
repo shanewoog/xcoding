@@ -33,6 +33,8 @@ import type {
   ProviderApiKey,
   ProviderKeyStatus,
   ProviderModel,
+  ModelRoute,
+  ModelRouteStatus,
   UserConfig,
   VisionDelegateConfig,
   WorkspaceConfig,
@@ -597,6 +599,58 @@ function contextWindowMapFromEntries(entries: ModelContextWindowEntry[]): Record
       MIN_CONTEXT_WINDOW_TOKENS,
       MAX_CONTEXT_WINDOW_TOKENS,
     );
+  }
+  return result;
+}
+
+/** One editable row of the model routing table; flat so the form stays simple. */
+interface ModelRouteEntry {
+  id: string;
+  model: string;
+  providerId: string;
+  weight: number;
+  enabled: boolean;
+  modelOverride: string;
+}
+
+function modelRouteEntriesFromMap(
+  value: Record<string, ModelRoute[]> | undefined | null,
+): ModelRouteEntry[] {
+  const entries: ModelRouteEntry[] = [];
+  for (const [model, routes] of Object.entries(value || {})) {
+    const normalizedModel = model.trim().toLowerCase();
+    if (!normalizedModel || !Array.isArray(routes)) continue;
+    routes.forEach((route, index) => {
+      if (!route || typeof route.provider_id !== "string") return;
+      entries.push({
+        id: `model-route-${normalizedModel}-${index}`,
+        model: normalizedModel,
+        providerId: route.provider_id,
+        weight: normalizeBoundedInteger(route.weight, 1, MIN_PROVIDER_KEY_WEIGHT, MAX_PROVIDER_KEY_WEIGHT),
+        enabled: route.enabled !== false,
+        modelOverride: route.model_override?.trim() || "",
+      });
+    });
+  }
+  return entries;
+}
+
+function modelRouteMapFromEntries(entries: ModelRouteEntry[]): Record<string, ModelRoute[]> {
+  const result: Record<string, ModelRoute[]> = {};
+  for (const entry of entries) {
+    const model = entry.model.trim().toLowerCase();
+    const providerId = entry.providerId.trim();
+    if (!model || !providerId) continue;
+    const routes = result[model] || (result[model] = []);
+    // The backend keeps the first route per provider; drop duplicates here so the
+    // saved form matches what routing will actually use.
+    if (routes.some((route) => route.provider_id === providerId)) continue;
+    routes.push({
+      provider_id: providerId,
+      weight: normalizeBoundedInteger(entry.weight, 1, MIN_PROVIDER_KEY_WEIGHT, MAX_PROVIDER_KEY_WEIGHT),
+      enabled: entry.enabled,
+      model_override: entry.modelOverride.trim() || undefined,
+    });
   }
   return result;
 }
@@ -1277,6 +1331,8 @@ export function App() {
   const [circuitMinRequestCount, setCircuitMinRequestCount] = useState(DEFAULT_CIRCUIT_MIN_REQUEST_COUNT);
   const [contextCompactionThresholdPercent, setContextCompactionThresholdPercent] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT);
   const [modelContextWindowEntries, setModelContextWindowEntries] = useState<ModelContextWindowEntry[]>([]);
+  const [modelRouteEntries, setModelRouteEntries] = useState<ModelRouteEntry[]>([]);
+  const [modelRouteStatuses, setModelRouteStatuses] = useState<ModelRouteStatus[]>([]);
   const [visionDelegate, setVisionDelegate] = useState<VisionDelegateForm>(EMPTY_VISION_DELEGATE_FORM);
   // Kept verbatim so saving from Settings never drops hand-written entries.
   const [modelCapabilities, setModelCapabilities] = useState<Record<string, ModelCapabilities>>({});
@@ -1471,6 +1527,13 @@ export function App() {
     }
     return map;
   }, [providerKeyStatuses]);
+  const modelRouteStatusByKey = useMemo(() => {
+    const map = new Map<string, ModelRouteStatus>();
+    for (const status of modelRouteStatuses) {
+      map.set(`${status.model}|${status.provider_id}`, status);
+    }
+    return map;
+  }, [modelRouteStatuses]);
   const selectedProviderModelsLoading = selectedProvider ? Boolean(providerModelsLoadingById[selectedProvider.id]) : false;
   const selectedProviderModelsError = selectedProvider ? providerModelErrorsById[selectedProvider.id] : undefined;
 
@@ -1706,6 +1769,7 @@ export function App() {
         setCircuitMinRequestCount(normalizeBoundedInteger(config.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
         setContextCompactionThresholdPercent(normalizeBoundedInteger(config.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
         setModelContextWindowEntries(contextWindowEntriesFromMap(config.model_context_windows));
+        setModelRouteEntries(modelRouteEntriesFromMap(config.model_routes));
         setVisionDelegate(visionDelegateFormFromConfig(config.vision_delegate));
         setModelCapabilities(config.model_capabilities ?? {});
         setCustomInstructions(config.custom_instructions ?? "");
@@ -1770,6 +1834,17 @@ export function App() {
     } catch {
       // Rotation stats are advisory; a failure here must not block the settings view.
       setProviderKeyStatuses([]);
+    }
+  }, []);
+
+  const refreshModelRouteStatuses = useCallback(async () => {
+    if (!isTauriRuntime) return;
+    try {
+      const statuses = await invoke<ModelRouteStatus[]>("model_route_status");
+      setModelRouteStatuses(Array.isArray(statuses) ? statuses : []);
+    } catch {
+      // Same as key stats: routing state is advisory and must not block settings.
+      setModelRouteStatuses([]);
     }
   }, []);
 
@@ -2067,12 +2142,14 @@ export function App() {
   useEffect(() => {
     if (view !== "settings" || settingsTab !== "provider") return;
     void refreshProviderKeyStatuses();
+    void refreshModelRouteStatuses();
     // Cooldown counters tick down locally, so poll while the pane is visible.
     const timer = window.setInterval(() => {
       void refreshProviderKeyStatuses();
+      void refreshModelRouteStatuses();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [view, settingsTab, refreshProviderKeyStatuses]);
+  }, [view, settingsTab, refreshProviderKeyStatuses, refreshModelRouteStatuses]);
 
   useEffect(() => {
     if (view === "settings" && settingsTab === "plugins") {
@@ -3762,6 +3839,7 @@ export function App() {
           workspace_home: home || undefined,
           hidden_project_paths: hiddenProjectPaths,
           model_context_windows: contextWindowMapFromEntries(modelContextWindowEntries),
+          model_routes: modelRouteMapFromEntries(modelRouteEntries),
           vision_delegate: visionDelegateConfigFromForm(visionDelegate),
           model_capabilities: modelCapabilities,
           custom_instructions: customInstructions.trim() || undefined,
@@ -3787,6 +3865,7 @@ export function App() {
       setCircuitMinRequestCount(normalizeBoundedInteger(savedUser.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
       setContextCompactionThresholdPercent(normalizeBoundedInteger(savedUser.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
       setModelContextWindowEntries(contextWindowEntriesFromMap(savedUser.model_context_windows));
+      setModelRouteEntries(modelRouteEntriesFromMap(savedUser.model_routes));
       setVisionDelegate(visionDelegateFormFromConfig(savedUser.vision_delegate));
       setModelCapabilities(savedUser.model_capabilities ?? {});
       setCustomInstructions(savedUser.custom_instructions ?? "");
@@ -3847,6 +3926,30 @@ export function App() {
 
   function removeContextWindowEntry(id: string): void {
     setModelContextWindowEntries((current) => current.filter((entry) => entry.id !== id));
+  }
+
+  function addModelRouteEntry(): void {
+    setModelRouteEntries((current) => [
+      ...current,
+      {
+        id: `model-route-${Date.now()}-${current.length}`,
+        model: model.trim().toLowerCase(),
+        providerId: activeProviderId || providers[0]?.id || "",
+        weight: 1,
+        enabled: true,
+        modelOverride: "",
+      },
+    ]);
+  }
+
+  function updateModelRouteEntry(id: string, patch: Partial<Omit<ModelRouteEntry, "id">>): void {
+    setModelRouteEntries((current) =>
+      current.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)),
+    );
+  }
+
+  function removeModelRouteEntry(id: string): void {
+    setModelRouteEntries((current) => current.filter((entry) => entry.id !== id));
   }
 
 
@@ -4410,7 +4513,7 @@ export function App() {
               <div className="provider-model-list" role="list" aria-label={t(locale, "models.fetched")}>
                 {selectedProviderModels.map((entry) => (
                   <span className="provider-model-item" role="listitem" key={entry.id}>
-                    {entry.owned_by ? `${entry.id} · ${entry.owned_by}` : entry.id}
+                    {entry.id}
                   </span>
                 ))}
               </div>
@@ -4418,6 +4521,129 @@ export function App() {
               <small className="provider-model-empty">{t(locale, "models.empty")}</small>
             )}
             {selectedProviderModelsError ? <small className="models-error">{selectedProviderModelsError}</small> : null}
+            <div className="model-route-section">
+              <p className="model-route-title">{t(locale, "settings.modelRoutes.title")}</p>
+              <div className="model-route-list" id="model-route-list">
+                {modelRouteEntries.length === 0 ? (
+                  <small className="model-route-empty">{t(locale, "settings.modelRoutes.empty")}</small>
+                ) : (
+                  modelRouteEntries.map((entry) => {
+                    const routeStatus = modelRouteStatusByKey.get(
+                      `${entry.model.trim().toLowerCase()}|${entry.providerId}`,
+                    );
+                    const routeStateLabelKey: MessageKey = routeStatus?.state === "disabled"
+                      ? "routeState.disabled"
+                      : routeStatus?.state === "unknown_provider"
+                        ? "routeState.unknownProvider"
+                        : routeStatus?.state === "no_credential"
+                          ? "routeState.noCredential"
+                          : routeStatus?.state === "blocked"
+                            ? "routeState.blocked"
+                            : routeStatus?.state === "cooling_down"
+                              ? "routeState.coolingDown"
+                              : routeStatus?.state === "trust_mismatch"
+                                ? "routeState.trustMismatch"
+                                : "routeState.ready";
+                    return (
+                      <div className="model-route-entry" key={entry.id}>
+                        <div className={`model-route-row ${entry.enabled ? "" : "disabled"}`}>
+                          <input
+                            className="model-route-model"
+                            value={entry.model}
+                            onChange={(event) => updateModelRouteEntry(entry.id, { model: event.target.value })}
+                            disabled={anySessionRunning || isSavingConfig}
+                            spellCheck={false}
+                            placeholder={t(locale, "field.routeModelPlaceholder")}
+                            aria-label={t(locale, "field.routeModel")}
+                          />
+                          <select
+                            className="model-route-provider"
+                            value={entry.providerId}
+                            onChange={(event) => updateModelRouteEntry(entry.id, { providerId: event.target.value })}
+                            disabled={anySessionRunning || isSavingConfig}
+                            aria-label={t(locale, "field.routeProvider")}
+                          >
+                            {providers.some((item) => item.id === entry.providerId) ? null : (
+                              <option value={entry.providerId}>{entry.providerId || "-"}</option>
+                            )}
+                            {providers.map((item) => (
+                              <option value={item.id} key={item.id}>
+                                {item.name}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            className="model-route-override"
+                            value={entry.modelOverride}
+                            onChange={(event) => updateModelRouteEntry(entry.id, { modelOverride: event.target.value })}
+                            disabled={anySessionRunning || isSavingConfig}
+                            spellCheck={false}
+                            placeholder={t(locale, "field.routeOverridePlaceholder")}
+                            aria-label={t(locale, "field.routeOverride")}
+                          />
+                          <input
+                            className="model-route-weight"
+                            type="number"
+                            min={MIN_PROVIDER_KEY_WEIGHT}
+                            max={MAX_PROVIDER_KEY_WEIGHT}
+                            step={1}
+                            value={entry.weight}
+                            onChange={(event) => updateModelRouteEntry(entry.id, {
+                              weight: normalizeBoundedInteger(Number(event.target.value), 1, MIN_PROVIDER_KEY_WEIGHT, MAX_PROVIDER_KEY_WEIGHT),
+                            })}
+                            disabled={anySessionRunning || isSavingConfig}
+                            aria-label={t(locale, "field.keyWeight")}
+                            title={t(locale, "field.keyWeight")}
+                          />
+                          <label className="model-route-enabled">
+                            <input
+                              type="checkbox"
+                              checked={entry.enabled}
+                              onChange={(event) => updateModelRouteEntry(entry.id, { enabled: event.target.checked })}
+                              disabled={anySessionRunning || isSavingConfig}
+                            />
+                            <span>{t(locale, "field.keyEnabled")}</span>
+                          </label>
+                          <button
+                            type="button"
+                            className="quiet-button"
+                            onClick={() => removeModelRouteEntry(entry.id)}
+                            disabled={anySessionRunning || isSavingConfig}
+                            title={t(locale, "action.deleteModelRoute")}
+                            aria-label={t(locale, "action.deleteModelRoute")}
+                          >
+                            x
+                          </button>
+                        </div>
+                        {routeStatus ? (
+                          <div className={`model-route-status ${routeStatus.state}`}>
+                            <span className="model-route-state">{t(locale, routeStateLabelKey)}</span>
+                            <span className="model-route-usage">
+                              {t(locale, "keyStats.usage", {
+                                ok: String(routeStatus.success_count),
+                                fail: String(routeStatus.failure_count),
+                              })}
+                            </span>
+                            <span className="model-route-effective">{routeStatus.effective_model}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              <div className="model-route-actions">
+                <button
+                  type="button"
+                  className="quiet-button"
+                  onClick={addModelRouteEntry}
+                  disabled={anySessionRunning || isSavingConfig || providers.length === 0}
+                >
+                  {t(locale, "action.addModelRoute")}
+                </button>
+              </div>
+              <p className="mode-help">{t(locale, "settings.modelRoutes.help")}</p>
+            </div>
             <p className="mode-help">{t(locale, "settings.providerHelp")}</p>
           </section>
 
@@ -5652,7 +5878,7 @@ export function App() {
                 ) : null}
                 {availableModels.map((entry) => (
                   <option key={entry.id} value={entry.id}>
-                    {entry.owned_by ? `${entry.id} · ${entry.owned_by}` : entry.id}
+                    {entry.id}
                   </option>
                 ))}
               </select>
