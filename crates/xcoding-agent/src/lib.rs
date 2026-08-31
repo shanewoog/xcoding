@@ -1581,6 +1581,7 @@ impl<'a> AgentService<'a> {
                 session,
                 &provider,
                 primary_candidate.trust_level,
+                primary_candidate.model_for(&session.model),
                 &history,
                 stream_idle,
                 on_event,
@@ -1741,7 +1742,7 @@ impl<'a> AgentService<'a> {
                 ..request_budget
             };
             prepare_request_messages(&mut messages, &request_budget);
-            let (content, tool_calls) = {
+            let (content, tool_calls, completed_candidate_index) = {
                 let mut failures = Vec::new();
                 let mut completed = None;
                 // Without this the round can end without a single request when every
@@ -1774,7 +1775,8 @@ impl<'a> AgentService<'a> {
                     if model_incompatible_provider_ids.contains(&candidate.id) {
                         failures.push(format!(
                             "{} does not support selected model {}",
-                            candidate_label, session.model
+                            candidate_label,
+                            candidate.model_for(&session.model)
                         ));
                         continue;
                     }
@@ -1835,9 +1837,10 @@ impl<'a> AgentService<'a> {
                                 }
                             );
                             let message = error.to_string();
-                            self.emit_model_call(
+                            self.emit_model_call_for_model(
                                 on_event,
                                 session,
+                                candidate.model_for(&session.model),
                                 &endpoint,
                                 "chat",
                                 tool_round,
@@ -1896,6 +1899,7 @@ impl<'a> AgentService<'a> {
                                 self.emit_model_call_with_reported(
                                     on_event,
                                     session,
+                                    candidate.model_for(&session.model),
                                     &endpoint,
                                     "chat",
                                     tool_round,
@@ -1909,14 +1913,15 @@ impl<'a> AgentService<'a> {
                                 );
                                 record_provider_success(candidate, circuit_settings);
                                 record_provider_key_success(candidate);
-                                completed = Some((content, tool_calls));
+                                completed = Some((content, tool_calls, candidate_index));
                                 break;
                             }
                             Err(failure) => {
                                 let message = failure.error.to_string();
-                                self.emit_model_call(
+                                self.emit_model_call_for_model(
                                     on_event,
                                     session,
+                                    candidate.model_for(&session.model),
                                     &endpoint,
                                     "chat",
                                     tool_round,
@@ -2038,7 +2043,9 @@ impl<'a> AgentService<'a> {
                                             message: if rejected_selected_model {
                                                 format!(
                                                     "Provider \"{}\" does not support model \"{}\"; skipping it for this session and switching to backup provider \"{}\".",
-                                                    candidate_label, session.model, next_label
+                                                    candidate_label,
+                                                    candidate.model_for(&session.model),
+                                                    next_label
                                                 )
                                             } else if let Some(block) =
                                                 key_block.filter(|_| candidate_is_multi_key)
@@ -2079,7 +2086,6 @@ impl<'a> AgentService<'a> {
                     None => return Err(AgentError::ProviderFallbackExhausted(failures.join("; "))),
                 }
             };
-
             self.ensure_not_cancelled_preserving(session.id, &content)?;
 
             if !content.trim().is_empty() {
@@ -2117,11 +2123,13 @@ impl<'a> AgentService<'a> {
                     && (user_config.tool_memory_enabled || !used_mcp_tool)
                 {
                     let turn_messages = self.core.messages(session.id).unwrap_or_default();
+                    let successful_candidate = &candidates[completed_candidate_index];
+                    let successful_provider = open_provider(successful_candidate)?;
                     self.record_local_memories(
                         &session,
-                        &provider,
-                        primary_candidate.trust_level,
-                        &session.model,
+                        &successful_provider,
+                        successful_candidate.trust_level,
+                        successful_candidate.model_for(&session.model),
                         &turn_messages,
                         stream_idle,
                         on_event,
@@ -2251,6 +2259,7 @@ impl<'a> AgentService<'a> {
         session: &Session,
         provider: &OpenAiCompatibleProvider,
         trust_level: ProviderTrustLevel,
+        model: &str,
         history: &[Message],
         stream_idle: Duration,
         on_event: &mut F,
@@ -2276,7 +2285,7 @@ impl<'a> AgentService<'a> {
                 session,
                 provider,
                 trust_level,
-                &session.model,
+                model,
                 usable_compaction(&existing, history),
                 &history[existing_count..target_count],
                 stream_idle,
@@ -2376,9 +2385,10 @@ impl<'a> AgentService<'a> {
         {
             Ok(stream) => stream,
             Err(error) => {
-                self.emit_model_call(
+                self.emit_model_call_for_model(
                     on_event,
                     session,
+                    model,
                     &endpoint,
                     "context_compaction",
                     0,
@@ -2397,9 +2407,10 @@ impl<'a> AgentService<'a> {
             let event = match tokio::time::timeout(stream_idle, stream.next()).await {
                 Ok(Some(Ok(event))) => event,
                 Ok(Some(Err(error))) => {
-                    self.emit_model_call(
+                    self.emit_model_call_for_model(
                         on_event,
                         session,
+                        model,
                         &endpoint,
                         "context_compaction",
                         0,
@@ -2418,9 +2429,10 @@ impl<'a> AgentService<'a> {
                         "context compaction stream was idle for {} seconds",
                         stream_idle.as_secs()
                     )));
-                    self.emit_model_call(
+                    self.emit_model_call_for_model(
                         on_event,
                         session,
+                        model,
                         &endpoint,
                         "context_compaction",
                         0,
@@ -2445,9 +2457,10 @@ impl<'a> AgentService<'a> {
         let summary = truncate_summary_text(summary.trim(), MAX_CONTEXT_SUMMARY_CHARS);
         if summary.trim().is_empty() {
             let error = AgentError::EmptyProviderResponse;
-            self.emit_model_call(
+            self.emit_model_call_for_model(
                 on_event,
                 session,
+                model,
                 &endpoint,
                 "context_compaction",
                 0,
@@ -2460,10 +2473,11 @@ impl<'a> AgentService<'a> {
             );
             return Err(error);
         }
-        self.emit_model_call(
-            on_event,
-            session,
-            &endpoint,
+            self.emit_model_call_for_model(
+                on_event,
+                session,
+                model,
+                &endpoint,
             "context_compaction",
             0,
             1,
@@ -2520,9 +2534,10 @@ impl<'a> AgentService<'a> {
         {
             Ok(stream) => stream,
             Err(error) => {
-                self.emit_model_call(
+                self.emit_model_call_for_model(
                     on_event,
                     session,
+                    model,
                     &endpoint,
                     "memory_extraction",
                     0,
@@ -2547,9 +2562,10 @@ impl<'a> AgentService<'a> {
                     | ProviderEvent::Usage(_),
                 ))) => {}
                 Ok(Some(Err(error))) => {
-                    self.emit_model_call(
+                    self.emit_model_call_for_model(
                         on_event,
                         session,
+                        model,
                         &endpoint,
                         "memory_extraction",
                         0,
@@ -2564,9 +2580,10 @@ impl<'a> AgentService<'a> {
                 }
                 Ok(None) => break,
                 Err(_) => {
-                    self.emit_model_call(
+                    self.emit_model_call_for_model(
                         on_event,
                         session,
+                        model,
                         &endpoint,
                         "memory_extraction",
                         0,
@@ -2593,9 +2610,10 @@ impl<'a> AgentService<'a> {
                 );
             }
         }
-        self.emit_model_call(
+        self.emit_model_call_for_model(
             on_event,
             session,
+            model,
             &endpoint,
             "memory_extraction",
             0,
@@ -2709,10 +2727,11 @@ impl<'a> AgentService<'a> {
         (!description.is_empty()).then(|| description.to_owned())
     }
 
-    fn emit_model_call<F>(
+    fn emit_model_call_for_model<F>(
         &self,
         on_event: &mut F,
         session: &Session,
+        effective_model: &str,
         endpoint: &str,
         purpose: &str,
         round: u32,
@@ -2728,6 +2747,7 @@ impl<'a> AgentService<'a> {
         self.emit_model_call_with_reported(
             on_event,
             session,
+            effective_model,
             endpoint,
             purpose,
             round,
@@ -2745,6 +2765,7 @@ impl<'a> AgentService<'a> {
         &self,
         on_event: &mut F,
         session: &Session,
+        effective_model: &str,
         endpoint: &str,
         purpose: &str,
         round: u32,
@@ -2764,6 +2785,7 @@ impl<'a> AgentService<'a> {
                 session_id: session.id,
                 provider: session.provider.clone(),
                 model: session.model.clone(),
+                effective_model: effective_model.to_owned(),
                 endpoint: endpoint.to_owned(),
                 purpose: purpose.to_owned(),
                 round,

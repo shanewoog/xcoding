@@ -4074,6 +4074,9 @@ export function App() {
                   <dl className="model-log-meta">
                     <div><dt>{t(locale, "logs.provider")}</dt><dd>{event.provider}</dd></div>
                     <div><dt>{t(locale, "logs.model")}</dt><dd>{event.model}</dd></div>
+                    {event.effective_model && event.effective_model !== event.model ? (
+                      <div><dt>{t(locale, "logs.effectiveModel")}</dt><dd>{event.effective_model}</dd></div>
+                    ) : null}
                     <div><dt>{t(locale, "logs.endpoint")}</dt><dd>{event.endpoint}</dd></div>
                     <div><dt>{t(locale, "logs.attempt")}</dt><dd>{event.attempt} / {event.max_attempts}</dd></div>
                     {!isCompaction ? <div><dt>{t(locale, "logs.round")}</dt><dd>{event.round}</dd></div> : null}

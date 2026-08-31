@@ -134,7 +134,8 @@ One logical model can be spread across independent providers. Under **Settings â
 
 - One decision per user turn: smooth weighted round-robin picks a route, then the provider's own key rotation picks a key. A single request goes out; answers are never fanned out or merged across providers.
 - Failover order is other keys of the same provider first, then the next route. Cooldown and refusal rules match the single-provider key pool.
-- `model_override` rewrites only the `model` field sent to that provider, for relays that alias the same model. Sessions and logs keep the logical model name.
+- `model_override` rewrites only the `model` field sent to that provider, for relays that alias the same model. Sessions keep the logical model name, and logs record both the logical name and the model actually sent upstream.
+- The override applies to every upstream call of the turn, including the context-compaction and memory-extraction helpers, so an auxiliary call can never leak the logical model name to a relay that rejects it.
 - Routes never cross trust levels: a provider whose `trust_level` differs from the level in use is marked **Trust level mismatch** and skipped. Confidential-content blocking and relay tool confirmation are unchanged.
 - Weight `0` or an unchecked route stays configured but out of rotation. Models without routes keep using the active provider and its fallbacks.
 - Each route shows its state (ready / out of rotation / provider missing / no usable key / all keys rejected / cooling down / trust level mismatch). Logs carry the logical model name, provider id, key id, weight, and result.

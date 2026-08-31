@@ -20,6 +20,7 @@ async function main() {
   await assertBalancesOneModelAcrossProviders();
   await assertRoutingLeavesAProviderWhoseKeysAreRejected();
   await assertRouteOverrideRequestsTheUpstreamAlias();
+  await assertRouteOverrideAppliesToAuxiliaryCalls();
   await assertSupportsMoreThanElevenToolRounds();
   await assertSkipsModelIncompatibleProviderWithinSession();
   await assertReconnectAfterSseDisconnect();
@@ -407,7 +408,7 @@ async function assertRotatesToAnotherKeyOfTheSameProvider() {
 
 // Baseline config for the multi-provider routing cases: one logical model, a
 // weighted route per provider, no legacy fallback so only the routes decide.
-function routingConfig({ providers, routes, activeProviderId }) {
+function routingConfig({ providers, routes, activeProviderId, overrides = {} }) {
   return {
     locale: "en",
     mode: "ask",
@@ -426,6 +427,7 @@ function routingConfig({ providers, routes, activeProviderId }) {
     providers,
     active_provider_id: activeProviderId,
     model_routes: { "fixture-model": routes },
+    ...overrides,
   };
 }
 
@@ -617,6 +619,114 @@ async function assertRouteOverrideRequestsTheUpstreamAlias() {
     await rm(databaseDirectory, { recursive: true, force: true });
     await rm(homeDirectory, { recursive: true, force: true });
   }
+}
+
+// A route override has to reach every call of the turn, not just the visible
+// chat request: an upstream that only knows the aliased id must never receive
+// the logical model name from context compaction or memory extraction.
+async function assertRouteOverrideAppliesToAuxiliaryCalls() {
+  const padding = "x".repeat(4_000);
+  const relay = await startFlakyProvider({
+    succeedAfter: 1,
+    alwaysStatus: 503,
+    rejectedModels: ["fixture-model"],
+  });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-alias-aux-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-route-alias-aux-home-"));
+  await writeRoutingConfig(
+    homeDirectory,
+    routingConfig({
+      activeProviderId: "relay",
+      providers: [
+        {
+          id: "relay",
+          name: "Relay",
+          base_url: relay.baseUrl,
+          trust_level: "official",
+          api_key: "relay-test-key",
+        },
+      ],
+      routes: [
+        { provider_id: "relay", weight: 1, enabled: true, model_override: "upstream-alias-model" },
+      ],
+      overrides: {
+        local_memory_enabled: true,
+        tool_memory_enabled: true,
+        model_context_windows: { "fixture-model": 24_000 },
+        context_compaction_threshold_percent: 50,
+      },
+    }),
+  );
+  const rpc = startRoutingRpcClient(databaseDirectory, homeDirectory);
+
+  try {
+    const first = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: `Open the session. ${padding}`,
+      model: "fixture-model",
+    });
+    assert.equal(first.session.status, "done");
+
+    // More turns push the history past the recent-message floor, so the small
+    // window plus the lowest threshold makes compaction fire.
+    for (let turn = 2; turn <= 10; turn += 1) {
+      const result = await rpc.request("session.chat", {
+        workspace_root: fixtureRoot,
+        message: `Turn ${turn}. ${padding}`,
+        model: "fixture-model",
+        session_id: first.session.id,
+      });
+      assert.equal(result.session.status, "done");
+    }
+
+    const wrongModel = relay.requests.filter((request) => request.model !== "upstream-alias-model");
+    assert.deepEqual(
+      wrongModel.map((request) => request.model),
+      [],
+      "every upstream call of a routed model must carry the override id",
+    );
+    const promptOf = (request) => systemPromptText(request);
+    assert.ok(
+      relay.requests.some((request) => /You compact earlier history/.test(promptOf(request))),
+      "the run should have compacted history with the routed override",
+    );
+    assert.ok(
+      relay.requests.some((request) => /You extract durable project facts/.test(promptOf(request))),
+      "memory extraction should have run with the routed override",
+    );
+    const aliasLogs = await persistedModelCallEvents(rpc, first.session.id);
+    assert.ok(aliasLogs.length > 0, "the session should have persisted model call logs");
+    for (const event of aliasLogs) {
+      assert.equal(event.model, "fixture-model", "logs must keep the logical model name");
+      assert.equal(
+        event.effective_model,
+        "upstream-alias-model",
+        "logs must also record the model actually sent upstream",
+      );
+    }
+  } finally {
+    await rpc.close();
+    await relay.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+function systemPromptText(request) {
+  const first = request.messages?.[0];
+  if (!first) {
+    return "";
+  }
+  if (typeof first.content === "string") {
+    return first.content;
+  }
+  if (!Array.isArray(first.content)) {
+    return "";
+  }
+  return first.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
 }
 
 async function assertSupportsMoreThanElevenToolRounds() {
@@ -991,6 +1101,8 @@ function startRpcClient({ databasePath, environment }) {
  * succeedAfter: 1-based attempt number that starts returning SSE success.
  * null means never succeed.
  * rejectedApiKeys: bearer values answered with 401 regardless of attempt count.
+ * rejectedModels: model ids answered with a model-not-found error, which is how
+ * an upstream that only knows the aliased model id behaves.
  */
 async function startFlakyProvider({
   succeedAfter,
@@ -1001,6 +1113,7 @@ async function startFlakyProvider({
   toolRoundsBeforeAnswer = 0,
   errorBody = { error: { message: "temporary upstream failure", type: "server_error" } },
   rejectedApiKeys = [],
+  rejectedModels = [],
 }) {
   const requests = [];
   const bearers = [];
@@ -1009,7 +1122,8 @@ async function startFlakyProvider({
     for await (const chunk of request) {
       chunks.push(chunk);
     }
-    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(payload);
     const bearer = (request.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
     bearers.push(bearer);
     const attempt = requests.length;
@@ -1018,6 +1132,15 @@ async function startFlakyProvider({
     if (rejectedApiKeys.includes(bearer)) {
       response.writeHead(401, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: "invalid api key", type: "invalid_request_error" } }));
+      return;
+    }
+    if (rejectedModels.includes(payload.model)) {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          error: { message: `The model \`${payload.model}\` does not exist`, type: "invalid_request_error" },
+        }),
+      );
       return;
     }
     // Streams a visible answer prefix and then drops the connection, which is how

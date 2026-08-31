@@ -555,6 +555,8 @@ export type SessionEvent =
       session_id: string;
       provider: string;
       model: string;
+      /** Model identifier actually sent to the upstream endpoint. */
+      effective_model?: string;
       endpoint: string;
       purpose: string;
       round: number;

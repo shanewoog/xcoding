@@ -1058,7 +1058,12 @@ pub enum SessionEvent {
     ModelCall {
         session_id: Uuid,
         provider: String,
+        /// Logical model selected for the session.
         model: String,
+        /// Model identifier sent to the upstream endpoint. This differs from
+        /// `model` when a provider route defines a model override.
+        #[serde(default)]
+        effective_model: String,
         endpoint: String,
         purpose: String,
         round: u32,
