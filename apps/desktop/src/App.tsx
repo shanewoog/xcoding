@@ -1952,6 +1952,14 @@ export function App() {
       if (updateComposerModels) setModelsLoading(false);
     }
   }, [activeProvider, locale, maskApiKeyHint]);
+  // Routing rows can point at providers the user never opened, so fetch their
+  // model list on demand instead of preloading every provider on first paint.
+  const ensureProviderModels = useCallback((provider: CloudProviderConfig | null | undefined): void => {
+    if (!provider) return;
+    if ((providerModelsById[provider.id] ?? []).length > 0) return;
+    if (providerModelsLoadingById[provider.id]) return;
+    void refreshModels({ provider, updateComposerModels: false, silent: true });
+  }, [providerModelsById, providerModelsLoadingById, refreshModels]);
   const loadWorkspaceConfig = useCallback(async () => {
     const root = workspaceRoot.trim();
     if (!isTauriRuntime || !root) return;
@@ -4061,25 +4069,38 @@ export function App() {
           ) : (
             modelCallLogs.slice().reverse().map((item) => {
               const event = item.event;
-              const isCompaction = event.purpose === "context_compaction";
+              const purposeKey: MessageKey =
+                event.purpose === "context_compaction"
+                  ? "logs.purpose.contextCompaction"
+                  : event.purpose === "memory_extraction"
+                    ? "logs.purpose.memoryExtraction"
+                    : "logs.purpose.chat";
+              // Only chat requests run inside the tool-round loop, so the round
+              // number is meaningless for the auxiliary calls.
+              const showRound = event.purpose !== "context_compaction" && event.purpose !== "memory_extraction";
+              const providerLabel = event.provider_name?.trim() || event.provider;
               return (
                 <article className={`model-log-card ${event.success ? "success" : "failure"}`} key={item.id}>
                   <div className="model-log-card-header">
                     <div>
                       <strong>{event.success ? t(locale, "logs.success") : t(locale, "logs.failure")}</strong>
-                      <span>{isCompaction ? t(locale, "logs.purpose.contextCompaction") : t(locale, "logs.purpose.chat")}</span>
+                      <span>{t(locale, purposeKey)}</span>
                     </div>
                     <time dateTime={item.created_at}>{formatModelCallTime(item.created_at, locale)}</time>
                   </div>
                   <dl className="model-log-meta">
-                    <div><dt>{t(locale, "logs.provider")}</dt><dd>{event.provider}</dd></div>
+                    <div><dt>{t(locale, "logs.provider")}</dt><dd>{providerLabel}</dd></div>
+                    {event.key_hint ? (
+                      <div><dt>{t(locale, "logs.credential")}</dt><dd>{event.key_hint}</dd></div>
+                    ) : null}
+                    <div><dt>{t(locale, "logs.protocol")}</dt><dd>{event.provider}</dd></div>
                     <div><dt>{t(locale, "logs.model")}</dt><dd>{event.model}</dd></div>
                     {event.effective_model && event.effective_model !== event.model ? (
                       <div><dt>{t(locale, "logs.effectiveModel")}</dt><dd>{event.effective_model}</dd></div>
                     ) : null}
                     <div><dt>{t(locale, "logs.endpoint")}</dt><dd>{event.endpoint}</dd></div>
                     <div><dt>{t(locale, "logs.attempt")}</dt><dd>{event.attempt} / {event.max_attempts}</dd></div>
-                    {!isCompaction ? <div><dt>{t(locale, "logs.round")}</dt><dd>{event.round}</dd></div> : null}
+                    {showRound ? <div><dt>{t(locale, "logs.round")}</dt><dd>{event.round}</dd></div> : null}
                     {event.success ? (
                       <div><dt>{t(locale, "logs.output")}</dt><dd>{t(locale, "logs.outputSummary", { chars: event.output_chars, tools: event.tool_calls })}</dd></div>
                     ) : null}
@@ -4547,6 +4568,12 @@ export function App() {
                               : routeStatus?.state === "trust_mismatch"
                                 ? "routeState.trustMismatch"
                                 : "routeState.ready";
+                    const routeProvider = providers.find((item) => item.id === entry.providerId) ?? null;
+                    const routeProviderModels = providerModelsById[entry.providerId] ?? [];
+                    const routeOverrideListId = `model-route-override-list-${entry.id}`;
+                    const routeOverrideHint = providerModelsLoadingById[entry.providerId]
+                      ? t(locale, "auth.checking")
+                      : providerModelErrorsById[entry.providerId] || "";
                     return (
                       <div className="model-route-entry" key={entry.id}>
                         <div className={`model-route-row ${entry.enabled ? "" : "disabled"}`}>
@@ -4562,7 +4589,11 @@ export function App() {
                           <select
                             className="model-route-provider"
                             value={entry.providerId}
-                            onChange={(event) => updateModelRouteEntry(entry.id, { providerId: event.target.value })}
+                            onChange={(event) => {
+                              const nextProviderId = event.target.value;
+                              updateModelRouteEntry(entry.id, { providerId: nextProviderId });
+                              ensureProviderModels(providers.find((item) => item.id === nextProviderId));
+                            }}
                             disabled={anySessionRunning || isSavingConfig}
                             aria-label={t(locale, "field.routeProvider")}
                           >
@@ -4577,13 +4608,20 @@ export function App() {
                           </select>
                           <input
                             className="model-route-override"
+                            list={routeOverrideListId}
                             value={entry.modelOverride}
                             onChange={(event) => updateModelRouteEntry(entry.id, { modelOverride: event.target.value })}
+                            onFocus={() => ensureProviderModels(routeProvider)}
                             disabled={anySessionRunning || isSavingConfig}
                             spellCheck={false}
                             placeholder={t(locale, "field.routeOverridePlaceholder")}
                             aria-label={t(locale, "field.routeOverride")}
                           />
+                          <datalist id={routeOverrideListId}>
+                            {routeProviderModels.map((item) => (
+                              <option value={item.id} key={item.id} />
+                            ))}
+                          </datalist>
                           <input
                             className="model-route-weight"
                             type="number"
@@ -4629,6 +4667,9 @@ export function App() {
                             </span>
                             <span className="model-route-effective">{routeStatus.effective_model}</span>
                           </div>
+                        ) : null}
+                        {routeOverrideHint ? (
+                          <small className="model-route-hint">{routeOverrideHint}</small>
                         ) : null}
                       </div>
                     );

@@ -132,13 +132,17 @@ One logical model can be spread across independent providers. Under **Settings â
 }
 ```
 
-- One decision per user turn: smooth weighted round-robin picks a route, then the provider's own key rotation picks a key. A single request goes out; answers are never fanned out or merged across providers.
+- One decision per upstream request: smooth weighted round-robin picks a route, then the provider's own key rotation picks a key. A single request goes out; answers are never fanned out or merged across providers.
+- Rotation happens per tool round: the first round of a turn reuses the selection made when the turn opened, and every later round rotates again, so even a single question is shared across providers by weight. A mid-turn switch still stays inside the active trust level.
+- Routes with no usable key or an open circuit do not consume a rotation slot, so their weight is never spent on a provider that cannot answer. When no route is usable the original order is kept so the turn still gets one attempt.
 - Failover order is other keys of the same provider first, then the next route. Cooldown and refusal rules match the single-provider key pool.
 - `model_override` rewrites only the `model` field sent to that provider, for relays that alias the same model. Sessions keep the logical model name, and logs record both the logical name and the model actually sent upstream.
+- The upstream-model field offers a dropdown of models already fetched from that row's provider; the fetch happens on focus or provider change, not on first paint. Leave it empty to reuse the logical model name, or type an alias that is not in the list.
 - The override applies to every upstream call of the turn, including the context-compaction and memory-extraction helpers, so an auxiliary call can never leak the logical model name to a relay that rejects it.
 - Routes never cross trust levels: a provider whose `trust_level` differs from the level in use is marked **Trust level mismatch** and skipped. Confidential-content blocking and relay tool confirmation are unchanged.
 - Weight `0` or an unchecked route stays configured but out of rotation. Models without routes keep using the active provider and its fallbacks.
 - Each route shows its state (ready / out of rotation / provider missing / no usable key / all keys rejected / cooling down / trust level mismatch). Logs carry the logical model name, provider id, key id, weight, and result.
+- Model call logs separate **Provider** (the configured display name), **Credential** (masked tail only), and **Wire protocol** (the protocol name, for example `openai`). Context compaction and memory extraction each get their own label.
 
 ## Environment Doctor
 

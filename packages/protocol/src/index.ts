@@ -554,6 +554,12 @@ export type SessionEvent =
       type: "model_call";
       session_id: string;
       provider: string;
+      /** Configured id of the provider that served the request. */
+      provider_id?: string;
+      /** Display name of the provider that served the request. */
+      provider_name?: string;
+      /** Masked credential tail, never the credential itself. */
+      key_hint?: string;
       model: string;
       /** Model identifier actually sent to the upstream endpoint. */
       effective_model?: string;
@@ -566,6 +572,8 @@ export type SessionEvent =
       output_chars: number;
       tool_calls: number;
       error?: string;
+      /** Model identifier reported back by the upstream, when it sent one. */
+      model_reported?: string;
     }
   | {
       type: "vision_delegate_start";

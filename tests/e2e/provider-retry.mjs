@@ -18,6 +18,7 @@ async function main() {
   await assertFallsBackToAnotherConfiguredProvider();
   await assertRotatesToAnotherKeyOfTheSameProvider();
   await assertBalancesOneModelAcrossProviders();
+  await assertRotatesProvidersAcrossToolRoundsOfOneTurn();
   await assertRoutingLeavesAProviderWhoseKeysAreRejected();
   await assertRouteOverrideRequestsTheUpstreamAlias();
   await assertRouteOverrideAppliesToAuxiliaryCalls();
@@ -497,6 +498,66 @@ async function assertBalancesOneModelAcrossProviders() {
     assert.equal(beta.requests.length, 2, "beta should serve half of the equally weighted turns");
     assert.deepEqual(alpha.bearers, ["alpha-test-key", "alpha-test-key"]);
     assert.deepEqual(beta.bearers, ["beta-test-key", "beta-test-key"]);
+  } finally {
+    await rpc.close();
+    await alpha.close();
+    await beta.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertRotatesProvidersAcrossToolRoundsOfOneTurn() {
+  // Each mock answers its own first request with a tool call, so a single turn
+  // needs at least three rounds and cannot finish inside one provider.
+  const alpha = await startFlakyProvider({ succeedAfter: 1, alwaysStatus: 503, toolRoundsBeforeAnswer: 1 });
+  const beta = await startFlakyProvider({ succeedAfter: 1, alwaysStatus: 503, toolRoundsBeforeAnswer: 1 });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-round-balance-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-round-balance-home-"));
+  await writeRoutingConfig(
+    homeDirectory,
+    routingConfig({
+      activeProviderId: "alpha",
+      providers: [
+        {
+          id: "alpha",
+          name: "Alpha",
+          base_url: alpha.baseUrl,
+          trust_level: "official",
+          api_key: "alpha-test-key",
+        },
+        {
+          id: "beta",
+          name: "Beta",
+          base_url: beta.baseUrl,
+          trust_level: "official",
+          api_key: "beta-test-key",
+        },
+      ],
+      routes: [
+        { provider_id: "alpha", weight: 1, enabled: true },
+        { provider_id: "beta", weight: 1, enabled: true },
+      ],
+    }),
+  );
+  const rpc = startRoutingRpcClient(databaseDirectory, homeDirectory);
+
+  try {
+    const result = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Inspect twice, then answer.",
+      model: "fixture-model",
+    });
+    assert.equal(result.session.status, "done");
+    assert.match(result.message?.content ?? "", /hello after retries/i);
+    // Equal weights have to spread the rounds of one turn instead of pinning
+    // every round of the turn to the provider that opened it.
+    assert.ok(alpha.requests.length > 0, "alpha should serve part of the turn");
+    assert.ok(beta.requests.length > 0, "beta should serve part of the turn");
+    assert.equal(alpha.requests.length + beta.requests.length, 3);
+    const modelCalls = modelCallEvents(rpc.events, result.session.id);
+    assert.equal(modelCalls.length, 3);
+    assert.equal(new Set(modelCalls.map((event) => event.provider_id)).size, 2);
   } finally {
     await rpc.close();
     await alpha.close();

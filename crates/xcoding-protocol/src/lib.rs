@@ -1058,6 +1058,16 @@ pub enum SessionEvent {
     ModelCall {
         session_id: Uuid,
         provider: String,
+        /// Configured id of the provider that served this request. Empty for
+        /// records written before provider identity was recorded.
+        #[serde(default)]
+        provider_id: String,
+        /// Display name of the provider that served this request.
+        #[serde(default)]
+        provider_name: String,
+        /// Masked tail of the credential used, never the credential itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_hint: Option<String>,
         /// Logical model selected for the session.
         model: String,
         /// Model identifier sent to the upstream endpoint. This differs from

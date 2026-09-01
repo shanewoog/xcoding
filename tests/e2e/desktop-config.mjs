@@ -336,6 +336,23 @@ async function main() {
   assert.ok(appSource.includes('t(locale, "action.deleteModelRoute")'), "routing table needs a remove-route action");
   assert.ok(cssSource.includes(".model-route-row"), "styles.css missing routing row layout");
   assert.ok(cssSource.includes(".model-route-status"), "styles.css missing routing health row styles");
+  // The upstream-model field must offer the selected provider's fetched models.
+  assert.ok(
+    appSource.includes("const routeOverrideListId = `model-route-override-list-${entry.id}`"),
+    "routing rows need a per-row datalist id for upstream model suggestions",
+  );
+  assert.ok(
+    appSource.includes("list={routeOverrideListId}"),
+    "upstream model input must bind to its row datalist",
+  );
+  assert.ok(
+    appSource.includes("const routeProviderModels = providerModelsById[entry.providerId] ?? []"),
+    "upstream model suggestions must come from the row provider's fetched models",
+  );
+  assert.ok(
+    appSource.includes("const ensureProviderModels = useCallback("),
+    "routing rows must lazily fetch models for the provider they point at",
+  );
   const routeSaveCount = (appSource.match(/model_routes: modelRouteMapFromEntries\(modelRouteEntries\)/g) || []).length;
   assert.equal(routeSaveCount, 1, "saving settings must submit model_routes exactly once");
   for (const needle of [

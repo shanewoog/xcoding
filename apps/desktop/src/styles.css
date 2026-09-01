@@ -2313,6 +2313,14 @@ input.workspace-missing {
 .model-route-weight {
   text-align: right;
 }
+.model-route-row datalist {
+  display: none;
+}
+.model-route-hint {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  padding-left: 0.2rem;
+}
 .model-route-enabled {
   align-items: center;
   display: flex;
