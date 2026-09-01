@@ -729,7 +729,40 @@ fn messages_contain_sensitive_data_with_key(
     if candidate_key_matches || known_key_matches {
         return true;
     }
-    let lower = serialized.to_ascii_lowercase();
+    guard_text_segments(messages)
+        .iter()
+        .any(|segment| text_contains_sensitive_data(segment))
+}
+
+/// Text the guard inspects: message bodies and tool-call arguments, without
+/// image payloads. The serialized envelope is deliberately not scanned here:
+/// JSON collapses every message onto a single line, where the line-based
+/// heuristics below read unrelated punctuation as a secret assignment.
+fn guard_text_segments(messages: &[ChatMessage]) -> Vec<&str> {
+    let mut segments = Vec::new();
+    for message in messages {
+        match message.content.as_ref() {
+            Some(xcoding_providers::ChatMessageContent::Text(text)) => segments.push(text.as_str()),
+            Some(xcoding_providers::ChatMessageContent::Parts(parts)) => {
+                for part in parts {
+                    if let xcoding_providers::ChatContentPart::Text { text } = part {
+                        segments.push(text.as_str());
+                    }
+                }
+            }
+            None => {}
+        }
+        if let Some(tool_calls) = message.tool_calls.as_ref() {
+            for tool_call in tool_calls {
+                segments.push(tool_call.function.arguments.as_str());
+            }
+        }
+    }
+    segments
+}
+
+fn text_contains_sensitive_data(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
     [
         "-----begin private key-----",
         "-----begin rsa private key-----",
@@ -737,8 +770,8 @@ fn messages_contain_sensitive_data_with_key(
     ]
     .iter()
     .any(|needle| lower.contains(needle))
-        || contains_secret_assignment(&serialized)
-        || serialized.split_whitespace().any(looks_like_credential_token)
+        || contains_secret_assignment(text)
+        || text.split_whitespace().any(looks_like_credential_token)
 }
 
 const SECRET_FIELD_NAMES: [&str; 5] = [
@@ -749,34 +782,127 @@ const SECRET_FIELD_NAMES: [&str; 5] = [
     "authorization: bearer",
 ];
 
+/// Handled separately from the other field names because the value follows the
+/// name directly instead of a further `=` or `:`.
+const BEARER_FIELD_NAME: &str = "authorization: bearer";
+
 fn contains_secret_assignment(text: &str) -> bool {
-    text.lines().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        if let Some(start) = lower.find("authorization: bearer") {
-            let value = line[start + "authorization: bearer".len()..].trim();
-            if !value.is_empty() && value.to_ascii_lowercase() != "redacted" {
-                return true;
-            }
+    text.lines().any(line_contains_secret_assignment)
+}
+
+fn line_contains_secret_assignment(line: &str) -> bool {
+    !secret_value_spans(line).is_empty()
+}
+
+/// Byte ranges on one line that read as live credential values, ordered by
+/// position. The send guard and the redaction path share it, so exactly what is
+/// detected is what gets replaced. Every occurrence of every field name is
+/// considered: a line carrying two assignments must lose both values.
+fn secret_value_spans(line: &str) -> Vec<(usize, usize)> {
+    let lower = line.to_ascii_lowercase();
+    let mut spans = Vec::new();
+    let mut searched = 0usize;
+    while let Some(offset) = lower[searched..].find(BEARER_FIELD_NAME) {
+        let name_end = searched + offset + BEARER_FIELD_NAME.len();
+        let (start, end) = value_span_from(line, name_end);
+        if looks_like_secret_value(&line[start..end]) {
+            spans.push((start, end));
         }
-        SECRET_FIELD_NAMES.iter().any(|name| {
-            if *name == "authorization: bearer" {
-                return false;
+        searched = name_end;
+    }
+    for name in SECRET_FIELD_NAMES {
+        if name == BEARER_FIELD_NAME {
+            continue;
+        }
+        let mut searched = 0usize;
+        while let Some(offset) = lower[searched..].find(name) {
+            let name_end = searched + offset + name.len();
+            if let Some((start, end)) = assignment_value_span(line, name_end) {
+                if looks_like_secret_value(&line[start..end]) {
+                    spans.push((start, end));
+                }
             }
-            let Some(start) = lower.find(name) else {
-                return false;
-            };
-            let rest = &line[start + name.len()..];
-            let Some((_, value)) =
-                rest.split_once(|character: char| character == '=' || character == ':')
-            else {
-                return false;
-            };
-            let value = value
-                .trim()
-                .trim_matches(|character: char| !character.is_ascii_alphanumeric());
-            !value.is_empty() && value.to_ascii_lowercase() != "redacted"
+            searched = name_end;
+        }
+    }
+    spans.sort_by_key(|(start, _)| *start);
+    spans
+}
+
+/// Byte range of the assigned value, so the redaction path can replace exactly
+/// that span instead of everything after the delimiter.
+fn assignment_value_span(line: &str, name_end: usize) -> Option<(usize, usize)> {
+    let rest = &line[name_end..];
+    let delimiter = rest.find(['=', ':'])?;
+    if !rest[..delimiter]
+        .chars()
+        .all(|character| matches!(character, '"' | '\'' | ' ' | '\t'))
+    {
+        return None;
+    }
+    Some(value_span_from(line, name_end + delimiter + 1))
+}
+
+/// Span of the value that starts at `start`, skipping leading whitespace and one
+/// run of opening quotes and stopping at the first separator.
+fn value_span_from(line: &str, start: usize) -> (usize, usize) {
+    let tail = &line[start..];
+    let unpadded = tail.trim_start();
+    let unquoted = unpadded.trim_start_matches(['"', '\'']);
+    let value_start = start + (tail.len() - unquoted.len());
+    let end = unquoted
+        .find(|character: char| {
+            character.is_whitespace() || matches!(character, '"' | '\'' | ',' | ';' | '}' | ')')
         })
+        .unwrap_or(unquoted.len());
+    (value_start, value_start + end)
+}
+
+/// A value only counts as a live credential when it is long enough and made of
+/// characters credentials actually use. Prose that happens to follow the field
+/// name, such as an explanation in any natural language, is not a secret.
+fn looks_like_secret_value(value: &str) -> bool {
+    const MIN_SECRET_VALUE_CHARS: usize = 8;
+    const MAX_CODE_EXPRESSION_CHARS: usize = 32;
+    if value.len() < MIN_SECRET_VALUE_CHARS || is_redacted_placeholder(value) {
+        return false;
+    }
+    if !value.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, '-' | '_' | '.' | '~' | '+' | '/' | '=' | ':')
+    }) {
+        return false;
+    }
+    !(value.len() <= MAX_CODE_EXPRESSION_CHARS && looks_like_code_path(value))
+}
+
+/// Dotted identifier chains such as `candidate.api_key.as_deref` are source
+/// code, not credentials. The length ceiling keeps real tokens that also parse
+/// as dotted identifiers, for example `pk.eyJ...`, on the blocking side.
+fn looks_like_code_path(value: &str) -> bool {
+    if !value.contains('.') {
+        return false;
+    }
+    value.split('.').all(|segment| {
+        let mut characters = segment.chars();
+        match characters.next() {
+            Some(first) => {
+                (first.is_ascii_alphabetic() || first == '_')
+                    && characters
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            }
+            None => false,
+        }
     })
+}
+
+/// Placeholders left behind by the redaction paths. Replayed history is full of
+/// them and they must not read as live credentials.
+fn is_redacted_placeholder(value: &str) -> bool {
+    value
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+        .to_ascii_lowercase()
+        .starts_with("redacted")
 }
 
 fn looks_like_credential_token(part: &str) -> bool {
@@ -836,55 +962,27 @@ fn redact_sensitive_text_output(output: &str) -> String {
         .join("\n")
 }
 
+/// Replaces every credential value on the line, using the same spans the send
+/// guard blocks on. Sharing the spans keeps the two paths from disagreeing:
+/// anything redacted here would also have been blocked, and prose that the guard
+/// lets through is left untouched instead of being rewritten.
 fn redact_sensitive_text_assignments(line: &str) -> String {
-    let lower = line.to_ascii_lowercase();
-    if let Some(name_start) = lower.find("authorization: bearer") {
-        let value_start = name_start + "authorization: bearer".len();
-        let value = line[value_start..].trim_start();
-        let leading_whitespace = line[value_start..].len() - value.len();
-        let value_start = value_start + leading_whitespace;
-        if !value.is_empty() {
-            let value_end = value
-                .find(|character: char| character.is_whitespace() || matches!(character, ',' | ';'))
-                .map(|offset| value_start + offset)
-                .unwrap_or(line.len());
-            return format!(
-                "{}[REDACTED]{}",
-                &line[..value_start],
-                &line[value_end..]
-            );
+    let spans = secret_value_spans(line);
+    if spans.is_empty() {
+        return line.to_owned();
+    }
+    let mut redacted = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for (start, end) in spans {
+        if start < cursor {
+            continue;
         }
+        redacted.push_str(&line[cursor..start]);
+        redacted.push_str("[REDACTED]");
+        cursor = end;
     }
-    let Some((name_start, name)) = SECRET_FIELD_NAMES.iter().find_map(|name| {
-        lower.find(name).map(|start| (start, *name))
-    }) else {
-        return line.to_owned();
-    };
-    let rest_start = name_start + name.len();
-    let rest = &line[rest_start..];
-    let Some(delimiter_offset) = rest.find(['=', ':']) else {
-        return line.to_owned();
-    };
-    let value_start = rest_start + delimiter_offset + 1;
-    let value = line[value_start..].trim_start();
-    let leading_whitespace = line[value_start..].len() - value.len();
-    let value_start = value_start + leading_whitespace;
-    if value.starts_with('"') {
-        let Some(value_end) = value[1..].find('"') else {
-            return line.to_owned();
-        };
-        let value_end = value_start + 1 + value_end;
-        return format!(
-            "{}\"[REDACTED]\"{}",
-            &line[..value_start],
-            &line[value_end + 1..]
-        );
-    }
-    let value_end = value
-        .find(|character: char| character.is_whitespace() || matches!(character, ',' | ';'))
-        .map(|offset| value_start + offset)
-        .unwrap_or(line.len());
-    format!("{}[REDACTED]{}", &line[..value_start], &line[value_end..])
+    redacted.push_str(&line[cursor..]);
+    redacted
 }
 
 fn redact_sensitive_json_value(value: &mut serde_json::Value, sensitive_key: bool) {
@@ -5369,6 +5467,131 @@ mod tests {
     }
 
     #[test]
+    fn relay_guard_allows_conversation_that_only_names_secret_fields() {
+        assert!(!messages_contain_sensitive_data(&[
+            ChatMessage::user("Why does the config field api_key matter here?"),
+            ChatMessage::assistant("It only names the credential; values stay local."),
+        ]));
+    }
+
+    #[test]
+    fn relay_guard_allows_already_redacted_tool_output_in_history() {
+        assert!(!messages_contain_sensitive_data(&[
+            ChatMessage::assistant(
+                "Previously recorded tool output: {\"api_key\":\"[REDACTED]\",\"note\":\"api_key is required\"}",
+            ),
+            ChatMessage::user("Continue with step two."),
+        ]));
+    }
+
+    #[test]
+    fn relay_guard_still_blocks_real_secret_later_in_history() {
+        assert!(messages_contain_sensitive_data(&[
+            ChatMessage::user("Please explain this Rust function."),
+            ChatMessage::user("api_key=sk-09876543210987654321"),
+        ]));
+    }
+
+    /// Regression: the guard used to scan the serialized envelope, where every
+    /// message collapses onto one line and a JSON structural colon looked like
+    /// the assignment for any earlier `api_key` mention.
+    #[test]
+    fn relay_guard_does_not_treat_json_envelope_punctuation_as_an_assignment() {
+        assert!(!messages_contain_sensitive_data(&[
+            ChatMessage::user("Find out why api_key reaches the model context."),
+            ChatMessage::assistant("Step 1/3: inspect the workspace files."),
+            ChatMessage::user("Keep going."),
+        ]));
+    }
+
+    #[test]
+    fn relay_guard_inspects_tool_call_arguments() {
+        let call = ProviderToolCall {
+            id: "call-1".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "write_file".to_owned(),
+                arguments: "{\"content\":\"api_key=sk-11112222333344445555\"}".to_owned(),
+            },
+            truncated: false,
+        };
+        assert!(messages_contain_sensitive_data(&[
+            ChatMessage::assistant_tool_calls(vec![call]),
+        ]));
+    }
+
+    /// An image message carries its prompt in a text part, which the guard must
+    /// still inspect even though the image payload itself is skipped.
+    #[test]
+    fn relay_guard_inspects_text_parts_of_image_messages() {
+        let images = [("image/png".to_owned(), "aGVsbG8=".to_owned())];
+        assert!(messages_contain_sensitive_data(&[
+            ChatMessage::user_with_images("api_key=sk-44445555666677778888", &images),
+        ]));
+        assert!(!messages_contain_sensitive_data(&[
+            ChatMessage::user_with_images("Explain the api_key handling in this screenshot", &images),
+        ]));
+    }
+
+    /// Prose after a field name is not a credential, in any language.
+    #[test]
+    fn relay_guard_allows_prose_after_a_secret_field_name() {
+        assert!(!messages_contain_sensitive_data(&[ChatMessage::user(
+            "api_key: this is only the field name, values stay local",
+        )]));
+        assert!(!messages_contain_sensitive_data(&[ChatMessage::user(
+            "access_token: never leaves the machine",
+        )]));
+    }
+
+    /// Reviewing this repository must not trip the guard on its own source.
+    #[test]
+    fn relay_guard_allows_source_lines_that_reference_credential_fields() {
+        assert!(!messages_contain_sensitive_data(&[ChatMessage::user(
+            "messages_contain_sensitive_data_with_key(&messages, candidate.api_key.as_deref())",
+        )]));
+        assert!(!messages_contain_sensitive_data(&[ChatMessage::user(
+            "if let Some(key) = config.api_key.as_deref().map(str::trim) {",
+        )]));
+    }
+
+    /// Narrowing the guard to message bodies must not let a real credential
+    /// through inside a single-line JSON payload.
+    #[test]
+    fn relay_guard_blocks_real_credentials_inside_single_line_json() {
+        assert!(messages_contain_sensitive_data(&[ChatMessage::user(
+            "{\"path\":\"config.env\",\"content\":\"api_key=live-credential-value\"}",
+        )]));
+        assert!(messages_contain_sensitive_data(&[ChatMessage::user(
+            "Authorization: Bearer live-bearer-credential",
+        )]));
+    }
+
+    /// The transcript that first reported `SensitiveDataBlocked`: a task about
+    /// credential handling, quoting curl headers, source lines, and redacted
+    /// history. None of it carries a live credential.
+    #[test]
+    fn relay_guard_allows_the_credential_investigation_transcript() {
+        assert!(!messages_contain_sensitive_data(&[
+            ChatMessage::user(
+                "Step 1/3: inspect the workspace files and find why an api_key reaches the model context.",
+            ),
+            ChatMessage::user(
+                "curl -H \"x-api-key: $NEW_API_KEY\" -H \"anthropic-version: 2023-06-01\" https://example.test/v1/messages",
+            ),
+            ChatMessage::assistant(
+                "The guard is called as messages_contain_sensitive_data_with_key(&messages, candidate.api_key.as_deref()).",
+            ),
+            ChatMessage::assistant(
+                "Previously recorded tool output: {\"providers\":[{\"id\":\"relay\",\"api_key\":\"[REDACTED]\"}]}",
+            ),
+            ChatMessage::user(
+                "- api_key: the field name only; values must stay in ~/.xcoding/config.json",
+            ),
+        ]));
+    }
+
+    #[test]
     fn tool_output_redacts_values_but_preserves_field_names() {
         let output = r#"{"api_key":"sk-12345678901234567890","note":"api_key is required"}
 Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature
@@ -5404,6 +5627,43 @@ private material
         assert!(!content.contains("plain-bearer-value"));
         assert!(content.contains("api_key=[REDACTED]"));
         assert!(content.contains("Authorization: Bearer [REDACTED]"));
+    }
+
+    /// The redaction path used to stop at the first field name, so a second
+    /// credential on the same line survived.
+    #[test]
+    fn tool_output_redacts_every_assignment_on_one_line() {
+        let redacted = redact_sensitive_text_assignments(
+            "api_key=first-secret-value client_secret=second-secret-value",
+        );
+        assert!(!redacted.contains("first-secret-value"));
+        assert!(!redacted.contains("second-secret-value"));
+        assert_eq!(redacted.matches("[REDACTED]").count(), 2);
+        assert!(redacted.contains("api_key=[REDACTED]"));
+        assert!(redacted.contains("client_secret=[REDACTED]"));
+    }
+
+    /// Redaction must agree with the send guard: text the guard lets through is
+    /// not a credential and must be preserved verbatim.
+    #[test]
+    fn tool_output_leaves_prose_and_source_references_untouched() {
+        for line in [
+            "api_key: this is only the field name, values stay local",
+            "messages_contain_sensitive_data_with_key(&messages, candidate.api_key.as_deref())",
+            "{\"api_key\":\"[REDACTED]\",\"note\":\"api_key is required\"}",
+        ] {
+            assert_eq!(redact_sensitive_text_assignments(line), line);
+            assert!(!line_contains_secret_assignment(line));
+        }
+    }
+
+    /// Quoted values keep their quotes, so redacted JSON stays parseable when the
+    /// text path handles a line that is not valid JSON on its own.
+    #[test]
+    fn tool_output_redaction_keeps_quotes_around_the_value() {
+        let redacted =
+            redact_sensitive_text_assignments("  \"api_key\": \"sk-12345678901234567890\",");
+        assert_eq!(redacted, "  \"api_key\": \"[REDACTED]\",");
     }
 
     #[test]
