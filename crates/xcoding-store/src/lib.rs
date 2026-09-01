@@ -30,6 +30,15 @@ pub struct SessionStore {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RedactionReport {
+    pub messages_scanned: usize,
+    pub messages_redacted: usize,
+    pub events_redacted: usize,
+    pub compactions_redacted: usize,
+    pub memories_redacted: usize,
+}
+
 /// A cached delegate description plus the delegate model that produced it.
 #[derive(Debug, Clone)]
 pub struct StoredVisionDescription {
@@ -91,6 +100,105 @@ impl SessionStore {
         let store = Self { connection };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<(), StoreError> {
+        let path = path.as_ref();
+        if path.exists() {
+            return Err(StoreError::InvalidInput(format!(
+                "backup path already exists: {}",
+                path.display()
+            )));
+        }
+        let path = path.to_string_lossy().replace('\'', "''");
+        self.connection
+            .execute_batch(&format!("VACUUM INTO '{}'", path))?;
+        Ok(())
+    }
+
+    pub fn redact_historical_secrets(
+        &self,
+        redact: &dyn Fn(&str) -> String,
+    ) -> Result<RedactionReport, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut report = RedactionReport::default();
+
+        {
+            let mut statement = transaction.prepare("SELECT id, content FROM messages")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, content) = row?;
+                report.messages_scanned += 1;
+                let redacted = redact(&content);
+                if redacted != content {
+                    transaction.execute(
+                        "UPDATE messages SET content = ?1 WHERE id = ?2",
+                        params![redacted, id],
+                    )?;
+                    report.messages_redacted += 1;
+                }
+            }
+        }
+
+        {
+            let mut statement = transaction.prepare("SELECT id, event FROM session_events")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, content) = row?;
+                let redacted = redact(&content);
+                if redacted != content {
+                    transaction.execute(
+                        "UPDATE session_events SET event = ?1 WHERE id = ?2",
+                        params![redacted, id],
+                    )?;
+                    report.events_redacted += 1;
+                }
+            }
+        }
+
+        {
+            let mut statement =
+                transaction.prepare("SELECT session_id, summary FROM context_compactions")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (session_id, content) = row?;
+                let redacted = redact(&content);
+                if redacted != content {
+                    transaction.execute(
+                        "UPDATE context_compactions SET summary = ?1 WHERE session_id = ?2",
+                        params![redacted, session_id],
+                    )?;
+                    report.compactions_redacted += 1;
+                }
+            }
+        }
+
+        {
+            let mut statement = transaction.prepare("SELECT id, content FROM local_memories")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, content) = row?;
+                let redacted = redact(&content);
+                if redacted != content {
+                    transaction.execute(
+                        "UPDATE local_memories SET content = ?1 WHERE id = ?2",
+                        params![redacted, id],
+                    )?;
+                    report.memories_redacted += 1;
+                }
+            }
+        }
+
+        transaction.commit()?;
+        Ok(report)
     }
 
     pub fn create_session(&self, params: CreateSessionParams) -> Result<Session, StoreError> {
@@ -1621,5 +1729,85 @@ mod tests {
                 .is_none()
         );
         assert!(!store.delete_session(session.id).expect("second delete"));
+    }
+
+    #[test]
+    fn redacts_historical_content_idempotently_without_touching_restore_points() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session saves");
+        store
+            .append_message(session.id, MessageRole::Tool, "api_key=secret-value")
+            .expect("message saves");
+        store
+            .save_local_memory("D:/work/demo", "token=secret-value")
+            .expect("memory saves");
+        store
+            .save_context_compaction(ContextCompaction {
+                session_id: session.id,
+                summary: "access_token: secret-value".to_owned(),
+                compacted_message_count: 1,
+                updated_at: Utc::now(),
+            })
+            .expect("compaction saves");
+        let event_message = Message {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            role: MessageRole::Tool,
+            content: "client_secret=secret-value".to_owned(),
+            created_at: Utc::now(),
+        };
+        store
+            .record_event(&SessionEvent::MessageCompleted {
+                session_id: session.id,
+                message: event_message,
+            })
+            .expect("event saves");
+        store
+            .create_restore_point(session.id, "config.env", Some("api_key=secret-value"), "new")
+            .expect("restore point saves");
+
+        let report = store
+            .redact_historical_secrets(&|value| value.replace("secret-value", "[REDACTED]"))
+            .expect("historical redaction succeeds");
+        assert_eq!(report.messages_scanned, 1);
+        assert_eq!(report.messages_redacted, 1);
+        assert_eq!(report.events_redacted, 1);
+        assert_eq!(report.compactions_redacted, 1);
+        assert_eq!(report.memories_redacted, 1);
+
+        assert_eq!(
+            store.list_messages(session.id).expect("messages")[0].content,
+            "api_key=[REDACTED]"
+        );
+        assert_eq!(
+            store
+                .get_context_compaction(session.id)
+                .expect("compaction lookup")
+                .expect("compaction exists")
+                .summary,
+            "access_token: [REDACTED]"
+        );
+        assert_eq!(
+            store.list_restore_points(session.id).expect("restore lookup")[0]
+                .original_text
+                .as_deref(),
+            Some("api_key=secret-value")
+        );
+
+        let second = store
+            .redact_historical_secrets(&|value| value.replace("secret-value", "[REDACTED]"))
+            .expect("second redaction succeeds");
+        assert_eq!(second.messages_redacted, 0);
+        assert_eq!(second.events_redacted, 0);
+        assert_eq!(second.compactions_redacted, 0);
+        assert_eq!(second.memories_redacted, 0);
     }
 }

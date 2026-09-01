@@ -22,7 +22,7 @@ use xcoding_protocol::{
     WorkspaceConfig,
 };
 use xcoding_store::{SessionStore, StoreError};
-pub use xcoding_store::StoredVisionDescription;
+pub use xcoding_store::{RedactionReport, StoredVisionDescription};
 
 fn temporary_sibling(path: &Path) -> PathBuf {
     match path.file_name().and_then(|value| value.to_str()) {
@@ -131,6 +131,19 @@ impl CoreService {
 
     pub fn cancel_probe(&self) -> CancelProbe {
         self.cancel_probe.clone()
+    }
+
+    pub fn backup_database(&self, path: impl AsRef<Path>) -> Result<(), CoreError> {
+        self.store.backup_to(path).map_err(CoreError::from)
+    }
+
+    pub fn redact_historical_secrets(
+        &self,
+        redact: &dyn Fn(&str) -> String,
+    ) -> Result<RedactionReport, CoreError> {
+        self.store
+            .redact_historical_secrets(redact)
+            .map_err(CoreError::from)
     }
 
     pub fn ping(&self) -> PingResult {

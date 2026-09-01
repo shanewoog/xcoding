@@ -878,11 +878,39 @@ impl ToolRegistry {
         if !path.is_file() {
             return Err(ToolError::NotFile(self.relative_path(&path)));
         }
-        if path.metadata()?.len() > MAX_READ_BYTES {
+        let file_size = path.metadata()?.len();
+        if file_size > MAX_READ_BYTES {
             return Err(ToolError::FileTooLarge(self.relative_path(&path)));
         }
 
-        let content = fs::read_to_string(&path)?;
+        let relative_path = self.relative_path(&path);
+        if is_high_sensitivity_file(&relative_path) {
+            return Ok(ToolExecution {
+                output: serde_json::to_value(ReadFileOutput {
+                    path: relative_path.clone(),
+                    content: String::new(),
+                    start_line: 0,
+                    end_line: 0,
+                    truncated: false,
+                    content_redacted: true,
+                    redaction_reason: Some("sensitive credential file; content withheld".to_owned()),
+                })?,
+                summary: format!(
+                    "Read metadata for sensitive file {relative_path} ({file_size} bytes)"
+                ),
+            });
+        }
+
+        let mut content = fs::read_to_string(&path)?;
+        let is_background_log = is_background_log_path(&relative_path);
+        let content_redacted = is_config_file(&relative_path) || is_background_log;
+        if content_redacted {
+            content = if is_background_log {
+                redact_log_text(&content)
+            } else {
+                redact_config_text(&content)
+            };
+        }
         let lines = content.lines().collect::<Vec<_>>();
         let start_line = args.start_line.unwrap_or(1).max(1);
         let requested_end = args
@@ -896,17 +924,21 @@ impl ToolRegistry {
         } else {
             String::new()
         };
-        let path = self.relative_path(&path);
-
         Ok(ToolExecution {
             output: serde_json::to_value(ReadFileOutput {
-                path: path.clone(),
+                path: relative_path.clone(),
                 content,
                 start_line,
                 end_line,
                 truncated: end_line < lines.len(),
+                content_redacted,
+                redaction_reason: content_redacted.then_some(if is_background_log {
+                    "background log; secret values redacted".to_owned()
+                } else {
+                    "configuration file; secret values redacted".to_owned()
+                }),
             })?,
-            summary: format!("Read {path}:{start_line}-{end_line}"),
+            summary: format!("Read {relative_path}:{start_line}-{end_line}"),
         })
     }
 
@@ -2308,6 +2340,9 @@ struct ReadFileOutput {
     start_line: usize,
     end_line: usize,
     truncated: bool,
+    content_redacted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redaction_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2644,7 +2679,7 @@ fn read_tail(path: &Path, limit: u64) -> String {
     if file.read_to_end(&mut buffer).is_err() {
         return String::new();
     }
-    truncate_output(&String::from_utf8_lossy(&buffer))
+    truncate_output(&redact_log_text(&String::from_utf8_lossy(&buffer)))
 }
 
 /// Result of waiting for a freshly launched background service's port.
@@ -2698,6 +2733,133 @@ fn truncate_output(value: &str) -> String {
         let end = value.floor_char_boundary(MAX_OUTPUT_BYTES);
         format!("{}\n[output truncated]", &value[..end])
     }
+}
+
+const CONFIG_SECRET_FIELDS: [&str; 7] = [
+    "api_key",
+    "apikey",
+    "access_token",
+    "client_secret",
+    "secret_key",
+    "password",
+    "authorization",
+];
+
+fn is_high_sensitivity_file(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    name == "credentials"
+        || name == "credentials.json"
+        || name == "id_rsa"
+        || name == "id_ed25519"
+        || [".pem", ".key", ".p12", ".pfx", ".jks"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+        || normalized.contains("/.aws/credentials")
+        || normalized.contains("/.ssh/")
+}
+
+fn is_config_file(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    name == ".env"
+        || name.starts_with(".env.")
+        || [".json", ".yaml", ".yml", ".toml", ".ini", ".conf"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
+fn is_background_log_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    normalized.starts_with(".xcoding/logs/")
+}
+
+fn redact_log_text(text: &str) -> String {
+    let mut in_private_key = false;
+    text.lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("-----begin ") && lower.contains("private key-----") {
+                in_private_key = true;
+                return "[REDACTED PRIVATE KEY]".to_owned();
+            }
+            if in_private_key {
+                if lower.contains("-----end ") && lower.contains("private key-----") {
+                    in_private_key = false;
+                }
+                return "[REDACTED PRIVATE KEY]".to_owned();
+            }
+
+            let line = redact_config_line(line);
+            line.split_whitespace()
+                .map(|part| {
+                    let trimmed = part.trim_matches(|character: char| {
+                        !character.is_ascii_alphanumeric() && !matches!(character, '.' | '_' | '-')
+                    });
+                    let dot_count = trimmed.bytes().filter(|byte| *byte == b'.').count();
+                    if (trimmed.starts_with("sk-") && trimmed.len() >= 20)
+                        || (trimmed.starts_with("eyJ") && dot_count == 2 && trimmed.len() >= 30)
+                    {
+                        part.replace(trimmed, "[REDACTED]")
+                    } else {
+                        part.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn redact_config_text(text: &str) -> String {
+    text.lines()
+        .map(redact_config_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn redact_config_line(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    let Some(field) = CONFIG_SECRET_FIELDS
+        .iter()
+        .find(|field| lower.contains(**field))
+    else {
+        return line.to_owned();
+    };
+    let Some(field_start) = lower.find(field) else {
+        return line.to_owned();
+    };
+    let Some(separator_offset) = line[field_start + field.len()..]
+        .find(['=', ':'])
+    else {
+        return line.to_owned();
+    };
+    let separator = field_start + field.len() + separator_offset;
+    let value_start = line[separator + 1..]
+        .char_indices()
+        .find(|(_, character)| !character.is_whitespace())
+        .map(|(offset, _)| separator + 1 + offset)
+        .unwrap_or(line.len());
+    if value_start == line.len() {
+        return line.to_owned();
+    }
+    let quote = line[value_start..].chars().next();
+    let value_end = match quote {
+        Some('"') | Some('\'') => line[value_start + 1..]
+            .find(quote.unwrap())
+            .map(|offset| value_start + 1 + offset + 1)
+            .unwrap_or(line.len()),
+        _ => line[value_start..]
+            .find([',', ';', '#'])
+            .map(|offset| value_start + offset)
+            .unwrap_or(line.len()),
+    };
+    format!(
+        "{}[REDACTED]{}",
+        &line[..value_start],
+        &line[value_end..]
+    )
 }
 
 /// Keeps the leading items that fit inside [`MAX_TOOL_JSON_BYTES`] once serialized,
@@ -3057,6 +3219,90 @@ mod tests {
             )
             .expect("code searches");
         assert_eq!(search.output["results"][0]["path"], "src/lib.rs");
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn redacts_sensitive_files_but_preserves_safe_source_reads() {
+        let root = workspace();
+        fs::write(root.join(".env"), "API_KEY=plain-secret\nMODE=dev\n")
+            .expect("env file writes");
+        fs::write(
+            root.join("config.json"),
+            r#"{"api_key":"plain-secret","name":"demo"}"#,
+        )
+        .expect("config file writes");
+        fs::write(root.join("id_rsa"), "PRIVATE KEY plain-secret\n").expect("key writes");
+        fs::create_dir_all(root.join("src")).expect("source directory creates");
+        fs::write(root.join("src/lib.rs"), "const VALUE: &str = \"plain-secret\";\n")
+            .expect("source file writes");
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+
+        let read = |id: &str, path: &str| {
+            tools
+                .execute(
+                    &Mode::Ask,
+                    &ToolCall {
+                        id: id.to_owned(),
+                        name: ToolName::ReadFile,
+                        arguments: json!({ "path": path }),
+                    },
+                )
+                .expect("file reads")
+        };
+
+        let env = read("read_env", ".env");
+        assert_eq!(env.output["content_redacted"], true);
+        assert!(env.output["content"].as_str().unwrap().contains("API_KEY=[REDACTED]"));
+        assert!(!env.output["content"].as_str().unwrap().contains("plain-secret"));
+
+        let config = read("read_config", "config.json");
+        assert_eq!(config.output["content_redacted"], true);
+        assert!(config.output["content"].as_str().unwrap().contains("api_key"));
+        assert!(!config.output["content"].as_str().unwrap().contains("plain-secret"));
+
+        let key = read("read_key", "id_rsa");
+        assert_eq!(key.output["content"], "");
+        assert_eq!(key.output["content_redacted"], true);
+        assert!(key.output["redaction_reason"].as_str().unwrap().contains("sensitive"));
+        assert!(key.summary.contains("sensitive"));
+
+        let source = read("read_source", "src/lib.rs");
+        assert_eq!(source.output["content_redacted"], false);
+        assert_eq!(source.output["content"], "const VALUE: &str = \"plain-secret\";");
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn redacts_background_logs_when_read_back() {
+        let root = workspace();
+        fs::create_dir_all(root.join(".xcoding/logs")).expect("log directory creates");
+        fs::write(
+            root.join(".xcoding/logs/service.log"),
+            "api_key=plain-secret\nstarted normally\nsk-test-token-1234567890\neyJaaaaaaaaaaaaaaaaaaaaaaaaaaaa.eyJbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.sig\n",
+        )
+        .expect("log writes");
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let execution = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "read-log".to_owned(),
+                    name: ToolName::ReadFile,
+                    arguments: json!({ "path": ".xcoding/logs/service.log" }),
+                },
+            )
+            .expect("log reads");
+
+        assert_eq!(execution.output["content_redacted"], true);
+        let content = execution.output["content"].as_str().unwrap();
+        assert!(content.contains("api_key=[REDACTED]"));
+        assert!(content.contains("started normally"));
+        assert!(!content.contains("plain-secret"));
+        assert!(!content.contains("sk-test-token-1234567890"));
+        assert!(!content.contains("eyJaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -4660,6 +4906,28 @@ mod tests {
             )
             .expect_err("a file is not a working directory");
         assert!(matches!(not_a_dir, ToolError::NotDirectory(_)));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn run_command_executes_with_original_arguments() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let execution = tools
+            .run_command(
+                parse_arguments(&json!({
+                    "executable": "cmd",
+                    "args": ["/C", "echo", "api_key=plain-secret"]
+                }))
+                .expect("arguments parse"),
+                &|| false,
+            )
+            .expect("command runs");
+
+        assert_eq!(execution.output["success"], true);
+        assert_eq!(execution.output["args"][2], "api_key=plain-secret");
+        assert!(execution.output["stdout"].as_str().unwrap().contains("plain-secret"));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }

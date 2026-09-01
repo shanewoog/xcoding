@@ -1342,6 +1342,14 @@ export function App() {
   const [toolMemoryEnabled, setToolMemoryEnabled] = useState(true);
   const [localMemoryCount, setLocalMemoryCount] = useState<number | null>(null);
   const [isClearingMemories, setIsClearingMemories] = useState(false);
+  const [isRedactingHistoricalSecrets, setIsRedactingHistoricalSecrets] = useState(false);
+  const [historicalRedactionReport, setHistoricalRedactionReport] = useState<{
+    messages_scanned: number;
+    messages_redacted: number;
+    events_redacted: number;
+    compactions_redacted: number;
+    memories_redacted: number;
+  } | null>(null);
   const [availableModels, setAvailableModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -3786,6 +3794,21 @@ export function App() {
     }
   }
 
+  async function redactHistoricalSecrets(): Promise<void> {
+    if (!isTauriRuntime || isRedactingHistoricalSecrets) return;
+    if (!window.confirm(t(locale, "field.historicalSecretsConfirm"))) return;
+    setError(null);
+    setIsRedactingHistoricalSecrets(true);
+    try {
+      const report = await invoke<NonNullable<typeof historicalRedactionReport>>("redact_historical_secrets");
+      setHistoricalRedactionReport(report);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsRedactingHistoricalSecrets(false);
+    }
+  }
+
   async function saveAllSettings(): Promise<void> {
     if (isSavingConfig || anySessionRunning) return;
     if (!isTauriRuntime) {
@@ -5149,6 +5172,27 @@ export function App() {
                 </button>
               </div>
               <p className="mode-help">{t(locale, "field.storedMemoriesHint")}</p>
+              <div className="resilience-toggle-row">
+                <div>
+                  <span className="field-label">{t(locale, "field.historicalSecrets")}</span>
+                  <p className="mode-help">{t(locale, "field.historicalSecretsHint")}</p>
+                  {historicalRedactionReport && (
+                    <p className="mode-help">
+                      {t(locale, "field.historicalSecretsResult", historicalRedactionReport)}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => void redactHistoricalSecrets()}
+                  disabled={anySessionRunning || isSavingConfig || isRedactingHistoricalSecrets || !isTauriRuntime}
+                >
+                  {isRedactingHistoricalSecrets
+                    ? t(locale, "action.redactHistoricalSecretsRunning")
+                    : t(locale, "action.redactHistoricalSecrets")}
+                </button>
+              </div>
             </div>
           </section>
 

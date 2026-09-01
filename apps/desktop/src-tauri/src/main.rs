@@ -540,6 +540,27 @@ fn clear_local_memories(app: AppHandle, workspace_root: String) -> Result<usize,
 }
 
 #[tauri::command]
+fn redact_historical_secrets(app: AppHandle) -> Result<xcoding_core::RedactionReport, String> {
+    xcoding_agent::register_known_secrets(&load_user_config());
+    let core = open_core(&app)?;
+    let database = database_path()?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let backup = database.with_file_name(format!("xcoding.db.pre-redaction-{timestamp}"));
+    core.backup_database(&backup)
+        .map_err(|error| format!("database backup failed: {error}"))?;
+    core.redact_historical_secrets(&|value| xcoding_agent::redact_sensitive_tool_output(value))
+        .map_err(|error| {
+            format!(
+                "historical redaction failed; backup retained at {}: {error}",
+                backup.display()
+            )
+        })
+}
+
+#[tauri::command]
 fn set_workspace_config(
     app: AppHandle,
     params: SetConfigParams,
@@ -875,6 +896,7 @@ fn main() {
             set_workspace_config,
             count_local_memories,
             clear_local_memories,
+            redact_historical_secrets,
             session_detail,
             session_replay,
             chat,
