@@ -5172,9 +5172,12 @@ export function App() {
                 </button>
               </div>
               <p className="mode-help">{t(locale, "field.storedMemoriesHint")}</p>
+            </div>
+
+            <div className="resilience-setting-group">
+              <p className="resilience-setting-group-title">{t(locale, "field.historicalSecrets")}</p>
               <div className="resilience-toggle-row">
                 <div>
-                  <span className="field-label">{t(locale, "field.historicalSecrets")}</span>
                   <p className="mode-help">{t(locale, "field.historicalSecretsHint")}</p>
                   {historicalRedactionReport && (
                     <p className="mode-help">
