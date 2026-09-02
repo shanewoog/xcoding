@@ -8,6 +8,7 @@ import type {
   ChatParams,
   ChatResult,
   CloudProviderConfig,
+  HttpProxyMode,
   Message,
   ModelCapabilities,
   Mode,
@@ -170,6 +171,16 @@ function normalizeBoundedInteger(
   const numeric = typeof value === "number" ? value : Number.NaN;
   if (!Number.isFinite(numeric)) return fallback;
   return Math.min(maximum, Math.max(minimum, Math.round(numeric)));
+}
+
+const HTTP_PROXY_MODES = ["off", "system", "custom"] as const;
+
+// An unknown persisted value keeps the historical "follow the system" behaviour.
+function normalizeHttpProxyMode(value: string | undefined | null): HttpProxyMode {
+  const trimmed = (value || "").trim().toLowerCase();
+  return (HTTP_PROXY_MODES as readonly string[]).includes(trimmed)
+    ? (trimmed as HttpProxyMode)
+    : "system";
 }
 
 const MODELS_CACHE_KEY = "xcoding.cachedModels.v1";
@@ -1320,6 +1331,8 @@ export function App() {
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
   const [maxProviderRetries, setMaxProviderRetries] = useState(DEFAULT_MAX_PROVIDER_RETRIES);
   const [providerFallbackEnabled, setProviderFallbackEnabled] = useState(false);
+  const [httpProxyMode, setHttpProxyMode] = useState<HttpProxyMode>("system");
+  const [httpProxyUrl, setHttpProxyUrl] = useState("");
   const [maxToolRounds, setMaxToolRounds] = useState(DEFAULT_MAX_TOOL_ROUNDS);
   const [circuitFailureThreshold, setCircuitFailureThreshold] = useState(DEFAULT_CIRCUIT_FAILURE_THRESHOLD);
   const [streamFirstEventTimeoutSecs, setStreamFirstEventTimeoutSecs] = useState(DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS);
@@ -1766,6 +1779,8 @@ export function App() {
         setReasoningEffort(normalizeReasoningEffort(config.reasoning_effort));
         setMaxProviderRetries(normalizeBoundedInteger(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
         setProviderFallbackEnabled(config.provider_fallback_enabled === true);
+        setHttpProxyMode(normalizeHttpProxyMode(config.http_proxy_mode));
+        setHttpProxyUrl((config.http_proxy_url ?? "").trim());
         setMaxToolRounds(normalizeBoundedInteger(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
         setCircuitFailureThreshold(normalizeBoundedInteger(config.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
         setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(config.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
@@ -3871,6 +3886,8 @@ export function App() {
           hidden_project_paths: hiddenProjectPaths,
           model_context_windows: contextWindowMapFromEntries(modelContextWindowEntries),
           model_routes: modelRouteMapFromEntries(modelRouteEntries),
+          http_proxy_mode: httpProxyMode,
+          http_proxy_url: httpProxyUrl.trim() || undefined,
           vision_delegate: visionDelegateConfigFromForm(visionDelegate),
           model_capabilities: modelCapabilities,
           custom_instructions: customInstructions.trim() || undefined,
@@ -3885,6 +3902,8 @@ export function App() {
       setReasoningEffort(normalizeReasoningEffort(savedUser.reasoning_effort));
       setMaxProviderRetries(normalizeBoundedInteger(savedUser.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
       setProviderFallbackEnabled(savedUser.provider_fallback_enabled === true);
+      setHttpProxyMode(normalizeHttpProxyMode(savedUser.http_proxy_mode));
+      setHttpProxyUrl((savedUser.http_proxy_url ?? "").trim());
       setMaxToolRounds(normalizeBoundedInteger(savedUser.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
       setCircuitFailureThreshold(normalizeBoundedInteger(savedUser.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
       setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(savedUser.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
@@ -4800,6 +4819,39 @@ export function App() {
                 </label>
               </div>
               <p className="mode-help">{t(locale, "field.circuitBreakerHint")}</p>
+            </div>
+
+            <div className="resilience-setting-group">
+              <p className="resilience-setting-group-title">{t(locale, "settings.resilience.proxy")}</p>
+              <div className="resilience-setting-grid">
+                <label htmlFor="http-proxy-mode">
+                  <span className="field-label">{t(locale, "field.httpProxyMode")}</span>
+                  <select
+                    id="http-proxy-mode"
+                    value={httpProxyMode}
+                    onChange={(event) => setHttpProxyMode(normalizeHttpProxyMode(event.target.value))}
+                    disabled={anySessionRunning || isSavingConfig}
+                  >
+                    <option value="off">{t(locale, "field.httpProxyMode.off")}</option>
+                    <option value="system">{t(locale, "field.httpProxyMode.system")}</option>
+                    <option value="custom">{t(locale, "field.httpProxyMode.custom")}</option>
+                  </select>
+                </label>
+                {httpProxyMode === "custom" ? (
+                  <label htmlFor="http-proxy-url">
+                    <span className="field-label">{t(locale, "field.httpProxyUrl")}</span>
+                    <input
+                      id="http-proxy-url"
+                      value={httpProxyUrl}
+                      onChange={(event) => setHttpProxyUrl(event.target.value)}
+                      disabled={anySessionRunning || isSavingConfig}
+                      spellCheck={false}
+                      placeholder={t(locale, "field.httpProxyUrlPlaceholder")}
+                    />
+                  </label>
+                ) : null}
+              </div>
+              <p className="mode-help">{t(locale, "field.httpProxyHint")}</p>
             </div>
           </section>
 

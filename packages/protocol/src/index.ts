@@ -72,6 +72,9 @@ export interface ListModelsResult {
 export type ProviderWireApi = "chat_completions" | "responses";
 export type ProviderTrustLevel = "local" | "official" | "relay";
 
+/** How provider HTTP traffic reaches the network. */
+export type HttpProxyMode = "off" | "system" | "custom";
+
 /** One credential inside a provider key pool. */
 export interface ProviderApiKey {
   /** Stable id used by rotation state and log labels. */
@@ -239,6 +242,10 @@ export interface UserConfig {
   model_capabilities?: Record<string, ModelCapabilities>;
   /** Per-model provider routes keyed by normalized (trimmed, lowercased) model id. */
   model_routes?: Record<string, ModelRoute[]>;
+  /** How provider HTTP requests reach the network: off | system | custom. */
+  http_proxy_mode?: HttpProxyMode;
+  /** Proxy URL used when http_proxy_mode is custom, e.g. http://127.0.0.1:10808. */
+  http_proxy_url?: string;
 }
 
 export interface ProjectDir {

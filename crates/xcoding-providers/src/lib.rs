@@ -15,11 +15,12 @@ use futures_util::{Stream, StreamExt};
 use reqwest::Client;
 /// Re-exported so downstream crates can name the `ProviderError::HttpStatus` field type.
 pub use reqwest::StatusCode;
+use reqwest::{NoProxy, Proxy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use xcoding_protocol::{
-    CloudProviderConfig, ListModelsResult, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
+    CloudProviderConfig, HttpProxyMode, ListModelsResult, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
     MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
     MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES,
@@ -235,9 +236,13 @@ impl ProviderError {
                 if self.is_context_overflow() {
                     return false;
                 }
+                // 403 is left out on purpose: whether it came from edge/WAF
+                // protection or from a real authorization refusal, resending the
+                // same payload to the same endpoint cannot change the answer.
+                // Only a different provider (or a proxy) can.
                 matches!(
                     status.as_u16(),
-                    400 | 401 | 403 | 404 | 408 | 409 | 429 | 500 | 502 | 503 | 504
+                    400 | 401 | 404 | 408 | 409 | 429 | 500 | 502 | 503 | 504
                 )
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
@@ -274,6 +279,33 @@ impl ProviderError {
             _ => None,
         }
     }
+
+    /// Request was stopped by the endpoint's edge protection rather than by its
+    /// API: gateways such as Cloudflare answer with an HTML interstitial, which
+    /// says nothing about the credential that was sent.
+    pub fn is_gateway_blocked(&self) -> bool {
+        match self {
+            Self::HttpStatus { status, body, .. } => {
+                status.is_client_error() && body_indicates_gateway_block(body)
+            }
+            _ => false,
+        }
+    }
+
+    /// The endpoint refused the credential itself. `401` is unambiguous, but
+    /// `403` is also what edge protection returns for a blocked payload, so the
+    /// key is only blamed when the body actually names it. Callers that rotate
+    /// credentials use this to avoid retiring good keys over a gateway block.
+    pub fn is_credential_rejection(&self) -> bool {
+        let Self::HttpStatus { status, body, .. } = self else {
+            return false;
+        };
+        match status.as_u16() {
+            401 => true,
+            403 => !body_indicates_gateway_block(body) && body_indicates_credential_refusal(body),
+            _ => false,
+        }
+    }
 }
 
 /// Initial attempt + this many retries (Codex-style: retry up to 5 times).
@@ -300,18 +332,96 @@ pub fn http_user_agent() -> String {
         .unwrap_or_else(|| DEFAULT_HTTP_USER_AGENT.to_owned())
 }
 
+/// Hosts that never go through a custom proxy, so a local model server stays reachable.
+const DEFAULT_PROXY_BYPASS: &str = "localhost,127.0.0.1,::1";
+
+/// Proxy behaviour for provider HTTP traffic after env and user config are merged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedHttpProxy {
+    /// Connect directly and ignore every proxy source.
+    Off,
+    /// Let reqwest read OS proxy settings and `HTTP(S)_PROXY` env vars.
+    System,
+    /// Send every provider request through this proxy URL.
+    Custom(String),
+}
+
+/// Merge a configured mode with its URL. An empty custom URL degrades to `System`
+/// so a half-filled setting cannot silently cut off all provider traffic.
+pub fn resolve_http_proxy_setting(mode: HttpProxyMode, url: Option<&str>) -> ResolvedHttpProxy {
+    let url = url.map(str::trim).filter(|value| !value.is_empty());
+    match mode {
+        HttpProxyMode::Off => ResolvedHttpProxy::Off,
+        HttpProxyMode::System => ResolvedHttpProxy::System,
+        HttpProxyMode::Custom => match url {
+            Some(value) => ResolvedHttpProxy::Custom(value.to_owned()),
+            None => ResolvedHttpProxy::System,
+        },
+    }
+}
+
+/// Parse the `XCODING_HTTP_PROXY` escape hatch used by CLI and headless runs.
+/// `off`/`none`/`direct` disables proxying, `system` follows the OS, anything else is a URL.
+pub fn parse_http_proxy_override(raw: &str) -> Option<ResolvedHttpProxy> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "off" | "none" | "direct" | "no" | "false" | "0" => Some(ResolvedHttpProxy::Off),
+        "system" | "auto" | "default" => Some(ResolvedHttpProxy::System),
+        _ => Some(ResolvedHttpProxy::Custom(trimmed.to_owned())),
+    }
+}
+
+/// Env override wins over `~/.xcoding/config.json` so a broken saved proxy can be bypassed.
+fn resolve_http_proxy() -> ResolvedHttpProxy {
+    if let Some(resolved) = env::var("XCODING_HTTP_PROXY")
+        .ok()
+        .and_then(|raw| parse_http_proxy_override(&raw))
+    {
+        return resolved;
+    }
+    let config = load_user_config();
+    resolve_http_proxy_setting(config.http_proxy_mode, config.http_proxy_url.as_deref())
+}
+
+/// Extend the bypass list with `NO_PROXY` so loopback rules and user rules both apply.
+fn proxy_bypass_list() -> String {
+    match env::var("NO_PROXY").or_else(|_| env::var("no_proxy")) {
+        Ok(raw) if !raw.trim().is_empty() => format!("{DEFAULT_PROXY_BYPASS},{}", raw.trim()),
+        _ => DEFAULT_PROXY_BYPASS.to_owned(),
+    }
+}
+
+/// A malformed custom URL falls back to system settings instead of failing the build.
+fn apply_http_proxy(
+    builder: reqwest::ClientBuilder,
+    proxy: &ResolvedHttpProxy,
+) -> reqwest::ClientBuilder {
+    match proxy {
+        ResolvedHttpProxy::Off => builder.no_proxy(),
+        ResolvedHttpProxy::System => builder,
+        ResolvedHttpProxy::Custom(url) => match Proxy::all(url.as_str()) {
+            Ok(proxy) => builder.proxy(proxy.no_proxy(NoProxy::from_string(&proxy_bypass_list()))),
+            Err(_) => builder,
+        },
+    }
+}
+
 fn build_http_client() -> Client {
     let user_agent = http_user_agent();
-    Client::builder()
+    let proxy = resolve_http_proxy();
+    let builder = Client::builder()
         // Present as Codex so client-restricted OpenAI-compatible gateways accept traffic.
         .user_agent(user_agent.clone())
         // Avoid hanging forever on dead endpoints; do not set a total body timeout so
         // long-lived SSE chat streams are not cut mid-turn.
-        .connect_timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(15));
+    apply_http_proxy(builder, &proxy)
         .build()
         .unwrap_or_else(|_| {
-            Client::builder()
-                .user_agent(user_agent)
+            apply_http_proxy(Client::builder().user_agent(user_agent), &proxy)
                 .build()
                 .unwrap_or_else(|_| Client::new())
         })
@@ -369,10 +479,23 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 
 fn format_http_status_message(status: &StatusCode, body: &str) -> String {
     let truncated = truncate_provider_body(body, 280);
-    if *status == StatusCode::UNAUTHORIZED || *status == StatusCode::FORBIDDEN {
+    if status.is_client_error() && body_indicates_gateway_block(body) {
+        return format!(
+            "Upstream gateway blocked the request (HTTP {}). The endpoint's edge protection (Cloudflare or a similar WAF) answered with a block page before the request reached the model API, so this is not an API key problem. Retry later, route the model to another provider, or configure a network proxy in Settings. Provider response: {}",
+            status.as_u16(),
+            truncated
+        );
+    }
+    if *status == StatusCode::UNAUTHORIZED {
         return format!(
             "Cloud provider authentication failed (HTTP {}). Check OPENAI_API_KEY and XCODING_OPENAI_BASE_URL. Provider response: {}",
             status.as_u16(),
+            truncated
+        );
+    }
+    if *status == StatusCode::FORBIDDEN {
+        return format!(
+            "Cloud provider refused the request (HTTP 403). The endpoint accepted the connection but declined this request: check that the credential is allowed to use this model and that the endpoint is not blocking this client. Provider response: {}",
             truncated
         );
     }
@@ -397,6 +520,39 @@ fn body_indicates_context_overflow(body: &str) -> bool {
         || lower.contains("maximum context")
         || lower.contains("too many tokens")
         || (lower.contains("exceeds") && (lower.contains("token") || lower.contains("context")))
+}
+
+/// Recognizes an edge-protection block page. Model APIs answer with JSON, so an
+/// HTML document or a named gateway vendor means the request never reached the
+/// API and the credential was never evaluated.
+fn body_indicates_gateway_block(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("<!doctype html")
+        || lower.contains("<html")
+        || lower.contains("cloudflare")
+        || lower.contains("cf-ray")
+        || lower.contains("attention required")
+        || lower.contains("just a moment")
+        || lower.contains("web application firewall")
+}
+
+/// Recognizes a body that names the credential as the reason for the refusal,
+/// used to tell a real authorization failure apart from an opaque `403`.
+fn body_indicates_credential_refusal(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("api key")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("credential")
+        || lower.contains("unauthorized")
+        || lower.contains("authenticat")
+        || lower.contains("authoriz")
+        || lower.contains("permission")
+        || lower.contains("token")
+        || lower.contains("quota")
+        || lower.contains("billing")
+        || lower.contains("suspend")
+        || lower.contains("banned")
 }
 
 fn truncate_provider_body(body: &str, max_chars: usize) -> String {
@@ -537,6 +693,18 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
         } else {
             *home = trimmed;
         }
+    }
+    if let Some(url) = config.http_proxy_url.as_mut() {
+        let trimmed = url.trim().to_owned();
+        if trimmed.is_empty() {
+            config.http_proxy_url = None;
+        } else {
+            *url = trimmed;
+        }
+    }
+    // Custom mode without a URL would proxy nothing; keep system behaviour instead.
+    if config.http_proxy_mode == HttpProxyMode::Custom && config.http_proxy_url.is_none() {
+        config.http_proxy_mode = HttpProxyMode::System;
     }
 
     if config.providers.is_empty() {
@@ -1815,6 +1983,96 @@ mod tests {
     }
 
     #[test]
+    fn resolve_http_proxy_setting_maps_every_mode() {
+        assert_eq!(
+            resolve_http_proxy_setting(HttpProxyMode::Off, Some("http://127.0.0.1:10808")),
+            ResolvedHttpProxy::Off
+        );
+        assert_eq!(
+            resolve_http_proxy_setting(HttpProxyMode::System, None),
+            ResolvedHttpProxy::System
+        );
+        assert_eq!(
+            resolve_http_proxy_setting(HttpProxyMode::Custom, Some("  http://127.0.0.1:10808  ")),
+            ResolvedHttpProxy::Custom("http://127.0.0.1:10808".to_owned())
+        );
+    }
+
+    #[test]
+    fn custom_proxy_without_url_falls_back_to_system() {
+        assert_eq!(
+            resolve_http_proxy_setting(HttpProxyMode::Custom, None),
+            ResolvedHttpProxy::System
+        );
+        assert_eq!(
+            resolve_http_proxy_setting(HttpProxyMode::Custom, Some("   ")),
+            ResolvedHttpProxy::System
+        );
+    }
+
+    #[test]
+    fn parse_http_proxy_override_accepts_aliases() {
+        assert_eq!(parse_http_proxy_override("   "), None);
+        for value in ["off", "None", "direct", "NO", "false", "0"] {
+            assert_eq!(
+                parse_http_proxy_override(value),
+                Some(ResolvedHttpProxy::Off),
+                "{value} should disable proxying"
+            );
+        }
+        for value in ["system", "Auto", "DEFAULT"] {
+            assert_eq!(
+                parse_http_proxy_override(value),
+                Some(ResolvedHttpProxy::System),
+                "{value} should follow system settings"
+            );
+        }
+        assert_eq!(
+            parse_http_proxy_override(" socks5://127.0.0.1:10808 "),
+            Some(ResolvedHttpProxy::Custom(
+                "socks5://127.0.0.1:10808".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn normalize_user_config_downgrades_empty_custom_proxy() {
+        let config = normalize_user_config(UserConfig {
+            http_proxy_mode: HttpProxyMode::Custom,
+            http_proxy_url: Some("   ".to_owned()),
+            ..UserConfig::default()
+        });
+        assert_eq!(config.http_proxy_mode, HttpProxyMode::System);
+        assert_eq!(config.http_proxy_url, None);
+
+        let config = normalize_user_config(UserConfig {
+            http_proxy_mode: HttpProxyMode::Custom,
+            http_proxy_url: Some("  http://127.0.0.1:10808 ".to_owned()),
+            ..UserConfig::default()
+        });
+        assert_eq!(config.http_proxy_mode, HttpProxyMode::Custom);
+        assert_eq!(
+            config.http_proxy_url.as_deref(),
+            Some("http://127.0.0.1:10808")
+        );
+    }
+
+    #[test]
+    fn apply_http_proxy_tolerates_invalid_custom_url() {
+        let client = apply_http_proxy(
+            Client::builder(),
+            &ResolvedHttpProxy::Custom("not a proxy url".to_owned()),
+        )
+        .build();
+        assert!(client.is_ok());
+        assert!(
+            apply_http_proxy(Client::builder(), &ResolvedHttpProxy::Off)
+                .build()
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn parses_text_delta() {
         let parsed =
             parse_chunk(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#).expect("event parses");
@@ -2273,14 +2531,6 @@ mod tests {
         );
         assert!(
             ProviderError::HttpStatus {
-                status: StatusCode::FORBIDDEN,
-                body: "forbidden".to_owned(),
-                retry_after_secs: None,
-            }
-            .is_retryable()
-        );
-        assert!(
-            ProviderError::HttpStatus {
                 status: StatusCode::NOT_FOUND,
                 body: "not found".to_owned(),
                 retry_after_secs: None,
@@ -2304,6 +2554,16 @@ mod tests {
         );
         assert!(!ProviderError::MissingApiKey.is_retryable());
         assert!(!ProviderError::InvalidResponse("x".to_owned()).is_retryable());
+        // 403 cannot be fixed by resending: the same payload and credential are
+        // refused again, and the retries only burn the rotation.
+        assert!(
+            !ProviderError::HttpStatus {
+                status: StatusCode::FORBIDDEN,
+                body: "forbidden".to_owned(),
+                retry_after_secs: None,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -2335,6 +2595,78 @@ mod tests {
         assert!(message.contains("OPENAI_API_KEY"));
         assert!(message.contains("XCODING_OPENAI_BASE_URL"));
         assert!(message.contains("INVALID_API_KEY"));
+    }
+
+    #[test]
+    fn gateway_block_message_does_not_blame_the_api_key() {
+        // Reproduces the reported failure: a relay behind Cloudflare answers 403
+        // with an HTML interstitial, and the old message told the user to check
+        // OPENAI_API_KEY.
+        let error = ProviderError::HttpStatus {
+            status: StatusCode::FORBIDDEN,
+            body: "<!DOCTYPE html>\n<html lang=\"en-US\"><title>Attention Required! | Cloudflare</title>".to_owned(),
+            retry_after_secs: None,
+        };
+        let message = error.to_string();
+        assert!(message.contains("Upstream gateway blocked the request (HTTP 403)"));
+        assert!(!message.contains("OPENAI_API_KEY"));
+        assert!(message.contains("proxy"));
+        assert!(error.is_gateway_blocked());
+        assert!(!error.is_credential_rejection());
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn forbidden_status_message_is_separate_from_unauthorized() {
+        let message = ProviderError::HttpStatus {
+            status: StatusCode::FORBIDDEN,
+            body: r#"{"error":{"message":"You do not have permission to use this model"}}"#
+                .to_owned(),
+            retry_after_secs: None,
+        }
+        .to_string();
+        assert!(message.contains("Cloud provider refused the request (HTTP 403)"));
+        assert!(!message.contains("Cloud provider authentication failed"));
+        assert!(!message.contains("OPENAI_API_KEY"));
+        assert!(message.contains("permission"));
+    }
+
+    #[test]
+    fn credential_rejection_needs_the_body_to_name_the_credential() {
+        let unauthorized = ProviderError::HttpStatus {
+            status: StatusCode::UNAUTHORIZED,
+            body: "nothing useful".to_owned(),
+            retry_after_secs: None,
+        };
+        // 401 is unambiguous even with an unhelpful body.
+        assert!(unauthorized.is_credential_rejection());
+
+        let permission_denied = ProviderError::HttpStatus {
+            status: StatusCode::FORBIDDEN,
+            body: r#"{"error":{"message":"Invalid API key for this endpoint"}}"#.to_owned(),
+            retry_after_secs: None,
+        };
+        assert!(permission_denied.is_credential_rejection());
+        assert!(!permission_denied.is_gateway_blocked());
+
+        // An opaque 403 says nothing about the key, so the key is not blamed.
+        let opaque = ProviderError::HttpStatus {
+            status: StatusCode::FORBIDDEN,
+            body: "forbidden".to_owned(),
+            retry_after_secs: None,
+        };
+        assert!(!opaque.is_credential_rejection());
+        assert!(!opaque.is_gateway_blocked());
+
+        // 5xx is the endpoint failing, never a credential verdict.
+        assert!(
+            !ProviderError::HttpStatus {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: "invalid api key".to_owned(),
+                retry_after_secs: None,
+            }
+            .is_credential_rejection()
+        );
     }
 
     #[test]

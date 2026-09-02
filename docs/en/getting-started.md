@@ -144,6 +144,27 @@ One logical model can be spread across independent providers. Under **Settings �
 - Each route shows its state (ready / out of rotation / provider missing / no usable key / all keys rejected / cooling down / trust level mismatch). Logs carry the logical model name, provider id, key id, weight, and result.
 - Model call logs separate **Provider** (the configured display name), **Credential** (masked tail only), and **Wire protocol** (the protocol name, for example `openai`). Context compaction and memory extraction each get their own label.
 
+## Network Proxy
+
+Under **Settings → Call resilience → Network proxy**, choose how provider API requests reach the network:
+
+- **No proxy (direct)** — ignore OS proxy settings and `HTTP(S)_PROXY`, always connect directly.
+- **System proxy** (default, matching the historical behaviour) — follow Windows Internet Settings / macOS system config plus the `HTTP_PROXY` / `HTTPS_PROXY` variables.
+- **Custom proxy** — enter an address; `http://`, `https://`, `socks5://` and `socks5h://` are accepted, optionally with `user:password@host:port`.
+
+```json
+{
+  "http_proxy_mode": "custom",
+  "http_proxy_url": "http://127.0.0.1:10808"
+}
+```
+
+- The setting only covers provider API traffic; `run_command` processes, git, and MCP servers are unaffected.
+- `localhost`, `127.0.0.1` and `::1` always bypass the proxy so local model servers stay reachable, and `NO_PROXY` is appended to that bypass list.
+- Custom mode with an empty address degrades to system proxy, and a malformed address falls back to system settings instead of failing the request.
+- `XCODING_HTTP_PROXY` overrides the saved setting: `off` / `none` / `direct` forces a direct connection, `system` follows the OS, and anything else is treated as a proxy URL. Useful for CLI and headless runs.
+- Saving takes effect on the next provider request; no Desktop restart is required.
+
 ## Environment Doctor
 
 Check workspace, server binary, core RPC, cloud credentials, workspace config, and git in one shot:

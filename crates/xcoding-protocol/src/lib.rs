@@ -534,6 +534,20 @@ pub enum ProviderTrustLevel {
     Relay,
 }
 
+/// How provider HTTP traffic reaches the network.
+/// `System` keeps the OS/environment proxy settings, which is the historical behaviour.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProxyMode {
+    /// Ignore every proxy and always connect directly.
+    Off,
+    /// Follow Windows Internet Settings / macOS system config / `HTTP(S)_PROXY` env vars.
+    #[default]
+    System,
+    /// Always use `UserConfig::http_proxy_url`.
+    Custom,
+}
+
 /// Vision delegate configuration for models without native vision support.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct VisionDelegateConfig {
@@ -733,6 +747,12 @@ pub struct UserConfig {
     /// A model without routes keeps the active-provider-plus-backup behaviour.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_routes: BTreeMap<String, Vec<ModelRoute>>,
+    /// How provider HTTP requests reach the network: off | system | custom.
+    #[serde(default)]
+    pub http_proxy_mode: HttpProxyMode,
+    /// Proxy URL used when `http_proxy_mode` is `custom`, e.g. `http://127.0.0.1:10808`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_proxy_url: Option<String>,
 }
 
 impl Default for UserConfig {
@@ -780,6 +800,8 @@ impl Default for UserConfig {
             vision_delegate: None,
             model_capabilities: BTreeMap::new(),
             model_routes: BTreeMap::new(),
+            http_proxy_mode: HttpProxyMode::default(),
+            http_proxy_url: None,
         }
     }
 }

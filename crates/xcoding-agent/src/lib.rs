@@ -247,10 +247,11 @@ static MODEL_ROUTE_ROTATIONS: OnceLock<Mutex<HashMap<String, ProviderKeyRotation
 /// masked hint are ever surfaced; the secret itself never leaves this module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProviderKeyBlock {
-    /// 401/403: the credential itself is wrong. Retrying costs quota and
-    /// usually trips upstream abuse counters, so the key stays out until the
-    /// user edits the configuration (which changes the key value, and with it
-    /// the fingerprint this state is filed under).
+    /// The endpoint named the credential as the reason it refused: 401, or a
+    /// 403 whose body points at the key, its permissions or its quota. Retrying
+    /// costs quota and usually trips upstream abuse counters, so the key stays
+    /// out until the user edits the configuration (which changes the key value,
+    /// and with it the fingerprint this state is filed under).
     Rejected,
     /// 429: quota or rate limit. Cools down and returns on its own.
     RateLimited,
@@ -437,18 +438,35 @@ fn classify_provider_key_failure(error: &AgentError) -> Option<ProviderKeyBlock>
     match error {
         AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_) => Some(ProviderKeyBlock::Unstable),
-        AgentError::Provider(ProviderError::HttpStatus { status, .. }) => {
-            match status.as_u16() {
-                401 | 403 => Some(ProviderKeyBlock::Rejected),
-                429 => Some(ProviderKeyBlock::RateLimited),
-                // 5xx is the endpoint failing, not this credential, but a key
-                // whose account is being throttled server-side often shows up
-                // this way too, so a short pause is still worth taking.
-                500 | 502 | 503 | 504 => Some(ProviderKeyBlock::Unstable),
-                _ => None,
+        AgentError::Provider(provider_error) => match provider_error {
+            ProviderError::HttpStatus { status, .. } => {
+                // Edge protection answers before the API ever reads the
+                // credential, so a WAF block page must not retire a key.
+                // Otherwise one interstitial takes out every key the provider
+                // has, and the user sees "credential was rejected" for keys
+                // that were never checked.
+                if provider_error.is_gateway_blocked() {
+                    return None;
+                }
+                if provider_error.is_credential_rejection() {
+                    return Some(ProviderKeyBlock::Rejected);
+                }
+                match status.as_u16() {
+                    // A 403 that names no cause is not a credential verdict.
+                    // A short cooldown moves the rotation on without retiring a
+                    // key that may well be fine.
+                    403 => Some(ProviderKeyBlock::Unstable),
+                    429 => Some(ProviderKeyBlock::RateLimited),
+                    // 5xx is the endpoint failing, not this credential, but a key
+                    // whose account is being throttled server-side often shows up
+                    // this way too, so a short pause is still worth taking.
+                    500 | 502 | 503 | 504 => Some(ProviderKeyBlock::Unstable),
+                    _ => None,
+                }
             }
-        }
-        AgentError::Provider(ProviderError::Http(_)) => Some(ProviderKeyBlock::Unstable),
+            ProviderError::Http(_) => Some(ProviderKeyBlock::Unstable),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -5881,9 +5899,13 @@ private material
     }
 
     fn http_status_error(status: u16) -> AgentError {
+        http_status_error_with_body(status, "upstream")
+    }
+
+    fn http_status_error_with_body(status: u16, body: &str) -> AgentError {
         AgentError::Provider(ProviderError::HttpStatus {
             status: StatusCode::from_u16(status).expect("status"),
-            body: "upstream".to_owned(),
+            body: body.to_owned(),
             retry_after_secs: None,
         })
     }
@@ -6315,11 +6337,56 @@ private material
 
         clear_key_health(&[&candidate, &rotated]);
         assert_eq!(
-            record_provider_key_failure(&candidate, &http_status_error(403)),
+            record_provider_key_failure(
+                &candidate,
+                &http_status_error_with_body(403, r#"{"error":{"message":"Invalid API key"}}"#)
+            ),
             Some(ProviderKeyBlock::Rejected)
         );
         assert!(!provider_key_is_available(&candidate));
         clear_key_health(&[&candidate, &rotated]);
+    }
+
+    #[test]
+    fn a_gateway_block_page_never_retires_the_provider_keys() {
+        // Reproduces the reported failure: `gorouter.app` sits behind Cloudflare,
+        // one turn hits the WAF, and every key of that provider used to be
+        // marked "credential was rejected" for the rest of the process.
+        let provider_id = format!("key-waf-{}", std::process::id());
+        let keys = [
+            key_candidate(&provider_id, "a", "sk-waf-a"),
+            key_candidate(&provider_id, "b", "sk-waf-b"),
+            key_candidate(&provider_id, "c", "sk-waf-c"),
+        ];
+        let borrowed: Vec<&ProviderCandidate> = keys.iter().collect();
+        clear_key_health(&borrowed);
+
+        let waf_block = http_status_error_with_body(
+            403,
+            "<!DOCTYPE html>\n<html lang=\"en-US\"><title>Attention Required! | Cloudflare</title>",
+        );
+        for candidate in &keys {
+            assert_eq!(record_provider_key_failure(candidate, &waf_block), None);
+            assert!(
+                provider_key_is_available(candidate),
+                "an edge block never reached the API, so the key stays in rotation"
+            );
+        }
+
+        // A 403 the endpoint did not explain is not a credential verdict either,
+        // but it does move the rotation on for a short while.
+        clear_key_health(&borrowed);
+        assert_eq!(
+            record_provider_key_failure(&keys[0], &http_status_error(403)),
+            Some(ProviderKeyBlock::Unstable)
+        );
+        assert!(!provider_key_is_available(&keys[0]));
+        release_key_cooldowns_when_all_are_blocked([&keys[0]]);
+        assert!(
+            provider_key_is_available(&keys[0]),
+            "a timed cooldown must yield one attempt rather than a dead turn"
+        );
+        clear_key_health(&borrowed);
     }
 
     #[test]

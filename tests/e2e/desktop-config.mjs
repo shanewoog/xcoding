@@ -479,6 +479,33 @@ async function main() {
   assert.ok(i18nSource.includes("settings.vision.title") && i18nSource.includes("field.visionDelegateProvider") && i18nSource.includes("field.visionDelegateModel"), "i18n missing vision delegate settings keys");
   assert.ok(i18nSource.includes("activity.visionDelegate") && i18nSource.includes("activity.visionDelegateFailed"), "i18n missing vision delegate activity copy");
 
+  // Provider traffic proxy: off / system / custom.
+  assert.ok(protocolSource.includes("HttpProxyMode") && protocolSource.includes("http_proxy_url"), "protocol missing HTTP proxy config");
+  assert.ok(appSource.includes("function normalizeHttpProxyMode"), "App must normalize the saved proxy mode");
+  assert.ok(appSource.includes('id="http-proxy-mode"') && appSource.includes('id="http-proxy-url"'), "settings should render proxy mode and address controls");
+  assert.ok(appSource.includes('httpProxyMode === "custom"'), "the proxy address input should only show in custom mode");
+  assert.equal(
+    (appSource.match(/http_proxy_mode: httpProxyMode/g) || []).length,
+    1,
+    "saving settings must submit http_proxy_mode exactly once",
+  );
+  assert.ok(appSource.includes("http_proxy_url: httpProxyUrl.trim() || undefined"), "an empty proxy address must be saved as unset");
+  for (const needle of [
+    '"settings.resilience.proxy"',
+    '"field.httpProxyMode.off"',
+    '"field.httpProxyMode.system"',
+    '"field.httpProxyMode.custom"',
+    '"field.httpProxyUrl"',
+    '"field.httpProxyHint"',
+  ]) {
+    assert.ok(i18nSource.includes(needle), "i18n.ts missing " + needle);
+  }
+  assert.equal(
+    (i18nSource.match(/"field\.httpProxyMode":/g) || []).length,
+    2,
+    "proxy labels must exist in both en and zh-CN catalogs",
+  );
+
   for (const needle of [
     ".mode-help",
     ".doctor-panel",
