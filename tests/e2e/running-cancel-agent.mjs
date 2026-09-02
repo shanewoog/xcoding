@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,11 +15,34 @@ async function main() {
   const mock = await startMockProvider();
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-cancel-e2e-"));
   const workspace = await mkdtemp(resolve(tmpdir(), "xcoding-cancel-workspace-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-cancel-home-"));
   await cp(fixtureSource, workspace, { recursive: true });
+  // Pin the mock provider as `official` so relay tool gating does not intercept
+  // the auto-edit patch this test expects to run without approval.
+  await mkdir(resolve(homeDirectory, ".xcoding"), { recursive: true });
+  await writeFile(
+    resolve(homeDirectory, ".xcoding", "config.json"),
+    `${JSON.stringify({
+      provider_fallback_enabled: false,
+      providers: [
+        {
+          id: "default",
+          name: "openai",
+          base_url: mock.baseUrl,
+          api_key: "e2e-test-key",
+          trust_level: "official",
+        },
+      ],
+      active_provider_id: "default",
+    })}\n`,
+    "utf8",
+  );
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
       ...process.env,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
       OPENAI_API_KEY: "e2e-test-key",
       XCODING_OPENAI_BASE_URL: mock.baseUrl,
     },
@@ -36,6 +59,7 @@ async function main() {
     await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
     await rm(workspace, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
   }
 }
 

@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -8,6 +10,19 @@ const args = process.argv.slice(2);
 const runLive = args.includes("--live");
 const deterministicOnly = args.includes("--deterministic") || !runLive;
 const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const originalUserHome = process.env.USERPROFILE || process.env.HOME || homedir();
+
+// Deterministic acceptance must never read the developer's ~/.xcoding/config.json,
+// otherwise mock-provider tests fan out to whatever live gateway is configured there.
+function isolatedEnvironment(home) {
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    CARGO_HOME: process.env.CARGO_HOME || join(originalUserHome, ".cargo"),
+    RUSTUP_HOME: process.env.RUSTUP_HOME || join(originalUserHome, ".rustup"),
+  };
+}
 
 function loadDotEnv() {
   const path = resolve(repositoryRoot, ".env");
@@ -56,32 +71,34 @@ function run(command, commandArgs, options = {}) {
   });
 }
 
-async function runDeterministic() {
+async function runDeterministic(home) {
+  const env = isolatedEnvironment(home);
+  const runNode = (script) => run(process.execPath, [resolve(repositoryRoot, script)], { env });
   console.log("== V1 acceptance: deterministic e2e ==");
-  await run("cargo", ["build", "-p", "xcoding-server"]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/read-only-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/guarded-write-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/auto-edit-mode.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/full-auto-mode.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/command-allowlist.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/running-cancel-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/session-replay-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/write-loop-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-tools-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-write-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-push-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/git-fetch-pull-agent.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-auth-error.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-retry.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/provider-status.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/doctor.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-review.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-activity.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-layout.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/desktop-config.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/task-summary.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/session-continue.mjs")]);
-  await run(process.execPath, [resolve(repositoryRoot, "tests/e2e/surface-parity.mjs")]);
+  await run("cargo", ["build", "-p", "xcoding-server"], { env });
+  await runNode("tests/e2e/read-only-agent.mjs");
+  await runNode("tests/e2e/guarded-write-agent.mjs");
+  await runNode("tests/e2e/auto-edit-mode.mjs");
+  await runNode("tests/e2e/full-auto-mode.mjs");
+  await runNode("tests/e2e/command-allowlist.mjs");
+  await runNode("tests/e2e/running-cancel-agent.mjs");
+  await runNode("tests/e2e/session-replay-agent.mjs");
+  await runNode("tests/e2e/write-loop-agent.mjs");
+  await runNode("tests/e2e/git-tools-agent.mjs");
+  await runNode("tests/e2e/git-write-agent.mjs");
+  await runNode("tests/e2e/git-push-agent.mjs");
+  await runNode("tests/e2e/git-fetch-pull-agent.mjs");
+  await runNode("tests/e2e/provider-auth-error.mjs");
+  await runNode("tests/e2e/provider-retry.mjs");
+  await runNode("tests/e2e/provider-status.mjs");
+  await runNode("tests/e2e/doctor.mjs");
+  await runNode("tests/e2e/desktop-review.mjs");
+  await runNode("tests/e2e/desktop-activity.mjs");
+  await runNode("tests/e2e/desktop-layout.mjs");
+  await runNode("tests/e2e/desktop-config.mjs");
+  await runNode("tests/e2e/task-summary.mjs");
+  await runNode("tests/e2e/session-continue.mjs");
+  await runNode("tests/e2e/surface-parity.mjs");
   console.log("Deterministic acceptance passed.");
 }
 
@@ -118,9 +135,15 @@ async function main() {
   console.log(summary.join("\n"));
 
   if (deterministicOnly || runLive) {
-    await runDeterministic();
+    const home = await mkdtemp(join(tmpdir(), "xcoding-acceptance-home-"));
+    try {
+      await runDeterministic(home);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   }
   if (runLive) {
+    // The live smoke intentionally uses the real home so developer credentials apply.
     await runLiveSmoke();
   }
 
