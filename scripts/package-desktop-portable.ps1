@@ -182,6 +182,7 @@ $releaseGitPaths = @(
   "tests/acceptance/run.mjs",
   "crates/xcoding-agent/src/lib.rs",
   "crates/xcoding-core/src/lib.rs",
+  "crates/xcoding-context/src/lib.rs",
   "crates/xcoding-store/Cargo.toml",
   "crates/xcoding-store/src/lib.rs",
   "crates/xcoding-tools/src/lib.rs",
@@ -197,8 +198,16 @@ $releaseGitPaths = @(
   "docs/zh/session-safety.md",
   "tests/e2e/full-auto-mode.mjs",
   "apps/desktop/src/App.tsx",
+  "apps/desktop/src/activity.ts",
   "apps/desktop/src/styles.css",
   "tests/e2e/desktop-layout.mjs",
+  "tests/e2e/desktop-activity.mjs",
+  "tests/e2e/read-only-agent.mjs",
+  "tests/e2e/git-tools-agent.mjs",
+  "tests/e2e/git-write-agent.mjs",
+  "tests/e2e/skills-agent.mjs",
+  "tests/e2e/model-plan-agent.mjs",
+  "tests/e2e/fixtures/model-plan-agent",
   "scripts/package-desktop-portable.ps1"
 )
 

@@ -96,6 +96,13 @@ export function eventActivity(
   sequence: string,
   locale: Locale = "en",
 ): ActivityItem | null {
+  // Plan refreshes already render as the step list, so they add no activity row.
+  if (
+    (event.type === "tool_start" || event.type === "tool_end") &&
+    event.tool_call.name === "update_plan"
+  ) {
+    return null;
+  }
   if (event.type === "tool_start") {
     const label = event.summary;
     const state: ActivityState = "running";

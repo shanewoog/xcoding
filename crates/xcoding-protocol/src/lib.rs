@@ -45,6 +45,9 @@ pub const MAX_CIRCUIT_MIN_REQUEST_COUNT: u32 = 100;
 pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4_000;
 pub const MAX_PROVIDER_KEY_WEIGHT: u32 = 1_000;
 pub const MAX_LOCAL_MEMORY_CHARS: usize = 600;
+/// Safety bound only; the model decides how many steps a plan actually needs.
+pub const MAX_PLAN_STEPS: usize = 20;
+pub const MAX_PLAN_STEP_DESCRIPTION_CHARS: usize = 200;
 pub const DEFAULT_PERSONALITY: &str = "default";
 /// Reply tones accepted by `UserConfig::personality`.
 pub const PERSONALITY_OPTIONS: [&str; 5] = [
@@ -251,6 +254,8 @@ pub enum ToolName {
     GitPull,
     /// Read the desktop side-browser URL/title/visibility snapshot.
     BrowserState,
+    /// Replace the turn plan with model-authored steps.
+    UpdatePlan,
     /// External MCP tool (`mcp__server__tool` at the provider layer).
     Mcp,
 }
@@ -274,6 +279,7 @@ impl ToolName {
             Self::GitFetch => "git_fetch",
             Self::GitPull => "git_pull",
             Self::BrowserState => "browser_state",
+            Self::UpdatePlan => "update_plan",
             Self::Mcp => "mcp",
         }
     }
@@ -393,10 +399,31 @@ pub struct SessionDetail {
     pub events: Vec<PersistedSessionEvent>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
+impl PlanStepStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PlanStep {
     pub id: String,
     pub description: String,
+    /// Absent in plans persisted before model-authored plans existed.
+    #[serde(default = "default_plan_step_status")]
+    pub status: PlanStepStatus,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1227,6 +1254,10 @@ fn default_tool_memory_enabled() -> bool {
     true
 }
 
+fn default_plan_step_status() -> PlanStepStatus {
+    PlanStepStatus::Pending
+}
+
 fn default_context_compaction_threshold_percent() -> u32 {
     DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT
 }
@@ -1248,6 +1279,28 @@ mod tests {
 
         assert_eq!(decoded, request);
         assert!(decoded.is_valid_version());
+    }
+
+    #[test]
+    fn defaults_plan_step_status_for_legacy_plan_events() {
+        let step: PlanStep =
+            serde_json::from_value(json!({ "id": "inspect", "description": "Inspect files" }))
+                .expect("legacy plan step parses");
+        assert_eq!(step.status, PlanStepStatus::Pending);
+
+        let step: PlanStep = serde_json::from_value(
+            json!({ "id": "step_1", "description": "Read code", "status": "in_progress" }),
+        )
+        .expect("plan step with status parses");
+        assert_eq!(step.status, PlanStepStatus::InProgress);
+        assert_eq!(step.status.as_str(), "in_progress");
+    }
+
+    #[test]
+    fn maps_update_plan_tool_name() {
+        let name: ToolName = serde_json::from_value(json!("update_plan")).expect("name parses");
+        assert_eq!(name, ToolName::UpdatePlan);
+        assert_eq!(name.as_str(), "update_plan");
     }
 
     #[test]

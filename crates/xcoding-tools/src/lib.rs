@@ -28,7 +28,10 @@ use xcoding_policy::{
     PermissionKind, assess_command_with_lists, evaluate_detailed, parse_command_allowlist,
     parse_command_denylist,
 };
-use xcoding_protocol::{Mode, PatchPreview, ToolCall, ToolName};
+use xcoding_protocol::{
+    MAX_PLAN_STEP_DESCRIPTION_CHARS, MAX_PLAN_STEPS, Mode, PatchPreview, PlanStep, PlanStepStatus,
+    ToolCall, ToolName,
+};
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
 const MAX_LIST_ENTRIES: usize = 1_000;
@@ -645,7 +648,8 @@ impl ToolRegistry {
             | ToolName::GitDiff
             | ToolName::GitLog
             | ToolName::GitShow
-            | ToolName::BrowserState => Ok((PermissionKind::Read, false, false)),
+            | ToolName::BrowserState
+            | ToolName::UpdatePlan => Ok((PermissionKind::Read, false, false)),
             ToolName::GitAdd
             | ToolName::GitCommit
             | ToolName::GitPush
@@ -739,6 +743,7 @@ impl ToolRegistry {
             ToolName::GitFetch => self.git_fetch(parse_arguments(&tool_call.arguments)?),
             ToolName::GitPull => self.git_pull(parse_arguments(&tool_call.arguments)?),
             ToolName::BrowserState => self.browser_state(),
+            ToolName::UpdatePlan => update_plan(parse_arguments(&tool_call.arguments)?),
             ToolName::Mcp => Err(ToolError::InvalidArguments(
                 "MCP tools must be executed by the agent MCP runtime".to_owned(),
             )),
@@ -2320,6 +2325,18 @@ struct GitPullArgs {
     ff_only: Option<bool>,
 }
 
+#[derive(Deserialize)]
+struct UpdatePlanArgs {
+    steps: Vec<UpdatePlanStepArgs>,
+}
+
+#[derive(Deserialize)]
+struct UpdatePlanStepArgs {
+    description: String,
+    #[serde(default)]
+    status: Option<String>,
+}
+
 #[derive(Serialize)]
 struct DirectoryEntry {
     name: String,
@@ -2380,6 +2397,67 @@ fn checked_relative_path(requested_path: &str) -> Result<&Path, ToolError> {
         ));
     }
     Ok(requested_path)
+}
+
+/// Records the model-authored turn plan. The step count is the model's choice;
+/// only obvious garbage (empty list, blank text, absurd length) is rejected.
+fn update_plan(args: UpdatePlanArgs) -> Result<ToolExecution, ToolError> {
+    if args.steps.is_empty() {
+        return Err(ToolError::InvalidArguments(
+            "steps must contain at least one step".to_owned(),
+        ));
+    }
+    if args.steps.len() > MAX_PLAN_STEPS {
+        return Err(ToolError::InvalidArguments(format!(
+            "steps must contain at most {MAX_PLAN_STEPS} steps"
+        )));
+    }
+
+    let mut steps = Vec::with_capacity(args.steps.len());
+    for (index, step) in args.steps.iter().enumerate() {
+        let description = step.description.trim();
+        if description.is_empty() {
+            return Err(ToolError::InvalidArguments(format!(
+                "step {} description must not be empty",
+                index + 1
+            )));
+        }
+        steps.push(PlanStep {
+            id: format!("step_{}", index + 1),
+            description: truncate_plan_description(description),
+            status: normalize_plan_status(step.status.as_deref()),
+        });
+    }
+
+    let done = steps
+        .iter()
+        .filter(|step| step.status == PlanStepStatus::Done)
+        .count();
+    let output = serde_json::to_value(&steps)
+        .map(|steps| json!({ "steps": steps }))
+        .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
+    Ok(ToolExecution {
+        output,
+        summary: format!("Updated plan ({done}/{} done)", steps.len()),
+    })
+}
+
+fn normalize_plan_status(status: Option<&str>) -> PlanStepStatus {
+    match status.map(str::trim).unwrap_or_default() {
+        "in_progress" | "in-progress" | "current" | "running" => PlanStepStatus::InProgress,
+        "done" | "completed" | "complete" => PlanStepStatus::Done,
+        _ => PlanStepStatus::Pending,
+    }
+}
+
+fn truncate_plan_description(description: &str) -> String {
+    if description.chars().count() <= MAX_PLAN_STEP_DESCRIPTION_CHARS {
+        return description.to_owned();
+    }
+    description
+        .chars()
+        .take(MAX_PLAN_STEP_DESCRIPTION_CHARS)
+        .collect()
 }
 
 fn parse_git_status_lines(stdout: &str) -> Vec<Value> {
@@ -4688,6 +4766,72 @@ mod tests {
         assert_eq!(loaded.output["title"], "Docs");
         assert_eq!(loaded.output["visible"], true);
         assert!(loaded.summary.contains("example.test/docs"));
+    }
+
+    #[test]
+    fn records_a_model_authored_plan_of_any_length() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let call = ToolCall {
+            id: "plan_1".to_owned(),
+            name: ToolName::UpdatePlan,
+            arguments: json!({
+                "steps": [
+                    { "description": "  Read the popover render path  ", "status": "done" },
+                    { "description": "Add the update_plan tool", "status": "in_progress" },
+                    { "description": "Emit the plan event" },
+                    { "description": "Update desktop step highlighting", "status": "unknown" },
+                    { "description": "Run cargo tests" }
+                ]
+            }),
+        };
+        // Read permission, so a plan refresh never asks for approval.
+        assert_eq!(
+            tools.permission_for(&call).expect("permission resolves"),
+            (PermissionKind::Read, false, false)
+        );
+
+        let execution = tools.execute(&Mode::Ask, &call).expect("plan records");
+        let steps = execution.output["steps"]
+            .as_array()
+            .expect("steps array")
+            .clone();
+        assert_eq!(steps.len(), 5);
+        assert_eq!(steps[0]["id"], "step_1");
+        assert_eq!(steps[0]["description"], "Read the popover render path");
+        assert_eq!(steps[0]["status"], "done");
+        assert_eq!(steps[1]["status"], "in_progress");
+        assert_eq!(steps[2]["status"], "pending");
+        assert_eq!(steps[3]["status"], "pending");
+        assert_eq!(steps[4]["id"], "step_5");
+        assert_eq!(execution.summary, "Updated plan (1/5 done)");
+    }
+
+    #[test]
+    fn rejects_empty_or_oversized_plans() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let call = |steps: Value| ToolCall {
+            id: "plan_1".to_owned(),
+            name: ToolName::UpdatePlan,
+            arguments: json!({ "steps": steps }),
+        };
+
+        assert!(matches!(
+            tools.execute(&Mode::Ask, &call(json!([]))),
+            Err(ToolError::InvalidArguments(_))
+        ));
+        assert!(matches!(
+            tools.execute(&Mode::Ask, &call(json!([{ "description": "   " }]))),
+            Err(ToolError::InvalidArguments(_))
+        ));
+        let too_many = (0..MAX_PLAN_STEPS + 1)
+            .map(|index| json!({ "description": format!("step {index}") }))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            tools.execute(&Mode::Ask, &call(json!(too_many))),
+            Err(ToolError::InvalidArguments(_))
+        ));
     }
 
     #[test]

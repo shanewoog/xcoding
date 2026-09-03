@@ -110,6 +110,18 @@ async function main() {
   assert.ok(!appSource.includes("activity-badge"), "the removed activity badge must not be rendered");
   assert.ok(appSource.includes("run-plan-list"), "the compact run status should expose task steps when expanded");
   assert.ok(appSource.includes("currentRunPlanStep(plan, activity)"), "run status should derive the current task step");
+  assert.ok(
+    activitySource.includes('event.tool_call.name === "update_plan"'),
+    "plan refreshes should render as the step list instead of an activity row",
+  );
+  assert.ok(
+    appSource.includes('plan.findIndex((step) => step.status === "in_progress")'),
+    "a model-authored plan should drive the current step from its explicit status",
+  );
+  assert.ok(
+    appSource.includes('step.status === "done"'),
+    "a step the model already marked done should render as done",
+  );
   assert.ok(cssSource.includes("position: sticky"), "run status should stay visible while the conversation scrolls");
 
   // A new task is collapsed by default, but incoming stream updates must not

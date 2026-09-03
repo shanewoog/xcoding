@@ -1010,6 +1010,13 @@ function runPlanStepDescription(step: PlanStep, locale: Locale): string {
 
 function currentRunPlanStep(plan: PlanStep[], activity: ActivityItem[]): number {
   if (plan.length === 0) return -1;
+  // A model-authored plan carries explicit statuses, so trust them first.
+  const inProgress = plan.findIndex((step) => step.status === "in_progress");
+  if (inProgress >= 0) return inProgress;
+  if (plan.some((step) => step.status === "done")) {
+    const nextPending = plan.findIndex((step) => step.status !== "done");
+    return nextPending >= 0 ? nextPending : plan.length - 1;
+  }
   const activityText = activity.map((item) => `${item.label} ${item.detail}`).join("\n").toLowerCase();
   const changeIndex = plan.findIndex((step) => step.id === "change");
   const verifyIndex = plan.findIndex((step) => step.id === "verify");
@@ -5801,11 +5808,15 @@ export function App() {
                 {plan.length > 0 && currentPlanStepIndex >= 0 ? (
                   <ol className="run-plan-list" aria-label={t(locale, "run.planLabel")}>
                     {plan.map((step, index) => {
-                      const state = index < currentPlanStepIndex
+                      // An explicit done status wins, so a model plan that finishes steps
+                      // out of order still renders them as finished.
+                      const state = step.status === "done"
                         ? "done"
                         : index === currentPlanStepIndex
                           ? (runStatus.phase === "failed" ? "failed" : "current")
-                          : "pending";
+                          : index < currentPlanStepIndex
+                            ? "done"
+                            : "pending";
                       return (
                         <li className={`run-plan-step ${state}`} key={step.id}>
                           <span className="run-plan-marker" aria-hidden="true">

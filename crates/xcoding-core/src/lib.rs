@@ -1162,7 +1162,8 @@ fn title_from_user_message(message: &str) -> String {
 mod tests {
     use serde_json::json;
     use xcoding_protocol::{
-        JsonRpcRequest, JsonRpcResponse, Mode, PlanStep, SessionEvent, ToolCall, ToolName,
+        JsonRpcRequest, JsonRpcResponse, Mode, PlanStep, PlanStepStatus, SessionEvent, ToolCall,
+        ToolName,
     };
 
     use super::*;
@@ -1467,6 +1468,7 @@ mod tests {
             steps: vec![PlanStep {
                 id: "inspect".to_owned(),
                 description: "Inspect settings".to_owned(),
+                status: PlanStepStatus::InProgress,
             }],
         })
         .expect("event saves");
@@ -1524,6 +1526,7 @@ mod tests {
             steps: vec![PlanStep {
                 id: "inspect".to_owned(),
                 description: "Inspect settings".to_owned(),
+                status: PlanStepStatus::InProgress,
             }],
         })
         .expect("plan event");

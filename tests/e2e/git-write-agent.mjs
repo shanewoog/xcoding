@@ -147,6 +147,7 @@ async function main() {
         "git_fetch",
         "git_pull",
         "browser_state",
+        "update_plan",
       ],
     );
 

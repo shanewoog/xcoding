@@ -28,6 +28,7 @@ const EXPECTED_TOOLS = [
   "git_fetch",
   "git_pull",
   "browser_state",
+  "update_plan",
 ];
 
 async function main() {

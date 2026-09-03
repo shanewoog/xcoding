@@ -15,11 +15,12 @@ use xcoding_core::{CoreError, CoreService};
 use xcoding_mcp::{McpError, McpRuntime, load_plugin_config};
 use xcoding_policy::{PermissionDecision, PermissionKind, evaluate_detailed};
 #[cfg(test)]
-use xcoding_protocol::DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT;
+use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_STEPS};
 use xcoding_protocol::{
     ChatParams, ChatResult, CloudProviderConfig, ContextCompaction, LocalMemory,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_LOCAL_MEMORY_CHARS,
     MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, Message, MessageRole, ModelCapabilities, PlanStep,
+    PlanStepStatus,
     ModelRoute, ModelRouteStatus, ProviderApiKey, ProviderKeyStatus, ProviderTrustLevel,
     ProviderWireApi,
     ResolveActionParams,
@@ -2136,16 +2137,19 @@ impl<'a> AgentService<'a> {
                         id: "inspect".to_owned(),
                         description: "Inspect relevant workspace files before changing anything."
                             .to_owned(),
+                        status: PlanStepStatus::Pending,
                     },
                     PlanStep {
                         id: "change".to_owned(),
                         description: "Propose a minimal patch and wait for required approval."
                             .to_owned(),
+                        status: PlanStepStatus::Pending,
                     },
                     PlanStep {
                         id: "verify".to_owned(),
                         description: "Run approved verification commands and report the result."
                             .to_owned(),
+                        status: PlanStepStatus::Pending,
                     },
                 ],
             },
@@ -3431,6 +3435,17 @@ impl<'a> AgentService<'a> {
                         summary: execution.summary,
                     },
                 );
+                if success && tool_call.name == ToolName::UpdatePlan {
+                    if let Some(steps) = parse_plan_steps(&execution.output) {
+                        self.emit(
+                            on_event,
+                            SessionEvent::Plan {
+                                session_id: session.id,
+                                steps,
+                            },
+                        );
+                    }
+                }
                 Ok(output)
             }
             Err(ToolError::Cancelled) => Err(AgentError::Cancelled),
@@ -3501,6 +3516,12 @@ impl<'a> AgentService<'a> {
         let output = self.record_tool_error(session, &tool_call, error, on_event)?;
         Ok((id, output))
     }
+}
+
+/// Reads the steps `update_plan` just recorded so the UI can replace the plan.
+fn parse_plan_steps(output: &Value) -> Option<Vec<PlanStep>> {
+    let steps: Vec<PlanStep> = serde_json::from_value(output.get("steps")?.clone()).ok()?;
+    (!steps.is_empty()).then_some(steps)
 }
 
 fn tool_execution_success(tool_call: &ToolCall, output: &Value) -> bool {
@@ -3892,6 +3913,11 @@ fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             name: "browser_state".to_owned(),
             description: "Read the desktop embedded side-browser snapshot (url, title, visibility). Use this instead of probing with run_command. Returns available=false when no side browser is open.".to_owned(),
             parameters: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "update_plan".to_owned(),
+            description: "Replace the visible turn plan with your own concrete steps, then call it again to move statuses forward. Write steps that name the actual work for this request, not generic phases, and choose however many steps the task really needs instead of a fixed count. Keep at most one step in_progress at a time, and mark finished steps done. Skip this tool for trivial single-action requests.".to_owned(),
+            parameters: json!({ "type": "object", "properties": { "steps": { "type": "array", "minItems": 1, "maxItems": 20, "description": "Ordered plan steps; the length is your choice based on the task", "items": { "type": "object", "properties": { "description": { "type": "string", "description": "One short imperative sentence naming concrete work" }, "status": { "type": "string", "enum": ["pending", "in_progress", "done"], "description": "Defaults to pending" } }, "required": ["description"] } } }, "required": ["steps"] }),
         },
     ]
 }
@@ -7124,9 +7150,46 @@ private material
                 "git_push",
                 "git_fetch",
                 "git_pull",
-                "browser_state"
+                "browser_state",
+                "update_plan"
             ]
         );
+    }
+
+    #[test]
+    fn update_plan_definition_leaves_the_step_count_to_the_model() {
+        let plan = tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == "update_plan")
+            .expect("update_plan is declared");
+        let steps = &plan.parameters["properties"]["steps"];
+        assert_eq!(steps["minItems"], 1);
+        assert_eq!(steps["maxItems"], MAX_PLAN_STEPS);
+        assert_eq!(
+            steps["items"]["properties"]["status"]["enum"],
+            json!(["pending", "in_progress", "done"])
+        );
+        assert!(plan.description.contains("however many steps"));
+    }
+
+    #[test]
+    fn reads_model_authored_plan_steps_from_tool_output() {
+        let steps = parse_plan_steps(&json!({
+            "steps": [
+                { "id": "step_1", "description": "Locate the popover", "status": "done" },
+                { "id": "step_2", "description": "Add the tool", "status": "in_progress" },
+                { "id": "step_3", "description": "Run tests", "status": "pending" },
+                { "id": "step_4", "description": "Report" }
+            ]
+        }))
+        .expect("plan steps parse");
+        assert_eq!(steps.len(), 4);
+        assert_eq!(steps[0].status, PlanStepStatus::Done);
+        assert_eq!(steps[1].status, PlanStepStatus::InProgress);
+        assert_eq!(steps[3].status, PlanStepStatus::Pending);
+
+        assert!(parse_plan_steps(&json!({ "steps": [] })).is_none());
+        assert!(parse_plan_steps(&json!({ "available": false })).is_none());
     }
 
     #[test]

@@ -7,13 +7,22 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const fixtureRoot = resolve(repositoryRoot, "tests/e2e/fixtures/read-only-agent");
+const fixtureRoot = resolve(repositoryRoot, "tests/e2e/fixtures/model-plan-agent");
 const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcoding-server";
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
+// Deliberately not three steps: the model owns the count, the backend must not reshape it.
+const MODEL_PLAN = [
+  { description: "Read src/session.ts and locate resumeSession", status: "done" },
+  { description: "List the callers that depend on the resumed prefix", status: "done" },
+  { description: "Patch resumeSession to keep the prefix stable", status: "in_progress" },
+  { description: "Add a regression test for the resumed prefix" },
+  { description: "Run the session tests and report the result" },
+];
+
 async function main() {
   const mock = await startMockProvider();
-  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-"));
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-model-plan-"));
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
@@ -26,35 +35,55 @@ async function main() {
   try {
     const result = await rpc.request("session.chat", {
       workspace_root: fixtureRoot,
-      message: "What source files are in this repository?",
+      message: "Keep the resumed prefix stable in src/session.ts.",
       model: "fixture-model",
     });
 
     assert.equal(result.session.status, "done");
-    assert.match(result.message.content, /src\/auth\.ts/);
-    assert.ok(rpc.events.some((event) => event.type === "plan"));
 
-    const toolStart = rpc.events.find((event) => event.type === "tool_start");
-    assert.deepEqual(toolStart?.tool_call, {
-      id: "call_list_root",
-      name: "list_dir",
-      arguments: { path: "." },
-    });
-    assert.equal(rpc.events.find((event) => event.type === "tool_end")?.success, true);
-    assert.ok(rpc.events.some((event) => event.type === "text_delta"));
+    const planEvents = rpc.events.filter((event) => event.type === "plan");
+    assert.equal(planEvents.length, 2, "the scaffold plan then the model-authored plan");
+    assert.equal(planEvents[0].steps.length, 3, "pre-turn scaffold stays a three-step plan");
+
+    const modelPlan = planEvents[1].steps;
+    assert.equal(modelPlan.length, MODEL_PLAN.length, "model chooses the step count");
+    assert.deepEqual(
+      modelPlan.map((step) => step.description),
+      MODEL_PLAN.map((step) => step.description),
+    );
+    assert.deepEqual(
+      modelPlan.map((step) => step.status),
+      ["done", "done", "in_progress", "pending", "pending"],
+      "explicit statuses survive, omitted status defaults to pending",
+    );
+    assert.deepEqual(
+      modelPlan.map((step) => step.id),
+      ["step_1", "step_2", "step_3", "step_4", "step_5"],
+    );
+
+    const planToolEnd = rpc.events.find(
+      (event) => event.type === "tool_end" && event.tool_call.name === "update_plan",
+    );
+    assert.equal(planToolEnd?.success, true);
+    assert.equal(planToolEnd?.summary, "Updated plan (2/5 done)");
+
+    const { detail } = await rpc.request("session.detail", { session_id: result.session.id });
+    const persisted = detail.events.filter((item) => item.event.type === "plan").at(-1)?.event.steps;
+    assert.equal(persisted?.length, MODEL_PLAN.length, "the plan is replayable from history");
 
     assert.equal(mock.requests.length, 2);
-    assert.deepEqual(
-      mock.requests[0].tools.map((tool) => tool.function.name),
-      ["list_dir", "read_file", "search_code", "load_skill", "apply_patch", "run_command", "git_status", "git_diff", "git_log", "git_show", "git_add", "git_commit", "git_push", "git_fetch", "git_pull", "browser_state", "update_plan"],
+    assert.ok(
+      mock.requests[0].tools.some((tool) => tool.function.name === "update_plan"),
+      "update_plan is offered to the model",
     );
-    const secondTurnMessages = mock.requests[1].messages;
-    assert.ok(secondTurnMessages.some((message) => message.role === "assistant" && message.tool_calls));
-    const toolResult = secondTurnMessages.find((message) => message.role === "tool");
-    assert.equal(toolResult?.tool_call_id, "call_list_root");
-    assert.match(toolResult?.content ?? "", /src/);
+    const planTool = mock.requests[0].tools.find((tool) => tool.function.name === "update_plan");
+    assert.equal(planTool.function.parameters.properties.steps.minItems, 1);
+    assert.ok(
+      !/exactly (three|six|ten|\d+) steps/i.test(planTool.function.description),
+      "the tool must not prescribe a fixed step count",
+    );
 
-    console.log("Read-only agent E2E passed.");
+    console.log("Model-authored plan agent E2E passed.");
   } finally {
     await rpc.close();
     await mock.close();
@@ -107,19 +136,18 @@ function startRpcClient({ databasePath, environment }) {
   child.stderr.on("data", (chunk) => {
     diagnostics += chunk;
   });
-  child.once("error", (error) => rejectPending(error));
+  const rejectPending = (error) => {
+    for (const { reject } of pending.values()) {
+      reject(error);
+    }
+    pending.clear();
+  };
+  child.once("error", rejectPending);
   child.once("exit", (code) => {
     if (pending.size > 0) {
       rejectPending(new Error(`xcoding-server exited with ${code}: ${diagnostics.trim()}`));
     }
   });
-
-  function rejectPending(error) {
-    for (const { reject } of pending.values()) {
-      reject(error);
-    }
-    pending.clear();
-  }
 
   return {
     events,
@@ -159,11 +187,31 @@ async function startMockProvider() {
     });
     if (turn++ === 0) {
       response.write(
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_list_root","type":"function","function":{"name":"list_dir","arguments":"{\\"path\\":\\".\\"}"}}]}}]}\n\n',
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_update_plan",
+                    type: "function",
+                    function: {
+                      name: "update_plan",
+                      arguments: JSON.stringify({ steps: MODEL_PLAN }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\n`,
       );
     } else {
       response.write(
-        'data: {"choices":[{"delta":{"content":"The repository contains src/auth.ts."}}]}\n\n',
+        `data: ${JSON.stringify({
+          choices: [{ delta: { content: "Plan recorded for src/session.ts." } }],
+        })}\n\n`,
       );
     }
     response.end("data: [DONE]\n\n");
@@ -179,7 +227,10 @@ async function startMockProvider() {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     requests,
-    close: () => new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose())),
+    close: () =>
+      new Promise((resolveClose, rejectClose) =>
+        server.close((error) => (error ? rejectClose(error) : resolveClose())),
+      ),
   };
 }
 

@@ -68,12 +68,13 @@ impl ContextSnapshot {
         let mut prompt = format!(
             "You are XCoding, a local coding agent for a software workspace. \
 When repository facts are needed, use tools before answering. Never claim a file was inspected unless a tool result contains it. \
-Available tools: list_dir, read_file, search_code, load_skill, apply_patch, run_command, git_status, git_diff, git_log, git_show, git_add, git_commit, git_push, git_fetch, git_pull, browser_state. \
+Available tools: list_dir, read_file, search_code, load_skill, apply_patch, run_command, git_status, git_diff, git_log, git_show, git_add, git_commit, git_push, git_fetch, git_pull, browser_state, update_plan. \
 Current mode: {mode}. \
 In ask mode, propose writes and wait for required approval. In auto-edit mode, ordinary file patches and allowlisted safe commands may apply without approval; high-risk writes and non-allowlisted commands still require user approval. \
 In full-auto mode, every permitted write and command runs without approval; hard-denied destructive commands are still blocked, so act with extra care. \
 Prefer minimal, scoped changes. Do not invent secrets or commit credentials. If apply_patch fails with a patch conflict, re-read the file and retry with updated old_text; do not force-write without matching the current contents. \
 When several independent read-only lookups are needed, request them as parallel tool calls in one turn instead of one call per turn. \
+For any request that needs more than one action, call update_plan first with your own concrete steps for this task, and choose the number of steps the task actually needs instead of a fixed count. Name real work such as the files, symbols, or commands involved, not generic phases. Call update_plan again as you go to mark the finished step done and the next one in_progress, keeping at most one step in_progress. Skip update_plan for a trivial single-action request. \
 When starting a local service, launch it with run_command background=true plus ready_port and, when it needs its own directory, cwd. A ready=true result already proves the service is up, so do not add health-check commands after it. \
 Once the user's stated goal is met, answer and stop. Do not extend a finished request into further exploration such as unrelated credentials, auth flows, or code reading; if follow-up work looks useful, name it in the answer and let the user decide. \
 When giving the user a URL to open, write it as bare text. Do not wrap it in backticks or a fenced code block, because only unwrapped URLs render as clickable links in the desktop UI. \
@@ -396,6 +397,19 @@ mod tests {
         let prompt = ContextSnapshot::load(&root).system_prompt("full-auto");
         assert!(prompt.contains("independent read-only lookups"));
         assert!(prompt.contains("parallel tool calls in one turn"));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn system_prompt_asks_the_model_to_author_its_own_plan() {
+        let root = temp_workspace("plan-guidance");
+
+        let prompt = ContextSnapshot::load(&root).system_prompt("full-auto");
+        assert!(prompt.contains("update_plan"));
+        // The step count belongs to the model, not to a hardcoded scaffold.
+        assert!(prompt.contains("the number of steps the task actually needs"));
+        assert!(prompt.contains("at most one step in_progress"));
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
