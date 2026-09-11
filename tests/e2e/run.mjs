@@ -98,6 +98,7 @@ async function buildPrerequisites() {
   console.log("Building e2e prerequisites...");
   await Promise.all([
     runProcess("cargo", ["build", "-p", "xcoding-server"]),
+    runProcess("cargo", ["build", "-p", "xcoding-agent", "--example", "desktop_trajectory"]),
     runProcess(pnpmCommand, pnpmArgs),
   ]);
 }

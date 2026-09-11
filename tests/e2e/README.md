@@ -32,7 +32,9 @@ Preview the selected scope without running commands with `pnpm verify:affected -
 - `git-push-agent.mjs`: approved `git_push` (high-risk write, no force) in ask and auto-edit modes against a local bare remote.
 - `git-fetch-pull-agent.mjs`: approved `git_fetch` + `git_pull` (high-risk write, default ff-only, no force/rebase) in ask and auto-edit modes against a local bare remote.
 - `provider-auth-error.mjs`: mock HTTP 401 maps to actionable OPENAI_API_KEY / XCODING_OPENAI_BASE_URL guidance.
+- `anthropic-messages.mjs`: native Anthropic Messages request/auth/image/tool conversion plus streamed thinking, usage, model, tool-result refeed, and final answer through the real server.
 - `surface-parity.mjs`: static CLI / Desktop / server method surface parity for shared workflows.
+- `dynamic-surface-parity.mjs`: same-fixture, same-prompt dynamic parity across CLI/server RPC and the Desktop core call path, including provider requests, live events, replay steps, and task summary.
 
 ## 中文说明
 

@@ -25,14 +25,13 @@ use xcoding_protocol::{
     MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES,
     MAX_MAX_TOOL_ROUNDS, MAX_NON_STREAM_TIMEOUT_SECS, MAX_PROVIDER_KEY_WEIGHT,
-    MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
-    MAX_STREAM_IDLE_TIMEOUT_SECS, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
-    MIN_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_MIN_REQUEST_COUNT,
-    MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
-    MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES,
-    MIN_MAX_TOOL_ROUNDS, MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS,
-    MIN_STREAM_IDLE_TIMEOUT_SECS, ModelRoute, ProviderAuthStatus, ProviderModel, ProviderWireApi,
-    UserConfig,
+    MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS,
+    MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_FAILURE_THRESHOLD,
+    MIN_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
+    MIN_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+    MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
+    MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS,
+    ModelRoute, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
 
 pub type ProviderEventStream =
@@ -913,8 +912,23 @@ pub async fn list_models(
     base_url_override: Option<&str>,
     api_key_override: Option<&str>,
 ) -> Result<ListModelsResult, String> {
+    list_models_with_wire_api(
+        base_url_override,
+        api_key_override,
+        ProviderWireApi::ChatCompletions,
+    )
+    .await
+}
+
+/// Resolve credentials and list models with the authentication scheme selected
+/// for the provider's native wire protocol.
+pub async fn list_models_with_wire_api(
+    base_url_override: Option<&str>,
+    api_key_override: Option<&str>,
+    wire_api: ProviderWireApi,
+) -> Result<ListModelsResult, String> {
     let (api_key, base_url) = resolve_provider_credentials(base_url_override, api_key_override)?;
-    OpenAiCompatibleProvider::new(api_key, base_url)
+    OpenAiCompatibleProvider::with_wire_api(api_key, base_url, wire_api)
         .list_models()
         .await
         .map_err(|error| error.to_string())
@@ -1073,17 +1087,22 @@ impl OpenAiCompatibleProvider {
         match self.wire_api {
             ProviderWireApi::ChatCompletions => format!("{}/chat/completions", self.base_url),
             ProviderWireApi::Responses => format!("{}/responses", self.base_url),
+            ProviderWireApi::AnthropicMessages => format!("{}/messages", self.base_url),
         }
     }
 
     /// List models from the OpenAI-compatible `GET {base_url}/models` endpoint.
     pub async fn list_models(&self) -> Result<ListModelsResult, ProviderError> {
-        let response = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
+        let request = self.client.get(format!("{}/models", self.base_url));
+        let request = match self.wire_api {
+            ProviderWireApi::AnthropicMessages => request
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01"),
+            ProviderWireApi::ChatCompletions | ProviderWireApi::Responses => {
+                request.bearer_auth(&self.api_key)
+            }
+        };
+        let response = request.send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1115,6 +1134,9 @@ impl OpenAiCompatibleProvider {
             ProviderWireApi::Responses => {
                 self.stream_responses(model, messages, tools, reasoning_effort)
                     .await
+            }
+            ProviderWireApi::AnthropicMessages => {
+                self.stream_anthropic_messages(model, messages, tools).await
             }
         }
     }
@@ -1214,13 +1236,16 @@ impl OpenAiCompatibleProvider {
     }
 
     async fn open_chat_completion(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
-        let response = self
-            .client
-            .post(self.chat_url())
-            .bearer_auth(&self.api_key)
-            .json(body)
-            .send()
-            .await?;
+        let request = self.client.post(self.chat_url()).json(body);
+        let request = match self.wire_api {
+            ProviderWireApi::AnthropicMessages => request
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01"),
+            ProviderWireApi::ChatCompletions | ProviderWireApi::Responses => {
+                request.bearer_auth(&self.api_key)
+            }
+        };
+        let response = request.send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1312,6 +1337,113 @@ impl OpenAiCompatibleProvider {
             if !completed {
                 Err::<(), ProviderError>(ProviderError::StreamDisconnected(
                     "connection closed before response.completed".to_owned(),
+                ))?;
+            }
+            if !emitted_event {
+                Err::<(), ProviderError>(ProviderError::EmptyStream {
+                    status: response_status,
+                    body: format_stream_body_sample(&body_sample, body_sample_truncated),
+                })?;
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+
+    async fn stream_anthropic_messages(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderEventStream, ProviderError> {
+        let body = anthropic_messages_request_body(model, messages, tools);
+        let response = self.open_chat_completion(&body).await?;
+        let response_status = response.status();
+
+        let stream = try_stream! {
+            let mut bytes = response.bytes_stream();
+            let mut buffer = Vec::new();
+            let mut body_sample = Vec::new();
+            let mut body_sample_truncated = false;
+            let mut emitted_event = false;
+            let mut completed = false;
+            let mut input_tokens = 0usize;
+            let mut output_tokens = 0usize;
+            let mut stop_reason = None;
+            let mut tool_calls: BTreeMap<usize, ToolCallAccumulator> = BTreeMap::new();
+
+            while let Some(chunk) = bytes.next().await {
+                let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                append_stream_body_sample(&mut body_sample, &mut body_sample_truncated, &chunk);
+                buffer.extend_from_slice(&chunk);
+
+                while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = buffer.drain(..=newline).collect();
+                    let line = std::str::from_utf8(&line)?.trim();
+                    let Some(data) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    match parse_anthropic_event(data.trim())? {
+                        AnthropicParsedEvent::MessageStart { model, usage } => {
+                            input_tokens = usage;
+                            if let Some(model) = model {
+                                yield ProviderEvent::ModelReported(model);
+                            }
+                        }
+                        AnthropicParsedEvent::TextDelta(delta) => {
+                            if !delta.is_empty() {
+                                emitted_event = true;
+                                yield ProviderEvent::TextDelta(delta);
+                            }
+                        }
+                        AnthropicParsedEvent::ReasoningDelta(delta) => {
+                            if !delta.is_empty() {
+                                yield ProviderEvent::ReasoningDelta(delta);
+                            }
+                        }
+                        AnthropicParsedEvent::ToolUseStart { index, id, name, arguments } => {
+                            let call = tool_calls.entry(index).or_default();
+                            call.id = Some(id);
+                            call.kind = Some("function".to_owned());
+                            call.name = Some(name);
+                            call.arguments = arguments;
+                        }
+                        AnthropicParsedEvent::ToolInputDelta { index, arguments } => {
+                            tool_calls.entry(index).or_default().arguments.push_str(&arguments);
+                        }
+                        AnthropicParsedEvent::MessageDelta { reason, usage } => {
+                            stop_reason = reason;
+                            output_tokens = usage;
+                        }
+                        AnthropicParsedEvent::MessageStop => {
+                            let truncated = stop_reason.as_deref() == Some("max_tokens");
+                            for (_, call) in std::mem::take(&mut tool_calls) {
+                                emitted_event = true;
+                                yield ProviderEvent::ToolCall(call.finish(truncated)?);
+                            }
+                            if input_tokens > 0 || output_tokens > 0 {
+                                yield ProviderEvent::Usage(ProviderUsage {
+                                    prompt_tokens: input_tokens,
+                                    completion_tokens: output_tokens,
+                                });
+                            }
+                            completed = true;
+                            break;
+                        }
+                        AnthropicParsedEvent::Failed(message) => {
+                            Err::<(), ProviderError>(ProviderError::InvalidResponse(message))?;
+                        }
+                        AnthropicParsedEvent::Ignored => {}
+                    }
+                }
+                if completed {
+                    break;
+                }
+            }
+
+            if !completed {
+                Err::<(), ProviderError>(ProviderError::StreamDisconnected(
+                    "connection closed before message_stop".to_owned(),
                 ))?;
             }
             if !emitted_event {
@@ -1438,6 +1570,107 @@ fn responses_request_body(
         body["reasoning"] = json!({ "effort": effort });
     }
     body
+}
+
+const ANTHROPIC_MAX_TOKENS: usize = 8192;
+
+fn anthropic_messages_request_body(
+    model: &str,
+    messages: Vec<ChatMessage>,
+    tools: &[ToolDefinition],
+) -> Value {
+    let mut system = Vec::new();
+    let mut anthropic_messages = Vec::new();
+    for message in messages {
+        if message.role == "system" {
+            if let Some(content) = message.content {
+                system.push(chat_content_as_text(content));
+            }
+            continue;
+        }
+
+        let mut blocks = Vec::new();
+        if let Some(content) = message.content {
+            blocks.extend(anthropic_content_blocks(content));
+        }
+        if let Some(tool_calls) = message.tool_calls {
+            blocks.extend(tool_calls.into_iter().map(|tool_call| {
+                let input = serde_json::from_str::<Value>(&tool_call.function.arguments)
+                    .unwrap_or_else(|_| json!({}));
+                json!({
+                    "type": "tool_use",
+                    "id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "input": input
+                })
+            }));
+        }
+        if message.role == "tool" {
+            blocks = vec![json!({
+                "type": "tool_result",
+                "tool_use_id": message.tool_call_id.unwrap_or_default(),
+                "content": blocks
+            })];
+            push_anthropic_message(&mut anthropic_messages, "user", blocks);
+        } else if !blocks.is_empty() {
+            push_anthropic_message(&mut anthropic_messages, &message.role, blocks);
+        }
+    }
+
+    let mut body = json!({
+        "model": model,
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
+        "stream": true,
+        "system": system.join("\n\n"),
+        "messages": anthropic_messages
+    });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.parameters
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = json!({ "type": "auto" });
+    }
+    body
+}
+
+fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, mut blocks: Vec<Value>) {
+    if let Some(previous) = messages.last_mut()
+        && previous.get("role").and_then(Value::as_str) == Some(role)
+        && let Some(content) = previous.get_mut("content").and_then(Value::as_array_mut)
+    {
+        content.append(&mut blocks);
+        return;
+    }
+    messages.push(json!({ "role": role, "content": blocks }));
+}
+
+fn anthropic_content_blocks(content: ChatMessageContent) -> Vec<Value> {
+    match content {
+        ChatMessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
+        ChatMessageContent::Parts(parts) => parts
+            .into_iter()
+            .filter_map(|part| match part {
+                ChatContentPart::Text { text } => Some(json!({ "type": "text", "text": text })),
+                ChatContentPart::ImageUrl { image_url } => {
+                    let data_url = image_url.url.strip_prefix("data:")?;
+                    let (media_type, data) = data_url.split_once(";base64,")?;
+                    Some(json!({
+                        "type": "image",
+                        "source": { "type": "base64", "media_type": media_type, "data": data }
+                    }))
+                }
+            })
+            .collect(),
+    }
 }
 
 fn chat_content_as_text(content: ChatMessageContent) -> String {
@@ -1587,6 +1820,140 @@ fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderErr
             Ok(ResponsesParsedEvent::Failed(message))
         }
         _ => Ok(ResponsesParsedEvent::Ignored),
+    }
+}
+
+enum AnthropicParsedEvent {
+    MessageStart {
+        model: Option<String>,
+        usage: usize,
+    },
+    TextDelta(String),
+    ReasoningDelta(String),
+    ToolUseStart {
+        index: usize,
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolInputDelta {
+        index: usize,
+        arguments: String,
+    },
+    MessageDelta {
+        reason: Option<String>,
+        usage: usize,
+    },
+    MessageStop,
+    Failed(String),
+    Ignored,
+}
+
+fn parse_anthropic_event(data: &str) -> Result<AnthropicParsedEvent, ProviderError> {
+    let event: Value = serde_json::from_str(data)?;
+    match event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "message_start" => Ok(AnthropicParsedEvent::MessageStart {
+            model: event
+                .pointer("/message/model")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            usage: event
+                .pointer("/message/usage/input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
+        }),
+        "content_block_start"
+            if event.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use") =>
+        {
+            let id = event
+                .pointer("/content_block/id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::InvalidToolCall("Anthropic tool_use is missing id".to_owned())
+                })?;
+            let name = event
+                .pointer("/content_block/name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ProviderError::InvalidToolCall("Anthropic tool_use is missing name".to_owned())
+                })?;
+            let input = event.pointer("/content_block/input");
+            let arguments = match input {
+                Some(Value::Object(values)) if values.is_empty() => String::new(),
+                Some(Value::Null) | None => String::new(),
+                Some(value) => serde_json::to_string(value)?,
+            };
+            Ok(AnthropicParsedEvent::ToolUseStart {
+                index: event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments,
+            })
+        }
+        "content_block_delta" => {
+            let delta_type = event
+                .pointer("/delta/type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            match delta_type {
+                "text_delta" => Ok(AnthropicParsedEvent::TextDelta(
+                    event
+                        .pointer("/delta/text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                )),
+                "thinking_delta" => Ok(AnthropicParsedEvent::ReasoningDelta(
+                    event
+                        .pointer("/delta/thinking")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                )),
+                "input_json_delta" => Ok(AnthropicParsedEvent::ToolInputDelta {
+                    index,
+                    arguments: event
+                        .pointer("/delta/partial_json")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                }),
+                _ => Ok(AnthropicParsedEvent::Ignored),
+            }
+        }
+        "message_delta" => Ok(AnthropicParsedEvent::MessageDelta {
+            reason: event
+                .pointer("/delta/stop_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            usage: event
+                .pointer("/usage/output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
+        }),
+        "message_stop" => Ok(AnthropicParsedEvent::MessageStop),
+        "error" => {
+            let kind = event
+                .pointer("/error/type")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
+            let message = event
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("Anthropic Messages API returned an error");
+            Ok(AnthropicParsedEvent::Failed(match kind {
+                Some(kind) => format!("{kind}: {message}"),
+                None => message.to_owned(),
+            }))
+        }
+        _ => Ok(AnthropicParsedEvent::Ignored),
     }
 }
 
@@ -2085,8 +2452,9 @@ mod tests {
         // Gateways in front of reasoning models send minutes of this before the
         // first content token. Dropping it made the caller treat a working
         // stream as one that never started.
-        let parsed = parse_chunk(r#"{"choices":[{"delta":{"reasoning_content":"weighing options"}}]}"#)
-            .expect("reasoning chunk parses");
+        let parsed =
+            parse_chunk(r#"{"choices":[{"delta":{"reasoning_content":"weighing options"}}]}"#)
+                .expect("reasoning chunk parses");
         assert_eq!(parsed.reasoning.as_deref(), Some("weighing options"));
         assert_eq!(parsed.content, None);
         assert!(parsed.tool_calls.is_empty());
@@ -2098,8 +2466,9 @@ mod tests {
             .expect("string reasoning parses");
         assert_eq!(as_string.reasoning.as_deref(), Some("thinking"));
 
-        let as_object = parse_chunk(r#"{"choices":[{"delta":{"reasoning":{"content":"nested"}}}]}"#)
-            .expect("object reasoning parses");
+        let as_object =
+            parse_chunk(r#"{"choices":[{"delta":{"reasoning":{"content":"nested"}}}]}"#)
+                .expect("object reasoning parses");
         assert_eq!(as_object.reasoning.as_deref(), Some("nested"));
 
         let empty = parse_chunk(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#)
@@ -2206,6 +2575,74 @@ mod tests {
             ProviderWireApi::Responses,
         );
         assert_eq!(responses.chat_url(), "https://example.test/v1/responses");
+
+        let anthropic = OpenAiCompatibleProvider::with_wire_api(
+            "test-key",
+            "https://example.test/v1/",
+            ProviderWireApi::AnthropicMessages,
+        );
+        assert_eq!(anthropic.chat_url(), "https://example.test/v1/messages");
+    }
+
+    #[test]
+    fn builds_native_anthropic_messages_request_body() {
+        let body = anthropic_messages_request_body(
+            "claude-test",
+            vec![
+                ChatMessage::system("Follow repository instructions."),
+                ChatMessage::user_with_images(
+                    "Inspect this.",
+                    &[("image/png".to_owned(), "aGVsbG8=".to_owned())],
+                ),
+                ChatMessage::assistant_tool_calls(vec![ProviderToolCall {
+                    id: "toolu_1".to_owned(),
+                    kind: "function".to_owned(),
+                    function: ProviderFunctionCall {
+                        name: "read_file".to_owned(),
+                        arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
+                    },
+                    truncated: false,
+                }]),
+                ChatMessage::tool_result("toolu_1", "file contents"),
+            ],
+            &[ToolDefinition {
+                name: "read_file".to_owned(),
+                description: "Read one file".to_owned(),
+                parameters: json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
+            }],
+        );
+
+        assert_eq!(body["model"], "claude-test");
+        assert_eq!(body["max_tokens"], ANTHROPIC_MAX_TOKENS);
+        assert_eq!(body["system"], "Follow repository instructions.");
+        assert_eq!(
+            body["messages"][0]["content"][1]["source"]["type"],
+            "base64"
+        );
+        assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+        assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn parses_native_anthropic_stream_events() {
+        match parse_anthropic_event(r#"{"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":42}}}"#).unwrap() {
+            AnthropicParsedEvent::MessageStart { model, usage } => assert_eq!((model.as_deref(), usage), (Some("claude-test"), 42)),
+            _ => panic!("expected message start"),
+        }
+        match parse_anthropic_event(r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"planning"}}"#).unwrap() {
+            AnthropicParsedEvent::ReasoningDelta(delta) => assert_eq!(delta, "planning"),
+            _ => panic!("expected thinking delta"),
+        }
+        match parse_anthropic_event(r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#).unwrap() {
+            AnthropicParsedEvent::ToolInputDelta { index, arguments } => assert_eq!((index, arguments.as_str()), (2, r#"{"path":"#)),
+            _ => panic!("expected tool input delta"),
+        }
+        match parse_anthropic_event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":17}}"#).unwrap() {
+            AnthropicParsedEvent::MessageDelta { reason, usage } => assert_eq!((reason.as_deref(), usage), (Some("max_tokens"), 17)),
+            _ => panic!("expected message delta"),
+        }
     }
 
     #[test]

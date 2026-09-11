@@ -349,6 +349,7 @@ async function assertCompactionSummaryCarriesTheDescription() {
     configOverrides: {
       model_context_windows: { "fixture-model": 24_000 },
       context_compaction_threshold_percent: 50,
+      lossy_context_compaction_enabled: true,
     },
   });
 

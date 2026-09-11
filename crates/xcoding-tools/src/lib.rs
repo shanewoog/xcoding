@@ -3,7 +3,7 @@
 use std::{
     collections::VecDeque,
     env, fs,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     net::{Ipv4Addr, SocketAddr, TcpStream},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -649,7 +649,17 @@ impl ToolRegistry {
             | ToolName::GitLog
             | ToolName::GitShow
             | ToolName::BrowserState
-            | ToolName::UpdatePlan => Ok((PermissionKind::Read, false, false)),
+            | ToolName::UpdatePlan
+            | ToolName::NewContext
+            | ToolName::HistoryList
+            | ToolName::HistoryRead
+            | ToolName::HistorySearch
+            | ToolName::NotesList
+            | ToolName::NotesRead
+            | ToolName::NotesSearch => Ok((PermissionKind::Read, false, false)),
+            ToolName::NotesAppend | ToolName::NotesWrite => {
+                Ok((PermissionKind::Write, false, false))
+            }
             ToolName::GitAdd
             | ToolName::GitCommit
             | ToolName::GitPush
@@ -744,6 +754,18 @@ impl ToolRegistry {
             ToolName::GitPull => self.git_pull(parse_arguments(&tool_call.arguments)?),
             ToolName::BrowserState => self.browser_state(),
             ToolName::UpdatePlan => update_plan(parse_arguments(&tool_call.arguments)?),
+            ToolName::NewContext
+            | ToolName::HistoryList
+            | ToolName::HistoryRead
+            | ToolName::HistorySearch
+            | ToolName::NotesList
+            | ToolName::NotesRead
+            | ToolName::NotesSearch
+            | ToolName::NotesAppend
+            | ToolName::NotesWrite => Err(ToolError::InvalidArguments(
+                "context, history, and notes tools must be executed by the agent runtime"
+                    .to_owned(),
+            )),
             ToolName::Mcp => Err(ToolError::InvalidArguments(
                 "MCP tools must be executed by the agent MCP runtime".to_owned(),
             )),
@@ -898,7 +920,9 @@ impl ToolRegistry {
                     end_line: 0,
                     truncated: false,
                     content_redacted: true,
-                    redaction_reason: Some("sensitive credential file; content withheld".to_owned()),
+                    redaction_reason: Some(
+                        "sensitive credential file; content withheld".to_owned(),
+                    ),
                 })?,
                 summary: format!(
                     "Read metadata for sensitive file {relative_path} ({file_size} bytes)"
@@ -948,6 +972,7 @@ impl ToolRegistry {
     }
 
     fn search_code(&self, args: SearchCodeArgs) -> Result<ToolExecution, ToolError> {
+        let started_at = Instant::now();
         if args.query.trim().is_empty() {
             return Err(ToolError::InvalidArguments(
                 "query must not be empty".to_owned(),
@@ -986,8 +1011,12 @@ impl ToolRegistry {
         let mut pending = VecDeque::from([root]);
         let mut candidates = Vec::new();
         let candidate_cap = (limit.saturating_mul(5)).clamp(limit, MAX_SEARCH_CANDIDATES);
+        let mut directories_scanned = 0u64;
+        let mut files_scanned = 0u64;
+        let mut bytes_scanned = 0u64;
 
         'walk: while let Some(directory) = pending.pop_front() {
+            directories_scanned = directories_scanned.saturating_add(1);
             for entry in fs::read_dir(directory)?.filter_map(Result::ok) {
                 let file_type = entry.file_type()?;
                 if file_type.is_symlink() {
@@ -999,7 +1028,8 @@ impl ToolRegistry {
                     }
                     continue;
                 }
-                if !file_type.is_file() || entry.metadata()?.len() > MAX_SEARCH_FILE_BYTES {
+                let metadata = entry.metadata()?;
+                if !file_type.is_file() || metadata.len() > MAX_SEARCH_FILE_BYTES {
                     continue;
                 }
 
@@ -1013,52 +1043,92 @@ impl ToolRegistry {
                     continue;
                 }
 
-                let Ok(content) = fs::read_to_string(entry.path()) else {
+                let Ok(file) = fs::File::open(entry.path()) else {
                     continue;
                 };
-                let lines: Vec<&str> = content.lines().collect();
-                for (index, line) in lines.iter().enumerate() {
+                files_scanned = files_scanned.saturating_add(1);
+                let mut reader = BufReader::new(file);
+                let mut line = String::new();
+                let mut line_number = 0usize;
+                let mut previous_lines = VecDeque::with_capacity(context_lines);
+                let mut pending_hits: Vec<(SearchResult, usize)> = Vec::new();
+                let mut file_hits = Vec::new();
+                let remaining_capacity = candidate_cap.saturating_sub(candidates.len());
+                let score = path_rank_score(&relative);
+                let mut read_succeeded = true;
+
+                loop {
+                    line.clear();
+                    let bytes_read = match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(bytes_read) => bytes_read,
+                        Err(_) => {
+                            read_succeeded = false;
+                            break;
+                        }
+                    };
+                    bytes_scanned = bytes_scanned.saturating_add(bytes_read as u64);
+                    line_number += 1;
+                    let line = line.strip_suffix('\n').unwrap_or(&line);
+                    let line = line.strip_suffix('\r').unwrap_or(line);
+
+                    for (result, remaining_after) in &mut pending_hits {
+                        result.after.push(line.to_owned());
+                        *remaining_after = remaining_after.saturating_sub(1);
+                    }
+                    let mut pending_index = 0;
+                    while pending_index < pending_hits.len() {
+                        if pending_hits[pending_index].1 == 0 {
+                            let (result, _) = pending_hits.remove(pending_index);
+                            file_hits.push(RankedSearchHit { score, result });
+                        } else {
+                            pending_index += 1;
+                        }
+                    }
+
                     let matched = if args.case_insensitive {
                         line.to_lowercase().contains(&query_cmp)
                     } else {
                         line.contains(&query_cmp)
                     };
-                    if !matched {
-                        continue;
-                    }
-
-                    let before = if context_lines == 0 {
-                        Vec::new()
-                    } else {
-                        let start = index.saturating_sub(context_lines);
-                        lines[start..index]
-                            .iter()
-                            .map(|value| (*value).to_owned())
-                            .collect()
-                    };
-                    let after = if context_lines == 0 {
-                        Vec::new()
-                    } else {
-                        let end = (index + 1 + context_lines).min(lines.len());
-                        lines[index + 1..end]
-                            .iter()
-                            .map(|value| (*value).to_owned())
-                            .collect()
-                    };
-
-                    candidates.push(RankedSearchHit {
-                        score: path_rank_score(&relative),
-                        result: SearchResult {
+                    if matched && file_hits.len() + pending_hits.len() < remaining_capacity {
+                        let result = SearchResult {
                             path: relative.clone(),
-                            line: index + 1,
-                            text: (*line).to_owned(),
-                            before,
-                            after,
-                        },
-                    });
-                    if candidates.len() >= candidate_cap {
-                        break 'walk;
+                            line: line_number,
+                            text: line.to_owned(),
+                            before: previous_lines.iter().cloned().collect(),
+                            after: Vec::new(),
+                        };
+                        if context_lines == 0 {
+                            file_hits.push(RankedSearchHit { score, result });
+                        } else {
+                            pending_hits.push((result, context_lines));
+                        }
                     }
+
+                    if context_lines > 0 {
+                        if previous_lines.len() == context_lines {
+                            previous_lines.pop_front();
+                        }
+                        previous_lines.push_back(line.to_owned());
+                    }
+
+                    if file_hits.len() >= remaining_capacity && pending_hits.is_empty() {
+                        break;
+                    }
+                }
+
+                if !read_succeeded {
+                    continue;
+                }
+                file_hits.extend(
+                    pending_hits
+                        .into_iter()
+                        .map(|(result, _)| RankedSearchHit { score, result }),
+                );
+                candidates.extend(file_hits);
+                if candidates.len() >= candidate_cap {
+                    break 'walk;
                 }
             }
         }
@@ -1077,9 +1147,19 @@ impl ToolRegistry {
             .map(|hit| hit.result)
             .collect();
         let (results, over_budget) = cap_json_items(results);
+        let elapsed_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
         Ok(ToolExecution {
-            output: json!({ "results": results, "truncated": over_limit || over_budget }),
+            output: json!({
+                "results": results,
+                "truncated": over_limit || over_budget,
+                "stats": {
+                    "directories_scanned": directories_scanned,
+                    "files_scanned": files_scanned,
+                    "bytes_scanned": bytes_scanned,
+                    "elapsed_ms": elapsed_ms,
+                },
+            }),
             summary: format!("Searched for {:?}", args.query),
         })
     }
@@ -2100,20 +2180,18 @@ impl ToolRegistry {
         let mut index = 0;
         while index < args.len() {
             let arg = &args[index];
-            let option_path: Option<&str> = if arg == "-C"
-                || arg == "--git-dir"
-                || arg == "--work-tree"
-            {
-                index += 1;
-                args.get(index).map(String::as_str)
-            } else if let Some(path) = arg
-                .strip_prefix("--git-dir=")
-                .or_else(|| arg.strip_prefix("--work-tree="))
-            {
-                Some(path)
-            } else {
-                None
-            };
+            let option_path: Option<&str> =
+                if arg == "-C" || arg == "--git-dir" || arg == "--work-tree" {
+                    index += 1;
+                    args.get(index).map(String::as_str)
+                } else if let Some(path) = arg
+                    .strip_prefix("--git-dir=")
+                    .or_else(|| arg.strip_prefix("--work-tree="))
+                {
+                    Some(path)
+                } else {
+                    None
+                };
 
             if let Some(path) = option_path {
                 self.resolve(path).map(|_| ())?;
@@ -2654,13 +2732,22 @@ fn is_high_risk_path(path: &str) -> bool {
         .map(|part| part.to_ascii_lowercase())
         .collect();
     let file_name = parts.last().map(String::as_str).unwrap_or("");
-    parts.iter().any(|part| part == ".git" || part == ".xcoding")
-        || parts.windows(2).any(|window| window[0] == ".git" && window[1] == "hooks")
-        || parts.windows(2).any(|window| {
-            window[0] == ".github" && window[1] == "workflows"
-        })
-        || parts.iter().any(|part| part == ".gitlab" || part == ".circleci")
-        || matches!(file_name, ".gitlab-ci.yml" | ".gitlab-ci.yaml" | ".circleci.yml")
+    parts
+        .iter()
+        .any(|part| part == ".git" || part == ".xcoding")
+        || parts
+            .windows(2)
+            .any(|window| window[0] == ".git" && window[1] == "hooks")
+        || parts
+            .windows(2)
+            .any(|window| window[0] == ".github" && window[1] == "workflows")
+        || parts
+            .iter()
+            .any(|part| part == ".gitlab" || part == ".circleci")
+        || matches!(
+            file_name,
+            ".gitlab-ci.yml" | ".gitlab-ci.yaml" | ".circleci.yml"
+        )
 }
 
 fn validate_git_name(kind: &str, value: &str) -> Result<(), ToolError> {
@@ -2908,9 +2995,7 @@ fn redact_config_line(line: &str) -> String {
     let Some(field_start) = lower.find(field) else {
         return line.to_owned();
     };
-    let Some(separator_offset) = line[field_start + field.len()..]
-        .find(['=', ':'])
-    else {
+    let Some(separator_offset) = line[field_start + field.len()..].find(['=', ':']) else {
         return line.to_owned();
     };
     let separator = field_start + field.len() + separator_offset;
@@ -2933,11 +3018,7 @@ fn redact_config_line(line: &str) -> String {
             .map(|offset| value_start + offset)
             .unwrap_or(line.len()),
     };
-    format!(
-        "{}[REDACTED]{}",
-        &line[..value_start],
-        &line[value_end..]
-    )
+    format!("{}[REDACTED]{}", &line[..value_start], &line[value_end..])
 }
 
 /// Keeps the leading items that fit inside [`MAX_TOOL_JSON_BYTES`] once serialized,
@@ -3304,8 +3385,7 @@ mod tests {
     #[test]
     fn redacts_sensitive_files_but_preserves_safe_source_reads() {
         let root = workspace();
-        fs::write(root.join(".env"), "API_KEY=plain-secret\nMODE=dev\n")
-            .expect("env file writes");
+        fs::write(root.join(".env"), "API_KEY=plain-secret\nMODE=dev\n").expect("env file writes");
         fs::write(
             root.join("config.json"),
             r#"{"api_key":"plain-secret","name":"demo"}"#,
@@ -3313,8 +3393,11 @@ mod tests {
         .expect("config file writes");
         fs::write(root.join("id_rsa"), "PRIVATE KEY plain-secret\n").expect("key writes");
         fs::create_dir_all(root.join("src")).expect("source directory creates");
-        fs::write(root.join("src/lib.rs"), "const VALUE: &str = \"plain-secret\";\n")
-            .expect("source file writes");
+        fs::write(
+            root.join("src/lib.rs"),
+            "const VALUE: &str = \"plain-secret\";\n",
+        )
+        .expect("source file writes");
         let tools = ToolRegistry::new(&root).expect("registry starts");
 
         let read = |id: &str, path: &str| {
@@ -3332,23 +3415,51 @@ mod tests {
 
         let env = read("read_env", ".env");
         assert_eq!(env.output["content_redacted"], true);
-        assert!(env.output["content"].as_str().unwrap().contains("API_KEY=[REDACTED]"));
-        assert!(!env.output["content"].as_str().unwrap().contains("plain-secret"));
+        assert!(
+            env.output["content"]
+                .as_str()
+                .unwrap()
+                .contains("API_KEY=[REDACTED]")
+        );
+        assert!(
+            !env.output["content"]
+                .as_str()
+                .unwrap()
+                .contains("plain-secret")
+        );
 
         let config = read("read_config", "config.json");
         assert_eq!(config.output["content_redacted"], true);
-        assert!(config.output["content"].as_str().unwrap().contains("api_key"));
-        assert!(!config.output["content"].as_str().unwrap().contains("plain-secret"));
+        assert!(
+            config.output["content"]
+                .as_str()
+                .unwrap()
+                .contains("api_key")
+        );
+        assert!(
+            !config.output["content"]
+                .as_str()
+                .unwrap()
+                .contains("plain-secret")
+        );
 
         let key = read("read_key", "id_rsa");
         assert_eq!(key.output["content"], "");
         assert_eq!(key.output["content_redacted"], true);
-        assert!(key.output["redaction_reason"].as_str().unwrap().contains("sensitive"));
+        assert!(
+            key.output["redaction_reason"]
+                .as_str()
+                .unwrap()
+                .contains("sensitive")
+        );
         assert!(key.summary.contains("sensitive"));
 
         let source = read("read_source", "src/lib.rs");
         assert_eq!(source.output["content_redacted"], false);
-        assert_eq!(source.output["content"], "const VALUE: &str = \"plain-secret\";");
+        assert_eq!(
+            source.output["content"],
+            "const VALUE: &str = \"plain-secret\";"
+        );
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -3582,6 +3693,14 @@ mod tests {
         );
         assert_eq!(case_search.output["results"][0]["before"][0], "// preamble");
         assert_eq!(case_search.output["results"][0]["after"][0], "// trailer");
+        assert_eq!(case_search.output["stats"]["files_scanned"], 1);
+        assert_eq!(case_search.output["stats"]["directories_scanned"], 3);
+        assert!(
+            case_search.output["stats"]["bytes_scanned"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
 
         let exact = tools
             .execute(
@@ -3594,6 +3713,84 @@ mod tests {
             )
             .expect("exact search");
         assert_eq!(exact.output["results"].as_array().unwrap().len(), 0);
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    #[ignore = "large repository performance benchmark"]
+    fn large_repo_search_performance() {
+        const VISIBLE_FILES: usize = 10_000;
+        const IGNORED_FILES: usize = 2_000;
+        const MAX_SEARCH_MILLIS: u64 = 30_000;
+
+        let root = workspace();
+        let src = root.join("src");
+        let node_modules = root.join("node_modules/pkg");
+        let target = root.join("target/debug");
+        fs::create_dir_all(&src).expect("src creates");
+        fs::create_dir_all(&node_modules).expect("node_modules creates");
+        fs::create_dir_all(&target).expect("target creates");
+
+        for index in 0..VISIBLE_FILES {
+            let marker = if index == VISIBLE_FILES - 1 {
+                " PHASE4_LARGE_REPO_MARKER"
+            } else {
+                ""
+            };
+            fs::write(
+                src.join(format!("module_{index:05}.rs")),
+                format!("pub const VALUE_{index}: usize = {index};{marker}\n"),
+            )
+            .expect("visible fixture writes");
+        }
+        for index in 0..IGNORED_FILES {
+            let directory = if index % 2 == 0 {
+                &node_modules
+            } else {
+                &target
+            };
+            fs::write(
+                directory.join(format!("generated_{index:05}.js")),
+                "PHASE4_LARGE_REPO_MARKER\n",
+            )
+            .expect("ignored fixture writes");
+        }
+
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+        let search = tools
+            .execute(
+                &Mode::Ask,
+                &ToolCall {
+                    id: "large_repo_search".to_owned(),
+                    name: ToolName::SearchCode,
+                    arguments: json!({ "query": "PHASE4_LARGE_REPO_MARKER" }),
+                },
+            )
+            .expect("large repository search succeeds");
+
+        assert_eq!(search.output["results"].as_array().unwrap().len(), 1);
+        assert_eq!(search.output["results"][0]["path"], "src/module_09999.rs");
+        assert_eq!(
+            search.output["stats"]["files_scanned"],
+            VISIBLE_FILES as u64
+        );
+        assert_eq!(search.output["stats"]["directories_scanned"], 2);
+        assert!(
+            search.output["stats"]["elapsed_ms"].as_u64().unwrap() < MAX_SEARCH_MILLIS,
+            "large repository search exceeded {MAX_SEARCH_MILLIS} ms: {}",
+            search.output["stats"]
+        );
+        println!(
+            "{}",
+            json!({
+                "benchmark": "large_repo_search",
+                "fixture_visible_files": VISIBLE_FILES,
+                "fixture_ignored_files": IGNORED_FILES,
+                "max_search_ms": MAX_SEARCH_MILLIS,
+                "stats": search.output["stats"],
+            })
+        );
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -3979,6 +4176,54 @@ mod tests {
             )
             .expect_err("auto-edit still denies unauthorized git pull");
         assert!(matches!(denied_pull, ToolError::PermissionDenied));
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
+    fn classifies_agent_internal_tools_without_executing_them() {
+        let root = workspace();
+        let tools = ToolRegistry::new(&root).expect("registry starts");
+
+        for name in [
+            ToolName::NewContext,
+            ToolName::HistoryList,
+            ToolName::HistoryRead,
+            ToolName::HistorySearch,
+            ToolName::NotesList,
+            ToolName::NotesRead,
+            ToolName::NotesSearch,
+        ] {
+            let call = ToolCall {
+                id: format!("{}_permission", name.as_str()),
+                name,
+                arguments: json!({}),
+            };
+            assert_eq!(
+                tools.permission_for(&call).expect("permission resolves"),
+                (PermissionKind::Read, false, false)
+            );
+            assert!(matches!(
+                tools.execute_authorized(&call),
+                Err(ToolError::InvalidArguments(_))
+            ));
+        }
+
+        for name in [ToolName::NotesAppend, ToolName::NotesWrite] {
+            let call = ToolCall {
+                id: format!("{}_permission", name.as_str()),
+                name,
+                arguments: json!({}),
+            };
+            assert_eq!(
+                tools.permission_for(&call).expect("permission resolves"),
+                (PermissionKind::Write, false, false)
+            );
+            assert!(matches!(
+                tools.execute_authorized(&call),
+                Err(ToolError::InvalidArguments(_))
+            ));
+        }
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -5071,7 +5316,12 @@ mod tests {
 
         assert_eq!(execution.output["success"], true);
         assert_eq!(execution.output["args"][2], "api_key=plain-secret");
-        assert!(execution.output["stdout"].as_str().unwrap().contains("plain-secret"));
+        assert!(
+            execution.output["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("plain-secret")
+        );
 
         fs::remove_dir_all(root).expect("workspace removes");
     }
@@ -5095,7 +5345,10 @@ mod tests {
                     &|| false,
                 )
                 .expect_err("git path must stay in workspace");
-            assert!(matches!(error, ToolError::PathOutsideWorkspace(_)), "{error:?}");
+            assert!(
+                matches!(error, ToolError::PathOutsideWorkspace(_)),
+                "{error:?}"
+            );
         }
         fs::remove_dir_all(root).expect("workspace removes");
     }

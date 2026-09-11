@@ -46,12 +46,36 @@ async function main() {
 
   const workspace = await mkdtemp(join(tmpdir(), "xcoding-custom-allowlist-"));
   const databaseDirectory = await mkdtemp(join(tmpdir(), "xcoding-custom-allowlist-db-"));
+  const homeDirectory = await mkdtemp(join(tmpdir(), "xcoding-custom-allowlist-home-"));
   const databasePath = join(databaseDirectory, "xcoding.db");
   await writeFile(join(workspace, "README.md"), "# custom allowlist fixture\n", "utf8");
 
   const mock = await startMockProvider();
+  const configDirectory = join(homeDirectory, ".xcoding");
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    join(configDirectory, "config.json"),
+    `${JSON.stringify(
+      {
+        provider_fallback_enabled: false,
+        providers: [{
+          id: "default",
+          name: "openai",
+          base_url: `http://127.0.0.1:${mock.port}/v1`,
+          api_key: "test-key",
+          trust_level: "official",
+        }],
+        active_provider_id: "default",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
   const environment = {
     ...process.env,
+    HOME: homeDirectory,
+    USERPROFILE: homeDirectory,
     OPENAI_API_KEY: "test-key",
     XCODING_OPENAI_BASE_URL: `http://127.0.0.1:${mock.port}/v1`,
   };
@@ -94,7 +118,11 @@ async function main() {
       model: "fixture-model",
       mode: "auto-edit",
     });
-    assert.equal(auto.session.status, "done");
+    assert.equal(
+      auto.session.status,
+      "done",
+      `unexpected command policy events: ${JSON.stringify(eventsFor(rpc, auto.session.id))}`,
+    );
     assert.equal(
       eventsFor(rpc, auto.session.id).some((event) => event.type === "approval_requested"),
       false,
@@ -112,6 +140,7 @@ async function main() {
     await mock.close();
     await rm(workspace, { recursive: true, force: true });
     await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
   }
 }
 

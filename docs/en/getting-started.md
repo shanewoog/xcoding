@@ -217,6 +217,12 @@ Enabled servers are started for each agent turn. Their tools appear to the model
 
 ## Continue a session
 
+## Lossless context windows
+
+XCoding keeps context lossless by default. When a model window approaches its configured threshold, the agent opens a new context window at the current user message instead of summarizing or deleting older messages. The model can recover exact earlier content with `history_list`, `history_read`, and `history_search`, and can keep workspace-scoped durable facts with the `notes_*` tools.
+
+Under **Settings → Context**, enable **Allow lossy context compaction** only when summaries, hard history truncation, and large tool-output truncation are acceptable. The saved `lossy_context_compaction_enabled` flag defaults to `false`; changing it takes effect on the next turn.
+
 Follow up in an existing finished session (same id, shared history):
 
 ```bash

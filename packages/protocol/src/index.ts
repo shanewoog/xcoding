@@ -9,7 +9,11 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
-export type ToolName = "list_dir" | "read_file" | "search_code" | "load_skill" | "apply_patch" | "run_command" | "git_status" | "git_diff" | "git_log" | "git_show" | "git_add" | "git_commit" | "git_push" | "git_fetch" | "git_pull" | "update_plan" | "mcp";
+export type ToolName = "list_dir" | "read_file" | "search_code" | "load_skill" | "apply_patch" | "run_command" | "git_status" | "git_diff" | "git_log" | "git_show" | "git_add" | "git_commit" | "git_push" | "git_fetch" | "git_pull" | "browser_state" | "update_plan" | "new_context" | "history_list" | "history_read" | "history_search" | "notes_list" | "notes_read" | "notes_search" | "notes_append" | "notes_write" | "mcp";
+
+export const MAX_LOCAL_MEMORY_CHARS = 600;
+export const MIN_CONTEXT_TOOL_LIMIT = 1;
+export const MAX_CONTEXT_TOOL_LIMIT = 100;
 
 export interface Session {
   id: string;
@@ -27,6 +31,20 @@ export interface Message {
   id: string;
   session_id: string;
   role: MessageRole;
+  content: string;
+  created_at: string;
+}
+
+export interface ContextWindow {
+  session_id: string;
+  window_index: number;
+  start_message_count: number;
+  created_at: string;
+}
+
+export interface LocalMemory {
+  id: string;
+  workspace_root: string;
   content: string;
   created_at: string;
 }
@@ -69,7 +87,7 @@ export interface ListModelsResult {
 }
 
 /** One OpenAI-compatible cloud provider endpoint in Desktop settings. */
-export type ProviderWireApi = "chat_completions" | "responses";
+export type ProviderWireApi = "chat_completions" | "responses" | "anthropic_messages";
 export type ProviderTrustLevel = "local" | "official" | "relay";
 
 /** How provider HTTP traffic reaches the network. */
@@ -236,6 +254,8 @@ export interface UserConfig {
   model_context_windows?: Record<string, number>;
   /** Percentage of the configured model context window at which pre-compaction starts. */
   context_compaction_threshold_percent?: number;
+  /** When true, older history is summarized. Default lossless path opens a new context window. */
+  lossy_context_compaction_enabled?: boolean;
   /** Describes images with a second model when the session model cannot read them. */
   vision_delegate?: VisionDelegateConfig;
   /** Per-model capability overrides keyed by normalized (trimmed, lowercased) model id. */

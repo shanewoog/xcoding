@@ -12,17 +12,16 @@ use serde_json::Value;
 use thiserror::Error;
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, ContextCompaction,
-    CreateSessionParams, CreateSessionResult, FileChangeKind, FileChangeSummary, GetConfigParams,
-    GetConfigResult, GetSessionDetailParams, GetSessionDetailResult, JsonRpcRequest,
-    JsonRpcResponse, ListSessionsParams, ListSessionsResult, LocalMemory, Message, MessageRole,
-    PendingAction,
-    PendingActionStatus, PersistedSessionEvent, PingResult, ReplaySessionParams,
-    ReplaySessionResult, ReplayStep, RestorePoint, RpcError, Session, SessionDetail, SessionEvent,
-    SessionStatus, SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName,
-    WorkspaceConfig,
+    ContextWindow, CreateSessionParams, CreateSessionResult, FileChangeKind, FileChangeSummary,
+    GetConfigParams, GetConfigResult, GetSessionDetailParams, GetSessionDetailResult,
+    JsonRpcRequest, JsonRpcResponse, ListSessionsParams, ListSessionsResult, LocalMemory, Message,
+    MessageRole, PendingAction, PendingActionStatus, PersistedSessionEvent, PingResult,
+    ReplaySessionParams, ReplaySessionResult, ReplayStep, RestorePoint, RpcError, Session,
+    SessionDetail, SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, TaskSummary,
+    ToolCall, ToolName, WorkspaceConfig,
 };
-use xcoding_store::{SessionStore, StoreError};
 pub use xcoding_store::{RedactionReport, StoredVisionDescription};
+use xcoding_store::{SessionStore, StoreError};
 
 fn temporary_sibling(path: &Path) -> PathBuf {
     match path.file_name().and_then(|value| value.to_str()) {
@@ -447,6 +446,67 @@ impl CoreService {
             .list_messages(session_id)
             .map_err(CoreError::from)
     }
+
+    pub fn message_count(&self, session_id: uuid::Uuid) -> Result<usize, CoreError> {
+        self.store
+            .count_messages(session_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn latest_context_window_start(&self, session_id: uuid::Uuid) -> Result<usize, CoreError> {
+        self.store
+            .latest_context_window_start(session_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn create_context_window(
+        &self,
+        session_id: uuid::Uuid,
+        start_message_count: usize,
+    ) -> Result<usize, CoreError> {
+        self.store
+            .create_context_window(session_id, start_message_count)
+            .map_err(CoreError::from)
+    }
+
+    pub fn context_windows(&self, session_id: uuid::Uuid) -> Result<Vec<ContextWindow>, CoreError> {
+        self.store
+            .list_context_windows(session_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn history_page(
+        &self,
+        session_id: uuid::Uuid,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Message>, CoreError> {
+        self.store
+            .list_messages_page(session_id, offset, limit)
+            .map_err(CoreError::from)
+    }
+
+    pub fn history_message(
+        &self,
+        session_id: uuid::Uuid,
+        message_id: uuid::Uuid,
+    ) -> Result<Option<Message>, CoreError> {
+        self.store
+            .get_session_message(session_id, message_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn search_history(
+        &self,
+        session_id: uuid::Uuid,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Message>, CoreError> {
+        self.store
+            .search_session_messages(session_id, query, offset, limit)
+            .map_err(CoreError::from)
+    }
     pub fn context_compaction(
         &self,
         session_id: uuid::Uuid,
@@ -489,6 +549,50 @@ impl CoreService {
     ) -> Result<Vec<LocalMemory>, CoreError> {
         self.store
             .list_local_memories(workspace_root, limit)
+            .map_err(CoreError::from)
+    }
+
+    pub fn local_memories_page(
+        &self,
+        workspace_root: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LocalMemory>, CoreError> {
+        self.store
+            .list_local_memories_page(workspace_root, offset, limit)
+            .map_err(CoreError::from)
+    }
+
+    pub fn local_memory(
+        &self,
+        workspace_root: &str,
+        memory_id: uuid::Uuid,
+    ) -> Result<Option<LocalMemory>, CoreError> {
+        self.store
+            .get_local_memory(workspace_root, memory_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn search_local_memories(
+        &self,
+        workspace_root: &str,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LocalMemory>, CoreError> {
+        self.store
+            .search_local_memories(workspace_root, query, offset, limit)
+            .map_err(CoreError::from)
+    }
+
+    pub fn replace_local_memory(
+        &self,
+        workspace_root: &str,
+        memory_id: uuid::Uuid,
+        content: &str,
+    ) -> Result<Option<LocalMemory>, CoreError> {
+        self.store
+            .replace_local_memory(workspace_root, memory_id, content)
             .map_err(CoreError::from)
     }
 
@@ -978,11 +1082,19 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     success: Some(false),
                 });
             }
-            SessionEvent::VisionDelegateStart { image_count, delegate_model, historical, .. } => {
+            SessionEvent::VisionDelegateStart {
+                image_count,
+                delegate_model,
+                historical,
+                ..
+            } => {
                 steps.push(ReplayStep {
                     kind: "vision_delegate_start".to_owned(),
                     summary: if *historical {
-                        format!("使用 {} 分析历史消息中的 {} 张图片", delegate_model, image_count)
+                        format!(
+                            "使用 {} 分析历史消息中的 {} 张图片",
+                            delegate_model, image_count
+                        )
                     } else {
                         format!("使用 {} 分析 {} 张图片", delegate_model, image_count)
                     },
@@ -990,15 +1102,24 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     success: None,
                 });
             }
-            SessionEvent::VisionDelegateSuccess { image_count, description_length, .. } => {
+            SessionEvent::VisionDelegateSuccess {
+                image_count,
+                description_length,
+                ..
+            } => {
                 steps.push(ReplayStep {
                     kind: "vision_delegate_success".to_owned(),
-                    summary: format!("✓ 已生成图片描述（{} 张，{} 字符）", image_count, description_length),
+                    summary: format!(
+                        "✓ 已生成图片描述（{} 张，{} 字符）",
+                        image_count, description_length
+                    ),
                     tool_name: None,
                     success: Some(true),
                 });
             }
-            SessionEvent::VisionDelegateFailed { image_count, error, .. } => {
+            SessionEvent::VisionDelegateFailed {
+                image_count, error, ..
+            } => {
                 steps.push(ReplayStep {
                     kind: "vision_delegate_failed".to_owned(),
                     summary: format!("✗ 视觉分析失败（{} 张图片）: {}", image_count, error),
@@ -1006,7 +1127,12 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
                     success: Some(false),
                 });
             }
-            SessionEvent::VisionDescriptionsApplied { image_count, historical_chars, truncated, .. } => {
+            SessionEvent::VisionDescriptionsApplied {
+                image_count,
+                historical_chars,
+                truncated,
+                ..
+            } => {
                 steps.push(ReplayStep {
                     kind: "vision_descriptions_applied".to_owned(),
                     summary: if *truncated {
@@ -1051,7 +1177,10 @@ fn write_command_allowlist(
         }
     }
     let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_ALLOWLIST_RELATIVE_PATH);
-    write_text_utf8(&path, &xcoding_policy::render_command_allowlist_file(&normalized))?;
+    write_text_utf8(
+        &path,
+        &xcoding_policy::render_command_allowlist_file(&normalized),
+    )?;
     Ok(normalized)
 }
 
@@ -1076,7 +1205,10 @@ fn write_command_denylist(
         }
     }
     let path = Path::new(workspace_root).join(xcoding_policy::COMMAND_DENYLIST_RELATIVE_PATH);
-    write_text_utf8(&path, &xcoding_policy::render_command_denylist_file(&normalized))?;
+    write_text_utf8(
+        &path,
+        &xcoding_policy::render_command_denylist_file(&normalized),
+    )?;
     Ok(normalized)
 }
 
@@ -1434,6 +1566,123 @@ mod tests {
         assert_eq!(messages[1].role, MessageRole::Tool);
         assert_eq!(messages[2].role, MessageRole::Assistant);
     }
+    #[test]
+    fn forwards_lossless_history_and_notes_contracts() {
+        let core = CoreService::in_memory().expect("core starts");
+        let first = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "alpha unique".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("first chat starts");
+        core.complete_chat(first.id, "first answer")
+            .expect("first chat completes");
+        let continued = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "beta unique".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+                session_id: Some(first.id),
+                images: None,
+            })
+            .expect("follow-up starts");
+        assert_eq!(continued.id, first.id);
+
+        let other = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/other".to_owned(),
+                message: "other unique".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-5.5".to_owned()),
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("other chat starts");
+
+        let messages = core.messages(first.id).expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(core.message_count(first.id).unwrap(), 3);
+        assert_eq!(
+            core.history_page(first.id, 1, 1).unwrap()[0].content,
+            "first answer"
+        );
+        assert!(matches!(
+            core.history_page(first.id, 0, 0),
+            Err(CoreError::Store(StoreError::InvalidInput(_)))
+        ));
+        assert!(matches!(
+            core.history_page(first.id, 0, 101),
+            Err(CoreError::Store(StoreError::InvalidInput(_)))
+        ));
+        assert_eq!(core.history_page(first.id, 0, 100).unwrap().len(), 3);
+        assert!(matches!(
+            core.search_history(first.id, "alpha", 0, 0),
+            Err(CoreError::Store(StoreError::InvalidInput(_)))
+        ));
+        assert!(
+            core.search_history(other.id, "alpha unique", 0, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            core.history_message(other.id, messages[0].id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            core.history_message(first.id, messages[0].id)
+                .unwrap()
+                .expect("same session")
+                .content,
+            "alpha unique"
+        );
+
+        assert_eq!(core.create_context_window(first.id, 2).unwrap(), 1);
+        assert_eq!(core.latest_context_window_start(first.id).unwrap(), 2);
+        assert_eq!(core.context_windows(first.id).unwrap().len(), 1);
+        assert_eq!(core.messages(first.id).unwrap().len(), 3);
+
+        let note = core
+            .save_local_memory("D:/work/demo", "demo note")
+            .unwrap()
+            .expect("note saved");
+        assert!(
+            core.local_memory("D:/work/other", note.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            core.search_local_memories("D:/work/other", "demo", 0, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            core.local_memories_page("D:/work/demo", 0, 101),
+            Err(CoreError::Store(StoreError::InvalidInput(_)))
+        ));
+        let replaced = core
+            .replace_local_memory("D:/work/demo", note.id, "updated note")
+            .unwrap()
+            .expect("note replaced");
+        assert_eq!(replaced.content, "updated note");
+        assert!(
+            core.replace_local_memory("D:/work/demo", uuid::Uuid::new_v4(), "missing")
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn details_persist_events_restore_points_and_pending_actions() {
         let core = CoreService::in_memory().expect("core starts");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,12 +14,31 @@ const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 async function main() {
   const mock = await startUnauthorizedProvider();
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-auth-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-auth-home-"));
+  const configDirectory = resolve(homeDirectory, ".xcoding");
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    resolve(configDirectory, "config.json"),
+    `${JSON.stringify(
+      {
+        max_provider_retries: 0,
+        provider_fallback_enabled: false,
+        providers: [{ id: "default", name: "openai", base_url: mock.baseUrl, api_key: "invalid-test-key" }],
+        active_provider_id: "default",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
       ...process.env,
       OPENAI_API_KEY: "invalid-test-key",
       XCODING_OPENAI_BASE_URL: mock.baseUrl,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
     },
   });
 
@@ -48,6 +67,7 @@ async function main() {
     await rpc.close();
     await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
   }
 }
 

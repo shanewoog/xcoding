@@ -75,7 +75,10 @@ async function runDeterministic(home) {
   const env = isolatedEnvironment(home);
   const runNode = (script) => run(process.execPath, [resolve(repositoryRoot, script)], { env });
   console.log("== V1 acceptance: deterministic e2e ==");
-  await run("cargo", ["build", "-p", "xcoding-server"], { env });
+  await Promise.all([
+    run("cargo", ["build", "-p", "xcoding-server"], { env }),
+    run("cargo", ["build", "-p", "xcoding-agent", "--example", "desktop_trajectory"], { env }),
+  ]);
   await runNode("tests/e2e/read-only-agent.mjs");
   await runNode("tests/e2e/guarded-write-agent.mjs");
   await runNode("tests/e2e/auto-edit-mode.mjs");
@@ -99,6 +102,7 @@ async function runDeterministic(home) {
   await runNode("tests/e2e/task-summary.mjs");
   await runNode("tests/e2e/session-continue.mjs");
   await runNode("tests/e2e/surface-parity.mjs");
+  await runNode("tests/e2e/dynamic-surface-parity.mjs");
   console.log("Deterministic acceptance passed.");
 }
 

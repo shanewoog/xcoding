@@ -263,7 +263,9 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
       id: item.id.trim() || `provider-${index + 1}`,
       name: item.name?.trim() || `Provider ${index + 1}`,
       base_url: normalizeProviderBaseUrl(item.base_url) || DEFAULT_PROVIDER_BASE_URL,
-      wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
+      wire_api: item.wire_api === "responses" || item.wire_api === "anthropic_messages"
+        ? item.wire_api
+        : "chat_completions" as const,
       trust_level: item.trust_level === "local" || item.trust_level === "official" ? item.trust_level : "relay" as const,
       api_key: item.api_key || undefined,
       api_keys: normalizeProviderApiKeys(item.api_keys),
@@ -1350,6 +1352,7 @@ export function App() {
   const [circuitErrorRateThresholdPercent, setCircuitErrorRateThresholdPercent] = useState(DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT);
   const [circuitMinRequestCount, setCircuitMinRequestCount] = useState(DEFAULT_CIRCUIT_MIN_REQUEST_COUNT);
   const [contextCompactionThresholdPercent, setContextCompactionThresholdPercent] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT);
+  const [lossyContextCompactionEnabled, setLossyContextCompactionEnabled] = useState(false);
   const [modelContextWindowEntries, setModelContextWindowEntries] = useState<ModelContextWindowEntry[]>([]);
   const [modelRouteEntries, setModelRouteEntries] = useState<ModelRouteEntry[]>([]);
   const [modelRouteStatuses, setModelRouteStatuses] = useState<ModelRouteStatus[]>([]);
@@ -1798,6 +1801,7 @@ export function App() {
         setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(config.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
         setCircuitMinRequestCount(normalizeBoundedInteger(config.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
         setContextCompactionThresholdPercent(normalizeBoundedInteger(config.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
+        setLossyContextCompactionEnabled(config.lossy_context_compaction_enabled === true);
         setModelContextWindowEntries(contextWindowEntriesFromMap(config.model_context_windows));
         setModelRouteEntries(modelRouteEntriesFromMap(config.model_routes));
         setVisionDelegate(visionDelegateFormFromConfig(config.vision_delegate));
@@ -1935,6 +1939,7 @@ export function App() {
       const result = await invoke<ListModelsResult>("list_provider_models", {
         baseUrl: configuredBase,
         apiKey: configuredKey.trim() || null,
+        wireApi: provider?.wire_api ?? "chat_completions",
       });
       if (providerId) {
         setProviderModelsById((current) => ({ ...current, [providerId]: result.models }));
@@ -3854,7 +3859,9 @@ export function App() {
         ...item,
         name: item.name.trim() || "Provider",
         base_url: normalizeProviderBaseUrl(item.base_url) || DEFAULT_PROVIDER_BASE_URL,
-        wire_api: item.wire_api === "responses" ? "responses" as const : "chat_completions" as const,
+        wire_api: item.wire_api === "responses" || item.wire_api === "anthropic_messages"
+          ? item.wire_api
+          : "chat_completions" as const,
         trust_level: item.trust_level === "local" || item.trust_level === "official" ? item.trust_level : "relay" as const,
         api_key: item.api_key?.trim() || undefined,
         api_keys: normalizeProviderApiKeys(item.api_keys),
@@ -3883,6 +3890,7 @@ export function App() {
           circuit_error_rate_threshold_percent: normalizeBoundedInteger(circuitErrorRateThresholdPercent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT),
           circuit_min_request_count: normalizeBoundedInteger(circuitMinRequestCount, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT),
           context_compaction_threshold_percent: normalizeBoundedInteger(contextCompactionThresholdPercent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT),
+          lossy_context_compaction_enabled: lossyContextCompactionEnabled,
           // Compatibility mirror for the current active provider.
           base_url: selectedProvider.base_url,
           api_key: selectedProvider.api_key,
@@ -3921,6 +3929,7 @@ export function App() {
       setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(savedUser.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
       setCircuitMinRequestCount(normalizeBoundedInteger(savedUser.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
       setContextCompactionThresholdPercent(normalizeBoundedInteger(savedUser.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
+      setLossyContextCompactionEnabled(savedUser.lossy_context_compaction_enabled === true);
       setModelContextWindowEntries(contextWindowEntriesFromMap(savedUser.model_context_windows));
       setModelRouteEntries(modelRouteEntriesFromMap(savedUser.model_routes));
       setVisionDelegate(visionDelegateFormFromConfig(savedUser.vision_delegate));
@@ -4388,12 +4397,15 @@ export function App() {
                     id={`provider-wire-api-${selectedProvider.id}`}
                     value={selectedProvider.wire_api || "chat_completions"}
                     onChange={(event) => updateProvider(selectedProvider.id, {
-                      wire_api: event.target.value === "responses" ? "responses" : "chat_completions",
+                      wire_api: event.target.value === "responses" || event.target.value === "anthropic_messages"
+                        ? event.target.value
+                        : "chat_completions",
                     })}
                     disabled={anySessionRunning || isSavingConfig}
                   >
                     <option value="chat_completions">{t(locale, "providerProtocol.chatCompletions")}</option>
                     <option value="responses">{t(locale, "providerProtocol.responses")}</option>
+                    <option value="anthropic_messages">{t(locale, "providerProtocol.anthropicMessages")}</option>
                   </select>
                   <label className="field-label" htmlFor={`provider-trust-level-${selectedProvider.id}`}>{locale === "zh-CN" ? "Provider 信任级别" : "Provider trust level"}</label>
                   <select
@@ -4988,6 +5000,19 @@ export function App() {
               </button>
             </div>
             <p className="mode-help">{t(locale, "settings.contextWindows.hint")}</p>
+            <label className="checkbox-row" htmlFor="lossy-context-compaction-enabled">
+              <input
+                id="lossy-context-compaction-enabled"
+                type="checkbox"
+                checked={lossyContextCompactionEnabled}
+                onChange={(event) => setLossyContextCompactionEnabled(event.target.checked)}
+                disabled={anySessionRunning || isSavingConfig}
+              />
+              <span>
+                <strong>{t(locale, "field.lossyContextCompaction")}</strong>
+                <small>{t(locale, "field.lossyContextCompactionHint")}</small>
+              </span>
+            </label>
             <div className="resilience-setting-grid">
               <label htmlFor="context-compaction-threshold">
                 <span className="field-label">{t(locale, "field.contextCompactionThreshold")}</span>

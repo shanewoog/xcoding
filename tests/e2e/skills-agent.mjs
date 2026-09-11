@@ -12,6 +12,15 @@ const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcodin
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
 const EXPECTED_TOOLS = [
+  "new_context",
+  "history_list",
+  "history_read",
+  "history_search",
+  "notes_list",
+  "notes_read",
+  "notes_search",
+  "notes_append",
+  "notes_write",
   "list_dir",
   "read_file",
   "search_code",

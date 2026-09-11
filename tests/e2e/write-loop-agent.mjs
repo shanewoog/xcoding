@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,10 +62,29 @@ async function main() {
 
   const mock = await startMockProvider();
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-write-loop-db-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-write-loop-home-"));
+  const configDirectory = resolve(homeDirectory, ".xcoding");
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    resolve(configDirectory, "config.json"),
+    `${JSON.stringify(
+      {
+        provider_fallback_enabled: false,
+        providers: [
+          { id: "default", name: "openai", base_url: mock.baseUrl, api_key: "e2e-test-key", trust_level: "official" },
+        ],
+        active_provider_id: "default",
+      },
+      null,
+    )}\n`,
+    "utf8",
+  );
   const rpc = startRpcClient({
     databasePath: resolve(databaseDirectory, "xcoding.db"),
     environment: {
       ...process.env,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
       OPENAI_API_KEY: "e2e-test-key",
       XCODING_OPENAI_BASE_URL: mock.baseUrl,
     },
@@ -80,6 +99,7 @@ async function main() {
     await rpc.close();
     await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
   }
 }
 
@@ -94,7 +114,12 @@ async function runFeatureLoop(rpc, mock) {
       mode: "auto-edit",
     });
     assert.equal(started.session.status, "need_user");
-    assert.equal(approvalFor(rpc, started.session.id).action.tool_call.name, "run_command");
+    const approval = approvalFor(rpc, started.session.id);
+    assert.equal(
+      approval.action.tool_call.name,
+      "run_command",
+      `unexpected feature approval: ${JSON.stringify(approval)}`,
+    );
     assert.equal(await readFile(resolve(workspace, "src/calc.mjs"), "utf8"), FEATURE_CALC);
 
     const completed = await approveUntilDone(rpc, started.session.id);

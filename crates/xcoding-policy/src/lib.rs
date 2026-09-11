@@ -124,9 +124,7 @@ pub fn evaluate_detailed(
     high_risk: bool,
     command_allowlisted: bool,
 ) -> PermissionDecision {
-    if matches!(mode, Mode::FullAuto)
-        && !matches!(kind, PermissionKind::Network)
-    {
+    if matches!(mode, Mode::FullAuto) && !matches!(kind, PermissionKind::Network) {
         return PermissionDecision::Allow;
     }
     match kind {
@@ -432,7 +430,10 @@ pub fn assess_command_with_lists(
                 "git reset --hard requires explicit approval",
             );
         }
-        if args_lower.iter().any(|arg| arg == "rebase" || arg == "--amend") {
+        if args_lower
+            .iter()
+            .any(|arg| arg == "rebase" || arg == "--amend")
+        {
             return high_risk(
                 CommandPolicyCode::HighRiskGit,
                 "high-risk git operation requires explicit approval",
@@ -496,9 +497,9 @@ fn package_install_or_script_command(args: &[String]) -> bool {
                 | "prepare"
         )
     }) || (args.iter().any(|arg| arg == "run" || arg == "run-script")
-        && args.iter().any(|arg| {
-            matches!(arg.as_str(), "postinstall" | "preinstall" | "prepare")
-        }))
+        && args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "postinstall" | "preinstall" | "prepare")))
 }
 /// Strict allowlist for safe, commonly used developer commands.
 ///
@@ -896,7 +897,10 @@ fn shell_wraps_destructive_delete(exe: &str, args_lower: &[String]) -> bool {
 
     let mut command_position = true;
     for token in tokens {
-        if matches!(token.as_str(), "/c" | "/k" | "-command" | "-c" | "&&" | "||") {
+        if matches!(
+            token.as_str(),
+            "/c" | "/k" | "-command" | "-c" | "&&" | "||"
+        ) {
             command_position = true;
             continue;
         }
@@ -1056,9 +1060,9 @@ fn git_push_deletes_remote_ref(args: &[String]) -> bool {
     let Some(push_index) = args.iter().position(|arg| arg == "push") else {
         return false;
     };
-    args.iter().skip(push_index + 1).any(|arg| {
-        arg == "--delete" || arg == "-d" || (arg.starts_with(':') && arg.len() > 1)
-    })
+    args.iter()
+        .skip(push_index + 1)
+        .any(|arg| arg == "--delete" || arg == "-d" || (arg.starts_with(':') && arg.len() > 1))
 }
 
 fn git_history_rewrite_is_irreversible(args: &[String]) -> bool {
@@ -1072,17 +1076,17 @@ fn git_history_rewrite_is_irreversible(args: &[String]) -> bool {
 }
 
 fn git_deletes_reference(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(arg.as_str(), "update-ref" | "branch" | "tag")
-    }) && args.iter().any(|arg| {
-        arg == "-d" || arg == "-D" || arg == "--delete" || arg == "--expire=now"
-    })
+    args.iter()
+        .any(|arg| matches!(arg.as_str(), "update-ref" | "branch" | "tag"))
+        && args
+            .iter()
+            .any(|arg| arg == "-d" || arg == "-D" || arg == "--delete" || arg == "--expire=now")
 }
 
 fn git_forced_worktree_delete(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(arg.as_str(), "worktree" | "submodule")
-    }) && args.iter().any(|arg| arg == "--force" || arg == "-f")
+    args.iter()
+        .any(|arg| matches!(arg.as_str(), "worktree" | "submodule"))
+        && args.iter().any(|arg| arg == "--force" || arg == "-f")
 }
 
 fn git_file_delete_target_traverses_parent(args: &[String]) -> bool {
@@ -1220,10 +1224,7 @@ mod tests {
         for (exe, args) in [
             ("format", vec!["C:".to_owned()]),
             ("git", vec!["clean".to_owned(), "-fdx".to_owned()]),
-            (
-                "git",
-                vec!["push".to_owned(), "--mirror".to_owned()],
-            ),
+            ("git", vec!["push".to_owned(), "--mirror".to_owned()]),
         ] {
             let assessment = assess_command(exe, &args);
             assert_eq!(
@@ -1290,7 +1291,10 @@ mod tests {
             ("cmd", &["/c", "echo ok|rmdir /s /q E:\\target"]),
             (
                 "powershell",
-                &["-Command", "Write-Output ok; Remove-Item E:\\target -Recurse"],
+                &[
+                    "-Command",
+                    "Write-Output ok; Remove-Item E:\\target -Recurse",
+                ],
             ),
         ];
         for (exe, args) in denied {
@@ -1333,7 +1337,11 @@ mod tests {
             ("rd", r#"\\server\share\outside-folder"#),
         ] {
             let assessment = assess_command(exe, &[target.to_owned()]);
-            assert_eq!(assessment.decision, PermissionDecision::Deny, "{exe} {target}");
+            assert_eq!(
+                assessment.decision,
+                PermissionDecision::Deny,
+                "{exe} {target}"
+            );
             assert_eq!(assessment.code, CommandPolicyCode::DeniedAbsoluteDelete);
         }
 
@@ -1421,7 +1429,11 @@ mod tests {
     #[test]
     fn denies_git_destructive_operations_before_approval() {
         let denied = [
-            ("git", vec!["clean", "-fd"], CommandPolicyCode::DeniedGitClean),
+            (
+                "git",
+                vec!["clean", "-fd"],
+                CommandPolicyCode::DeniedGitClean,
+            ),
             (
                 "git",
                 vec!["push", "origin", "--delete", "main"],
@@ -1456,7 +1468,10 @@ mod tests {
         for (exe, args, code) in denied {
             let assessment = assess_command(
                 exe,
-                &args.iter().map(|value| String::from(*value)).collect::<Vec<_>>(),
+                &args
+                    .iter()
+                    .map(|value| String::from(*value))
+                    .collect::<Vec<_>>(),
             );
             assert_eq!(assessment.decision, PermissionDecision::Deny, "{args:?}");
             assert_eq!(assessment.code, code, "{args:?}");
@@ -1477,8 +1492,15 @@ mod tests {
                 vec![target.to_owned()]
             };
             let assessment = assess_command(exe, &args);
-            assert_eq!(assessment.decision, PermissionDecision::Deny, "{exe} {target}");
-            assert_eq!(assessment.code, CommandPolicyCode::DeniedDeletePathTraversal);
+            assert_eq!(
+                assessment.decision,
+                PermissionDecision::Deny,
+                "{exe} {target}"
+            );
+            assert_eq!(
+                assessment.code,
+                CommandPolicyCode::DeniedDeletePathTraversal
+            );
         }
     }
 
@@ -1513,11 +1535,7 @@ mod tests {
 
         let pfix = assess_command(
             "cargo",
-            &[
-                "run".to_owned(),
-                "--bin".to_owned(),
-                "pfix".to_owned(),
-            ],
+            &["run".to_owned(), "--bin".to_owned(), "pfix".to_owned()],
         );
         assert_eq!(pfix.decision, PermissionDecision::Allow);
         assert!(pfix.allowlisted);
@@ -1583,7 +1601,10 @@ mod tests {
             let executable = args[0];
             let assessment = assess_command(
                 executable,
-                &args[1..].iter().map(|value| (*value).to_owned()).collect::<Vec<_>>(),
+                &args[1..]
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>(),
             );
             assert_eq!(assessment.decision, PermissionDecision::AskUser, "{args:?}");
             assert!(assessment.high_risk, "{args:?}");
@@ -1670,7 +1691,10 @@ mod tests {
         // launch request.
         let allowed: [(&str, &[&str]); 3] = [
             ("cmd", &["/C", "echo", "start"]),
-            ("powershell", &["-Command", "Start-Process -NoNewWindow app"]),
+            (
+                "powershell",
+                &["-Command", "Start-Process -NoNewWindow app"],
+            ),
             ("cmd", &["/C", "ver"]),
         ];
         for (exe, args) in allowed {

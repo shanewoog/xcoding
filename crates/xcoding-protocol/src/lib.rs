@@ -1,9 +1,9 @@
 //! Shared JSON-RPC contracts for XCoding clients and the Rust core.
 
 use chrono::{DateTime, Utc};
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub const JSON_RPC_VERSION: &str = "2.0";
@@ -45,18 +45,15 @@ pub const MAX_CIRCUIT_MIN_REQUEST_COUNT: u32 = 100;
 pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4_000;
 pub const MAX_PROVIDER_KEY_WEIGHT: u32 = 1_000;
 pub const MAX_LOCAL_MEMORY_CHARS: usize = 600;
+pub const MIN_CONTEXT_TOOL_LIMIT: usize = 1;
+pub const MAX_CONTEXT_TOOL_LIMIT: usize = 100;
 /// Safety bound only; the model decides how many steps a plan actually needs.
 pub const MAX_PLAN_STEPS: usize = 20;
 pub const MAX_PLAN_STEP_DESCRIPTION_CHARS: usize = 200;
 pub const DEFAULT_PERSONALITY: &str = "default";
 /// Reply tones accepted by `UserConfig::personality`.
-pub const PERSONALITY_OPTIONS: [&str; 5] = [
-    "default",
-    "pragmatic",
-    "friendly",
-    "concise",
-    "teaching",
-];
+pub const PERSONALITY_OPTIONS: [&str; 5] =
+    ["default", "pragmatic", "friendly", "concise", "teaching"];
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct JsonRpcRequest {
@@ -256,6 +253,24 @@ pub enum ToolName {
     BrowserState,
     /// Replace the turn plan with model-authored steps.
     UpdatePlan,
+    /// Start a fresh model context window while retaining durable history.
+    NewContext,
+    /// List messages from the current session's durable history.
+    HistoryList,
+    /// Read one message from the current session's durable history.
+    HistoryRead,
+    /// Search messages in the current session's durable history.
+    HistorySearch,
+    /// List durable notes for the current workspace.
+    NotesList,
+    /// Read one durable note from the current workspace.
+    NotesRead,
+    /// Search durable notes in the current workspace.
+    NotesSearch,
+    /// Append a durable note for the current workspace.
+    NotesAppend,
+    /// Replace one durable note in the current workspace.
+    NotesWrite,
     /// External MCP tool (`mcp__server__tool` at the provider layer).
     Mcp,
 }
@@ -280,6 +295,15 @@ impl ToolName {
             Self::GitPull => "git_pull",
             Self::BrowserState => "browser_state",
             Self::UpdatePlan => "update_plan",
+            Self::NewContext => "new_context",
+            Self::HistoryList => "history_list",
+            Self::HistoryRead => "history_read",
+            Self::HistorySearch => "history_search",
+            Self::NotesList => "notes_list",
+            Self::NotesRead => "notes_read",
+            Self::NotesSearch => "notes_search",
+            Self::NotesAppend => "notes_append",
+            Self::NotesWrite => "notes_write",
             Self::Mcp => "mcp",
         }
     }
@@ -461,6 +485,18 @@ pub struct ContextCompaction {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One lossless context-window boundary for a session.
+///
+/// Stored history is never rewritten. Later turns skip messages before
+/// `start_message_count` when assembling the provider request.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ContextWindow {
+    pub session_id: Uuid,
+    pub window_index: usize,
+    pub start_message_count: usize,
+    pub created_at: DateTime<Utc>,
+}
+
 /// A durable fact distilled from a finished turn, scoped to one workspace.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct LocalMemory {
@@ -548,6 +584,7 @@ pub enum ProviderWireApi {
     #[default]
     ChatCompletions,
     Responses,
+    AnthropicMessages,
 }
 
 /// Trust boundary for an OpenAI-compatible endpoint.
@@ -764,6 +801,10 @@ pub struct UserConfig {
     /// Percentage of the configured model context window at which pre-compaction starts.
     #[serde(default = "default_context_compaction_threshold_percent")]
     pub context_compaction_threshold_percent: u32,
+    /// When true, older history is summarized into a compact handoff. The default
+    /// lossless path opens a new context window instead.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lossy_context_compaction_enabled: bool,
     /// Vision delegate configuration for models without native vision support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_delegate: Option<VisionDelegateConfig>,
@@ -824,6 +865,7 @@ impl Default for UserConfig {
             skip_local_api_confirmation: false,
             model_context_windows: BTreeMap::new(),
             context_compaction_threshold_percent: DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+            lossy_context_compaction_enabled: false,
             vision_delegate: None,
             model_capabilities: BTreeMap::new(),
             model_routes: BTreeMap::new(),
@@ -1304,6 +1346,69 @@ mod tests {
     }
 
     #[test]
+    fn maps_context_memory_tool_names() {
+        for (encoded, expected) in [
+            ("new_context", ToolName::NewContext),
+            ("history_list", ToolName::HistoryList),
+            ("history_read", ToolName::HistoryRead),
+            ("history_search", ToolName::HistorySearch),
+            ("notes_list", ToolName::NotesList),
+            ("notes_read", ToolName::NotesRead),
+            ("notes_search", ToolName::NotesSearch),
+            ("notes_append", ToolName::NotesAppend),
+            ("notes_write", ToolName::NotesWrite),
+        ] {
+            let name: ToolName =
+                serde_json::from_value(json!(encoded)).expect("context tool name parses");
+            assert_eq!(name, expected);
+            assert_eq!(name.as_str(), encoded);
+        }
+    }
+
+    #[test]
+    fn serializes_context_window_boundaries() {
+        let window = ContextWindow {
+            session_id: Uuid::nil(),
+            window_index: 1,
+            start_message_count: 2,
+            created_at: DateTime::parse_from_rfc3339("2026-09-10T00:00:00Z")
+                .expect("timestamp parses")
+                .with_timezone(&Utc),
+        };
+        let encoded = serde_json::to_value(&window).expect("context window serializes");
+        assert_eq!(encoded["window_index"], 1);
+        assert_eq!(encoded["start_message_count"], 2);
+        let decoded: ContextWindow =
+            serde_json::from_value(encoded).expect("context window round-trips");
+        assert_eq!(decoded, window);
+    }
+
+    #[test]
+    fn serializes_local_memory_notes() {
+        let memory = LocalMemory {
+            id: Uuid::nil(),
+            workspace_root: "d:/work/demo".to_owned(),
+            content: "keep this".to_owned(),
+            created_at: DateTime::parse_from_rfc3339("2026-09-10T00:00:00Z")
+                .expect("timestamp parses")
+                .with_timezone(&Utc),
+        };
+        let encoded = serde_json::to_value(&memory).expect("local memory serializes");
+        assert_eq!(encoded["content"], "keep this");
+        let decoded: LocalMemory =
+            serde_json::from_value(encoded).expect("local memory round-trips");
+        assert_eq!(decoded, memory);
+    }
+
+    #[test]
+    fn context_tool_page_and_note_limits_match_the_lossless_contract() {
+        assert_eq!(MIN_CONTEXT_TOOL_LIMIT, 1);
+        assert_eq!(MAX_CONTEXT_TOOL_LIMIT, 100);
+        assert_eq!(MAX_LOCAL_MEMORY_CHARS, 600);
+        assert!(MIN_CONTEXT_TOOL_LIMIT <= MAX_CONTEXT_TOOL_LIMIT);
+    }
+
+    #[test]
     fn defaults_user_config_reasoning_effort() {
         let config: UserConfig = serde_json::from_value(json!({
             "locale": "en",
@@ -1367,6 +1472,32 @@ mod tests {
         };
         let enabled_json = serde_json::to_value(&enabled).expect("enabled config serializes");
         assert_eq!(enabled_json["skip_local_api_confirmation"], true);
+    }
+
+    #[test]
+    fn defaults_and_round_trips_lossy_context_compaction_flag() {
+        let default_config = UserConfig::default();
+        assert!(!default_config.lossy_context_compaction_enabled);
+        let default_json =
+            serde_json::to_value(&default_config).expect("default config serializes");
+        assert!(
+            default_json
+                .get("lossy_context_compaction_enabled")
+                .is_none()
+        );
+
+        let enabled = UserConfig {
+            lossy_context_compaction_enabled: true,
+            ..default_config
+        };
+        let enabled_json = serde_json::to_value(&enabled).expect("enabled config serializes");
+        assert_eq!(enabled_json["lossy_context_compaction_enabled"], true);
+        let decoded: UserConfig =
+            serde_json::from_value(enabled_json).expect("enabled config round-trips");
+        assert!(decoded.lossy_context_compaction_enabled);
+
+        let legacy: UserConfig = serde_json::from_value(json!({})).expect("legacy config parses");
+        assert!(!legacy.lossy_context_compaction_enabled);
     }
 
     #[test]
@@ -1487,6 +1618,14 @@ mod tests {
         };
         let encoded = serde_json::to_value(responses).expect("provider config serializes");
         assert_eq!(encoded["wire_api"], "responses");
+
+        let anthropic: ProviderWireApi = serde_json::from_value(json!("anthropic_messages"))
+            .expect("Anthropic Messages protocol parses");
+        assert_eq!(anthropic, ProviderWireApi::AnthropicMessages);
+        assert_eq!(
+            serde_json::to_value(anthropic).expect("Anthropic protocol serializes"),
+            "anthropic_messages"
+        );
     }
 
     #[test]

@@ -153,12 +153,12 @@
 
 - 更好的相关文件召回（Wave R：搜索选项 + 工作区 sketch；向量检索后续）
 - 更强命令策略引擎（Wave Z：工作区黑名单、扩展硬拒绝、结构化 `policy_code`）
-- 更多云供应商
+- 更多云供应商（已在 OpenAI-compatible Chat Completions、Responses 之外支持 Anthropic 原生 Messages API）
 - skills 系统（Wave Y：工作区 `.xcoding/skills/*/SKILL.md` 目录 + 只读 `load_skill`）
 - MCP 支持（Wave AA：stdio MCP 客户端，`.xcoding/mcp.json`，命名空间工具 `mcp__server__tool`，始终需审批）
 - 更好的补丁置信度与冲突体验（Wave X：结构化 `patch_conflict` 工具错误、Agent 重读指引、Desktop CONFLICT 标记、CLI 重试提示）
 - 更丰富 git 工作流（Wave S：结构化 `git_log` + `git_show`；Wave T：需审批的 `git_add` + `git_commit`；Wave U：需审批且不 force 的 `git_push`；Wave V：需审批的 `git_fetch` + `git_pull`（默认 ff-only）；Wave W：Desktop/CLI 对 git 工具的专用审批展示；reset/force/rebase 稍后）
-- 大仓库性能优化
+- 大仓库性能优化（首轮已完成：`search_code` 流式扫描与扫描统计、10,000 个可见源码文件基准、生成目录跳过验证、workspace sketch 上限基准；运行 `pnpm test:performance`。当前回归阈值为搜索 30 秒、sketch 2 秒；向量检索仍属后续能力）
 
 ### 更后面再做
 
@@ -245,4 +245,3 @@ Desktop 应略落后于核心能力，而不是反过来带着核心走。
 ## 其他语言
 
 - English: [../en/roadmap.md](../en/roadmap.md)
-

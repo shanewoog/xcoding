@@ -46,7 +46,7 @@ async function main() {
     assert.equal(mock.requests.length, 2);
     assert.deepEqual(
       mock.requests[0].tools.map((tool) => tool.function.name),
-      ["list_dir", "read_file", "search_code", "load_skill", "apply_patch", "run_command", "git_status", "git_diff", "git_log", "git_show", "git_add", "git_commit", "git_push", "git_fetch", "git_pull", "browser_state", "update_plan"],
+      ["new_context", "history_list", "history_read", "history_search", "notes_list", "notes_read", "notes_search", "notes_append", "notes_write", "list_dir", "read_file", "search_code", "load_skill", "apply_patch", "run_command", "git_status", "git_diff", "git_log", "git_show", "git_add", "git_commit", "git_push", "git_fetch", "git_pull", "browser_state", "update_plan"],
     );
     const secondTurnMessages = mock.requests[1].messages;
     assert.ok(secondTurnMessages.some((message) => message.role === "assistant" && message.tool_calls));

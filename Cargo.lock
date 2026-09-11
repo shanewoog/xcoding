@@ -1513,6 +1513,7 @@ name = "xcoding-agent"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

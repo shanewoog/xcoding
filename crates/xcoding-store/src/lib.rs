@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_protocol::{
-    ContextCompaction, CreateSessionParams, LocalMemory, Message, MessageRole, PendingAction,
+    ContextCompaction, ContextWindow, CreateSessionParams, LocalMemory, MAX_CONTEXT_TOOL_LIMIT,
+    MAX_LOCAL_MEMORY_CHARS, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole, PendingAction,
     PendingActionStatus, PersistedSessionEvent, RestorePoint, Session, SessionEvent, SessionStatus,
     ToolCall, WorkspaceConfig,
 };
@@ -317,6 +318,10 @@ impl SessionStore {
 
     pub fn delete_session(&self, id: Uuid) -> Result<bool, StoreError> {
         let id = id.to_string();
+        self.connection.execute(
+            "DELETE FROM context_windows WHERE session_id = ?1",
+            params![id],
+        )?;
         self.connection
             .execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
         self.connection.execute(
@@ -368,6 +373,10 @@ impl SessionStore {
         };
 
         for id in &session_ids {
+            transaction.execute(
+                "DELETE FROM context_windows WHERE session_id = ?1",
+                params![id],
+            )?;
             transaction.execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
             transaction.execute(
                 "DELETE FROM pending_actions WHERE session_id = ?1",
@@ -450,6 +459,184 @@ impl SessionStore {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
+
+    pub fn count_messages(&self, session_id: Uuid) -> Result<usize, StoreError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            params![session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).map_err(|_| {
+            StoreError::InvalidInput("stored message count is negative or too large".to_owned())
+        })
+    }
+
+    pub fn latest_context_window_start(&self, session_id: Uuid) -> Result<usize, StoreError> {
+        let start: Option<i64> = self.connection.query_row(
+            "SELECT MAX(start_message_count) FROM context_windows WHERE session_id = ?1",
+            params![session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        usize::try_from(start.unwrap_or(0)).map_err(|_| {
+            StoreError::InvalidInput("stored context window boundary is invalid".to_owned())
+        })
+    }
+
+    pub fn create_context_window(
+        &self,
+        session_id: Uuid,
+        start_message_count: usize,
+    ) -> Result<usize, StoreError> {
+        if start_message_count == 0 {
+            return Err(StoreError::InvalidInput(
+                "the initial context window is implicit and cannot be persisted".to_owned(),
+            ));
+        }
+        let session_id = session_id.to_string();
+        let boundary = i64::try_from(start_message_count)
+            .map_err(|_| StoreError::InvalidInput("message count is too large".to_owned()))?;
+        if let Some(window_index) = self
+            .connection
+            .query_row(
+                "SELECT window_index FROM context_windows
+                 WHERE session_id = ?1 AND start_message_count = ?2",
+                params![session_id, boundary],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            return usize::try_from(window_index).map_err(|_| {
+                StoreError::InvalidInput("stored context window index is invalid".to_owned())
+            });
+        }
+
+        let latest_start: Option<i64> = self.connection.query_row(
+            "SELECT MAX(start_message_count) FROM context_windows WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        if latest_start.is_some_and(|latest| boundary < latest) {
+            return Err(StoreError::InvalidInput(
+                "context window boundary cannot move backward".to_owned(),
+            ));
+        }
+
+        let role: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT role FROM messages WHERE session_id = ?1
+                 ORDER BY created_at ASC, rowid ASC LIMIT 1 OFFSET ?2",
+                params![session_id, boundary],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(role) = role else {
+            return Err(StoreError::InvalidInput(
+                "context window boundary must reference an existing message".to_owned(),
+            ));
+        };
+        if serde_json::from_str::<MessageRole>(&role)? != MessageRole::User {
+            return Err(StoreError::InvalidInput(
+                "context window boundary must reference a user message".to_owned(),
+            ));
+        }
+
+        let next_index: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(window_index), 0) + 1 FROM context_windows WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        self.connection.execute(
+            "INSERT INTO context_windows (session_id, window_index, start_message_count, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session_id,
+                next_index,
+                boundary,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        usize::try_from(next_index).map_err(|_| {
+            StoreError::InvalidInput("stored context window index is invalid".to_owned())
+        })
+    }
+
+    pub fn list_messages_page(
+        &self,
+        session_id: Uuid,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Message>, StoreError> {
+        validate_context_tool_page(offset, limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, role, content, created_at
+             FROM messages WHERE session_id = ?1
+             ORDER BY created_at ASC, rowid ASC LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = statement.query_map(
+            params![session_id.to_string(), limit as i64, offset as i64],
+            Self::row_to_message,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn get_session_message(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<Option<Message>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, role, content, created_at
+                 FROM messages WHERE session_id = ?1 AND id = ?2",
+                params![session_id.to_string(), message_id.to_string()],
+                Self::row_to_message,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn search_session_messages(
+        &self,
+        session_id: Uuid,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Message>, StoreError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "history search query must not be empty".to_owned(),
+            ));
+        }
+        validate_context_tool_page(offset, limit)?;
+        let pattern = format!("%{}%", escape_like_pattern(query));
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, role, content, created_at
+             FROM messages
+             WHERE session_id = ?1 AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+             ORDER BY created_at ASC, rowid ASC LIMIT ?3 OFFSET ?4",
+        )?;
+        let rows = statement.query_map(
+            params![session_id.to_string(), pattern, limit as i64, offset as i64],
+            Self::row_to_message,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_context_windows(&self, session_id: Uuid) -> Result<Vec<ContextWindow>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT session_id, window_index, start_message_count, created_at
+             FROM context_windows WHERE session_id = ?1
+             ORDER BY window_index ASC",
+        )?;
+        let rows = statement.query_map([session_id.to_string()], Self::row_to_context_window)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn get_context_compaction(
         &self,
         session_id: Uuid,
@@ -497,12 +684,7 @@ impl SessionStore {
         workspace_root: &str,
         content: &str,
     ) -> Result<Option<LocalMemory>, StoreError> {
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            return Err(StoreError::InvalidInput(
-                "local memory content must not be empty".to_owned(),
-            ));
-        }
+        let trimmed = validate_local_memory_content(content)?;
         let memory = LocalMemory {
             id: Uuid::new_v4(),
             workspace_root: normalize_workspace_root(workspace_root),
@@ -547,7 +729,103 @@ impl SessionStore {
             params![normalize_workspace_root(workspace_root), limit as i64],
             Self::row_to_local_memory,
         )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_local_memories_page(
+        &self,
+        workspace_root: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LocalMemory>, StoreError> {
+        validate_context_tool_page(offset, limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, workspace_root, content, created_at
+             FROM local_memories WHERE workspace_root = ?1
+             ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                normalize_workspace_root(workspace_root),
+                limit as i64,
+                offset as i64
+            ],
+            Self::row_to_local_memory,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn get_local_memory(
+        &self,
+        workspace_root: &str,
+        memory_id: Uuid,
+    ) -> Result<Option<LocalMemory>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id, workspace_root, content, created_at
+                 FROM local_memories WHERE workspace_root = ?1 AND id = ?2",
+                params![
+                    normalize_workspace_root(workspace_root),
+                    memory_id.to_string()
+                ],
+                Self::row_to_local_memory,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn search_local_memories(
+        &self,
+        workspace_root: &str,
+        query: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LocalMemory>, StoreError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "notes search query must not be empty".to_owned(),
+            ));
+        }
+        validate_context_tool_page(offset, limit)?;
+        let pattern = format!("%{}%", escape_like_pattern(query));
+        let mut statement = self.connection.prepare(
+            "SELECT id, workspace_root, content, created_at
+             FROM local_memories
+             WHERE workspace_root = ?1 AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+             ORDER BY created_at ASC, id ASC LIMIT ?3 OFFSET ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                normalize_workspace_root(workspace_root),
+                pattern,
+                limit as i64,
+                offset as i64
+            ],
+            Self::row_to_local_memory,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn replace_local_memory(
+        &self,
+        workspace_root: &str,
+        memory_id: Uuid,
+        content: &str,
+    ) -> Result<Option<LocalMemory>, StoreError> {
+        let trimmed = validate_local_memory_content(content)?;
+        let workspace_root = normalize_workspace_root(workspace_root);
+        let updated = self.connection.execute(
+            "UPDATE local_memories SET content = ?1 WHERE workspace_root = ?2 AND id = ?3",
+            params![trimmed, workspace_root, memory_id.to_string()],
+        )?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        self.get_local_memory(&workspace_root, memory_id)
     }
 
     pub fn count_local_memories(&self, workspace_root: &str) -> Result<usize, StoreError> {
@@ -988,6 +1266,16 @@ impl SessionStore {
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
 
+            CREATE TABLE IF NOT EXISTS context_windows (
+                session_id TEXT NOT NULL,
+                window_index INTEGER NOT NULL,
+                start_message_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, window_index),
+                UNIQUE (session_id, start_message_count),
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
             CREATE TABLE IF NOT EXISTS local_memories (
                 id TEXT PRIMARY KEY NOT NULL,
                 workspace_root TEXT NOT NULL,
@@ -1048,6 +1336,37 @@ impl SessionStore {
                 ))
             })?,
             updated_at: DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+        })
+    }
+
+    fn row_to_context_window(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextWindow> {
+        let session_id: String = row.get(0)?;
+        let window_index: i64 = row.get(1)?;
+        let start_message_count: i64 = row.get(2)?;
+        let created_at: String = row.get(3)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(ContextWindow {
+            session_id: Uuid::parse_str(&session_id)
+                .map_err(|error| parse(StoreError::Identifier(error)))?,
+            window_index: usize::try_from(window_index).map_err(|_| {
+                parse(StoreError::InvalidInput(
+                    "stored context window index is negative or too large".to_owned(),
+                ))
+            })?,
+            start_message_count: usize::try_from(start_message_count).map_err(|_| {
+                parse(StoreError::InvalidInput(
+                    "stored context window boundary is negative or too large".to_owned(),
+                ))
+            })?,
+            created_at: DateTime::parse_from_rfc3339(&created_at)
                 .map_err(|error| parse(StoreError::Timestamp(error)))?
                 .with_timezone(&Utc),
         })
@@ -1240,6 +1559,37 @@ impl SessionStore {
                 .with_timezone(&Utc),
         })
     }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn validate_context_tool_page(_offset: usize, limit: usize) -> Result<(), StoreError> {
+    if !(MIN_CONTEXT_TOOL_LIMIT..=MAX_CONTEXT_TOOL_LIMIT).contains(&limit) {
+        return Err(StoreError::InvalidInput(format!(
+            "limit must be an integer from {MIN_CONTEXT_TOOL_LIMIT} to {MAX_CONTEXT_TOOL_LIMIT}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_local_memory_content(content: &str) -> Result<&str, StoreError> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "local memory content must not be empty".to_owned(),
+        ));
+    }
+    if trimmed.chars().count() > MAX_LOCAL_MEMORY_CHARS {
+        return Err(StoreError::InvalidInput(format!(
+            "local memory content must be at most {MAX_LOCAL_MEMORY_CHARS} characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 fn session_id_for_event(event: &SessionEvent) -> Uuid {
@@ -1486,6 +1836,313 @@ mod tests {
     }
 
     #[test]
+    fn context_windows_preserve_history_and_are_removed_with_the_session() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session created");
+        store
+            .append_message(session.id, MessageRole::User, "first window")
+            .expect("first message saved");
+        store
+            .append_message(session.id, MessageRole::User, "second window")
+            .expect("second message saved");
+        let original_history = store.list_messages(session.id).unwrap();
+        assert_eq!(store.create_context_window(session.id, 1).unwrap(), 1);
+        assert_eq!(store.create_context_window(session.id, 1).unwrap(), 1);
+
+        assert_eq!(store.latest_context_window_start(session.id).unwrap(), 1);
+        assert_eq!(store.list_messages(session.id).unwrap(), original_history);
+        assert_eq!(
+            store.list_messages_page(session.id, 1, 10).unwrap().len(),
+            1
+        );
+        let windows = store.list_context_windows(session.id).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_index, 1);
+        assert_eq!(windows[0].start_message_count, 1);
+
+        assert!(store.delete_session(session.id).unwrap());
+        assert_eq!(store.latest_context_window_start(session.id).unwrap(), 0);
+    }
+
+    #[test]
+    fn context_window_boundaries_are_user_messages_and_only_advance() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session created");
+        store
+            .append_message(session.id, MessageRole::User, "first user")
+            .unwrap();
+        store
+            .append_message(session.id, MessageRole::Assistant, "answer")
+            .unwrap();
+        store
+            .append_message(session.id, MessageRole::User, "second user")
+            .unwrap();
+        assert_eq!(store.create_context_window(session.id, 2).unwrap(), 1);
+
+        assert!(store.create_context_window(session.id, 1).is_err());
+        assert!(store.create_context_window(session.id, 0).is_err());
+        assert!(store.create_context_window(session.id, 3).is_err());
+        assert_eq!(store.list_context_windows(session.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn first_context_window_boundary_cannot_be_zero() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session created");
+        store
+            .append_message(session.id, MessageRole::User, "first user")
+            .unwrap();
+
+        assert!(store.create_context_window(session.id, 0).is_err());
+        assert!(store.list_context_windows(session.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn searches_history_and_manages_workspace_scoped_notes() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session created");
+        let message = store
+            .append_message(session.id, MessageRole::User, "literal 100%_match")
+            .expect("message saved");
+        assert_eq!(
+            store
+                .search_session_messages(session.id, "100%_match", 0, 10)
+                .unwrap(),
+            vec![message.clone()]
+        );
+        assert_eq!(
+            store.get_session_message(session.id, message.id).unwrap(),
+            Some(message)
+        );
+
+        let note = store
+            .save_local_memory("D:/work/demo", "remember 100%_match")
+            .unwrap()
+            .expect("note created");
+        assert_eq!(
+            store
+                .search_local_memories("D:/WORK/demo/", "100%_match", 0, 10)
+                .unwrap(),
+            vec![note.clone()]
+        );
+        assert!(
+            store
+                .get_local_memory("D:/work/other", note.id)
+                .unwrap()
+                .is_none()
+        );
+        let updated = store
+            .replace_local_memory("D:/work/demo", note.id, "replacement")
+            .unwrap()
+            .expect("note updated");
+        assert_eq!(updated.id, note.id);
+        assert_eq!(updated.content, "replacement");
+    }
+
+    #[test]
+    fn rejects_out_of_range_history_and_notes_page_limits() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session created");
+        store
+            .append_message(session.id, MessageRole::User, "pageable")
+            .expect("message saved");
+        store
+            .save_local_memory("D:/work/demo", "pageable note")
+            .unwrap()
+            .expect("note created");
+
+        for limit in [0usize, 101] {
+            assert!(matches!(
+                store.list_messages_page(session.id, 0, limit),
+                Err(StoreError::InvalidInput(_))
+            ));
+            assert!(matches!(
+                store.search_session_messages(session.id, "pageable", 0, limit),
+                Err(StoreError::InvalidInput(_))
+            ));
+            assert!(matches!(
+                store.list_local_memories_page("D:/work/demo", 0, limit),
+                Err(StoreError::InvalidInput(_))
+            ));
+            assert!(matches!(
+                store.search_local_memories("D:/work/demo", "pageable", 0, limit),
+                Err(StoreError::InvalidInput(_))
+            ));
+        }
+
+        assert_eq!(
+            store.list_messages_page(session.id, 0, 100).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search_session_messages(session.id, "pageable", 0, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_local_memories_page("D:/work/demo", 0, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search_local_memories("D:/work/demo", "pageable", 0, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pages_history_and_notes_without_crossing_session_or_workspace() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("session created");
+        let other = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/other".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                title: None,
+            })
+            .expect("other session created");
+        for content in ["one", "two", "three"] {
+            store
+                .append_message(session.id, MessageRole::User, content)
+                .expect("message saved");
+        }
+        let other_message = store
+            .append_message(other.id, MessageRole::User, "two")
+            .expect("other message saved");
+
+        let page = store.list_messages_page(session.id, 1, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].content, "two");
+        let search_page = store
+            .search_session_messages(session.id, "t", 1, 1)
+            .unwrap();
+        assert_eq!(search_page.len(), 1);
+        assert_eq!(search_page[0].content, "three");
+        assert!(
+            store
+                .get_session_message(other.id, page[0].id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .search_session_messages(other.id, "two", 0, 10)
+                .unwrap(),
+            vec![other_message]
+        );
+
+        for content in ["alpha", "beta", "gamma"] {
+            store
+                .save_local_memory("D:/work/demo", content)
+                .unwrap()
+                .expect("note created");
+        }
+        store
+            .save_local_memory("D:/work/other", "beta")
+            .unwrap()
+            .expect("other note created");
+        let notes_page = store
+            .list_local_memories_page("D:/work/demo", 1, 1)
+            .unwrap();
+        assert_eq!(notes_page.len(), 1);
+        assert_eq!(notes_page[0].content, "beta");
+        let notes_search = store
+            .search_local_memories("D:/work/demo", "mm", 0, 10)
+            .unwrap();
+        assert_eq!(notes_search.len(), 1);
+        assert_eq!(notes_search[0].content, "gamma");
+        assert!(
+            store
+                .get_local_memory("D:/work/other", notes_page[0].id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .replace_local_memory("D:/work/demo", Uuid::new_v4(), "missing")
+                .unwrap()
+                .is_none()
+        );
+
+        let max_note = "a".repeat(MAX_LOCAL_MEMORY_CHARS);
+        store
+            .save_local_memory("D:/work/demo", &max_note)
+            .unwrap()
+            .expect("max note saved");
+        assert!(
+            store
+                .save_local_memory("D:/work/demo", &"a".repeat(MAX_LOCAL_MEMORY_CHARS + 1))
+                .is_err()
+        );
+        assert!(
+            store
+                .replace_local_memory(
+                    "D:/work/demo",
+                    notes_page[0].id,
+                    &"a".repeat(MAX_LOCAL_MEMORY_CHARS + 1)
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn updates_session_model_for_later_turns() {
         let store = SessionStore::in_memory().expect("store starts");
         let session = store
@@ -1547,6 +2204,10 @@ mod tests {
                 .append_message(session.id, MessageRole::User, "hello")
                 .expect("message saves");
         }
+        store
+            .append_message(target_a.id, MessageRole::User, "second window")
+            .expect("second message saves");
+        assert_eq!(store.create_context_window(target_a.id, 1).unwrap(), 1);
         store
             .create_pending_action(
                 target_a.id,
@@ -1630,6 +2291,12 @@ mod tests {
                     .expect("context compaction")
                     .is_none()
             );
+            assert!(
+                store
+                    .list_context_windows(session.id)
+                    .expect("context windows")
+                    .is_empty()
+            );
         }
         assert!(
             store
@@ -1666,6 +2333,10 @@ mod tests {
         store
             .append_message(session.id, MessageRole::User, "hello")
             .expect("message saves");
+        store
+            .append_message(session.id, MessageRole::User, "second window")
+            .expect("second message saves");
+        assert_eq!(store.create_context_window(session.id, 1).unwrap(), 1);
         store
             .create_pending_action(
                 session.id,
@@ -1728,6 +2399,12 @@ mod tests {
                 .expect("compaction")
                 .is_none()
         );
+        assert!(
+            store
+                .list_context_windows(session.id)
+                .expect("context windows")
+                .is_empty()
+        );
         assert!(!store.delete_session(session.id).expect("second delete"));
     }
 
@@ -1771,7 +2448,12 @@ mod tests {
             })
             .expect("event saves");
         store
-            .create_restore_point(session.id, "config.env", Some("api_key=secret-value"), "new")
+            .create_restore_point(
+                session.id,
+                "config.env",
+                Some("api_key=secret-value"),
+                "new",
+            )
             .expect("restore point saves");
 
         let report = store
@@ -1796,7 +2478,9 @@ mod tests {
             "access_token: [REDACTED]"
         );
         assert_eq!(
-            store.list_restore_points(session.id).expect("restore lookup")[0]
+            store
+                .list_restore_points(session.id)
+                .expect("restore lookup")[0]
                 .original_text
                 .as_deref(),
             Some("api_key=secret-value")

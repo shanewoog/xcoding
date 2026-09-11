@@ -561,6 +561,55 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "large workspace sketch performance benchmark"]
+    fn large_workspace_sketch_performance() {
+        const VISIBLE_DIRECTORIES: usize = 100;
+        const FILES_PER_DIRECTORY: usize = 100;
+        const IGNORED_FILES: usize = 2_000;
+        const MAX_SKETCH_MILLIS: u128 = 2_000;
+
+        let root = temp_workspace("large-sketch");
+        for directory in 0..VISIBLE_DIRECTORIES {
+            let path = root.join(format!("module_{directory:03}"));
+            fs::create_dir_all(&path).expect("visible directory creates");
+            for file in 0..FILES_PER_DIRECTORY {
+                fs::write(path.join(format!("file_{file:03}.rs")), "fn fixture() {}\n")
+                    .expect("visible fixture writes");
+            }
+        }
+        for ignored in ["node_modules/pkg", "target/debug"] {
+            let path = root.join(ignored);
+            fs::create_dir_all(&path).expect("ignored directory creates");
+            for file in 0..(IGNORED_FILES / 2) {
+                fs::write(path.join(format!("generated_{file:04}.js")), "generated\n")
+                    .expect("ignored fixture writes");
+            }
+        }
+
+        let started_at = std::time::Instant::now();
+        let paths = workspace_path_sketch(&root);
+        let elapsed_ms = started_at.elapsed().as_millis();
+
+        assert_eq!(paths.len(), MAX_RELEVANT_PATHS);
+        assert!(paths.iter().all(|path| !path.contains("node_modules")));
+        assert!(paths.iter().all(|path| !path.contains("target")));
+        assert!(
+            elapsed_ms < MAX_SKETCH_MILLIS,
+            "large workspace sketch exceeded {MAX_SKETCH_MILLIS} ms"
+        );
+        println!(
+            "large_workspace_sketch fixture_visible_files={} fixture_ignored_files={} paths={} elapsed_ms={} max_ms={}",
+            VISIBLE_DIRECTORIES * FILES_PER_DIRECTORY,
+            IGNORED_FILES,
+            paths.len(),
+            elapsed_ms,
+            MAX_SKETCH_MILLIS
+        );
+
+        fs::remove_dir_all(root).expect("workspace removes");
+    }
+
+    #[test]
     fn loads_workspace_skills_into_catalog_and_prompt() {
         let root = temp_workspace("skills");
         let skill_dir = root.join(".xcoding/skills/hello-style");

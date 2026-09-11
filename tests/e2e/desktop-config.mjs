@@ -283,6 +283,8 @@ async function main() {
     "language picker should not consume a separate settings card",
   );
   assert.ok(appSource.includes("provider-settings-card"), "provider manager should occupy the expanded settings area");
+  assert.ok(appSource.includes('<option value="anthropic_messages">'), "provider protocol selector should expose Anthropic Messages");
+  assert.equal((i18nSource.match(/"providerProtocol\.anthropicMessages":/g) || []).length, 2, "Anthropic protocol label must exist in both catalogs");
   assert.ok(appSource.includes("provider-manager-body"), "provider manager should place list and editor side by side");
   const providerListMatch = appSource.match(/<div id="provider-list"[\s\S]*?<\/div>\s*\{selectedProvider \?/);
   assert.ok(providerListMatch, "provider list should be separate from the selected-provider editor");
@@ -429,9 +431,11 @@ async function main() {
   const projectsProductionSource = projectsSource.split("#[cfg(test)]", 1)[0];
   assert.ok(!/fs::remove_dir|remove_dir_all/.test(projectsProductionSource), "project removal must not delete workspace folders");
   const protocolSource = await readFile(resolve(repositoryRoot, "packages/protocol/src/index.ts"), "utf8");
+  assert.ok(protocolSource.includes('"anthropic_messages"'), "TypeScript protocol should include Anthropic Messages");
   assert.ok(protocolSource.includes("hidden_project_paths"), "protocol missing hidden_project_paths");
   assert.ok(protocolSource.includes("model_context_windows"), "protocol missing model_context_windows");
   assert.ok(protocolSource.includes("context_compaction_threshold_percent"), "protocol missing compaction threshold");
+  assert.ok(protocolSource.includes("lossy_context_compaction_enabled"), "protocol missing lossy context compaction flag");
   assert.ok(protocolSource.includes("ImportProjectResult"), "protocol missing ImportProjectResult");
   const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
   assert.ok(apiSource.includes("includeBranches"), "git_environment should support includeBranches");
@@ -461,6 +465,8 @@ async function main() {
   assert.ok(i18nSource.includes("context.title") && i18nSource.includes("context.estimated"), "i18n missing context usage copy");
   assert.ok(appSource.includes("model_context_windows"), "settings should persist model context window overrides");
   assert.ok(appSource.includes("context_compaction_threshold_percent"), "settings should persist compaction threshold");
+  assert.equal((appSource.match(/lossy_context_compaction_enabled/g) || []).length, 3, "settings should load, submit, and refill the lossy compaction flag");
+  assert.ok(appSource.includes('id="lossy-context-compaction-enabled"') && appSource.includes("setLossyContextCompactionEnabled"), "settings should render and control the lossy compaction toggle");
   assert.ok(appSource.includes("modelContextWindowEntries"), "settings should track model context window entries");
   assert.ok(appSource.includes("normalizeModelContextWindows") && appSource.includes("contextWindowMapFromEntries"), "settings should normalize model context window values");
   assert.ok(appSource.includes("context-windows-settings-card") && appSource.includes('id="context-window-list"') && appSource.includes("context-window-row"), "settings should render model context window controls");
@@ -469,6 +475,8 @@ async function main() {
   assert.ok(cssSource.includes(".settings-tabs-container") && cssSource.includes(".settings-tab"), "styles.css missing settings tab layout");
   assert.ok(cssSource.includes("grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;"), "context window rows should align model, tokens, and remove button horizontally");
   assert.ok(i18nSource.includes("settings.contextWindows.title") && i18nSource.includes("field.contextWindowTokens") && i18nSource.includes("action.addContextWindow"), "i18n missing model context window settings keys");
+  assert.equal((i18nSource.match(/"field\.lossyContextCompaction":/g) || []).length, 2, "i18n missing bilingual lossy compaction title");
+  assert.equal((i18nSource.match(/"field\.lossyContextCompactionHint":/g) || []).length, 2, "i18n missing bilingual lossy compaction help");
 
   assert.ok(protocolSource.includes("VisionDelegateConfig") && protocolSource.includes("vision_delegate"), "protocol missing vision delegate config");
   assert.ok(protocolSource.includes("vision_delegate_start") && protocolSource.includes("vision_delegate_success") && protocolSource.includes("vision_delegate_failed"), "protocol missing vision delegate events");

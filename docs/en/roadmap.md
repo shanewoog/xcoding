@@ -153,12 +153,12 @@ Duration target: continuous after V1
 
 - better relevant-file retrieval (Wave R: search options + workspace sketch; embeddings later)
 - stronger command policy engine (Wave Z: workspace denylist, expanded hard denials, structured `policy_code`)
-- more cloud providers
+- more cloud providers (Anthropic's native Messages API is supported alongside OpenAI-compatible Chat Completions and Responses)
 - skills system (Wave Y: workspace `.xcoding/skills/*/SKILL.md` catalog + read-only `load_skill`)
 - MCP support (Wave AA: stdio MCP client via `.xcoding/mcp.json`, namespaced `mcp__server__tool` tools, always approval-gated)
 - better patch confidence and conflict UX (Wave X: structured `patch_conflict` tool errors, agent re-read guidance, Desktop CONFLICT badge, CLI retry hint)
 - richer git workflows (Wave S: structured `git_log` + `git_show`; Wave T: approved `git_add` + `git_commit`; Wave U: approved `git_push` without force; Wave V: approved `git_fetch` + `git_pull` (default ff-only); Wave W: Desktop/CLI dedicated git review presentation; reset/force/rebase later)
-- performance work on large repos
+- large-repository performance (first pass complete: streaming `search_code` with scan metrics, a 10,000-visible-source-file benchmark, generated-directory exclusion checks, and a bounded workspace-sketch benchmark; run `pnpm test:performance`. Current regression limits are 30 seconds for search and 2 seconds for the sketch; embedding retrieval remains future work)
 
 ### Still later
 
@@ -245,4 +245,3 @@ V1 can be called launchable when:
 ## Other Language
 
 - Chinese: [../zh/roadmap.md](../zh/roadmap.md)
-

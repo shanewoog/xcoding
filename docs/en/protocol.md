@@ -1031,6 +1031,24 @@ Output:
 
 ## 7. Permission Evaluation Rules
 
+### Lossless context and history tools
+
+XCoding defaults `lossy_context_compaction_enabled` to `false`. Near the context threshold, `new_context` opens a window at the current user message while exact older messages remain stored. Setting the flag to `true` additionally permits automatic summaries, hard history truncation, and tool-output truncation.
+
+All schemas reject additional properties. List and search calls accept optional `offset` (minimum `0`) and `limit` (`1..100`). History is restricted to the current session; notes are restricted to the normalized current workspace.
+
+| Tool | Required input | Purpose |
+|---|---|---|
+| `new_context` | none | Open a lossless window at the current user message |
+| `history_list` | none | Page through current-session messages |
+| `history_read` | `message_id` UUID | Read one current-session message |
+| `history_search` | non-empty `query` | Search current-session messages |
+| `notes_list` | none | Page through current-workspace notes |
+| `notes_read` | `note_id` UUID | Read one current-workspace note |
+| `notes_search` | non-empty `query` | Search current-workspace notes |
+| `notes_append` | `content` (1–600 characters) | Create a workspace note |
+| `notes_write` | `note_id`, `content` (1–600 characters) | Replace a workspace note |
+
 Before executing a tool. In Phase 1B, only read tools are executable, so both `ask` and `auto-edit` auto-allow them:
 
 1. Determine permission kind

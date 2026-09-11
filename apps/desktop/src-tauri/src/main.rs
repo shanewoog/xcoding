@@ -29,14 +29,14 @@ use xcoding_mcp::{
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
     CreateProjectResult, ImportProjectParams, ImportProjectResult, ListModelsResult, PingResult,
-    ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus, ReplaySessionResult,
-    ResolveActionParams,
+    ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus, ProviderWireApi,
+    ReplaySessionResult, ResolveActionParams,
     ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session,
     SessionDetail, SetConfigParams, UserConfig, WorkspaceConfig,
 };
 use xcoding_providers::{
-    apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models, load_user_config,
-    normalize_user_config, save_user_config, user_config_dir,
+    apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models_with_wire_api,
+    load_user_config, normalize_user_config, save_user_config, user_config_dir,
 };
 
 #[derive(Clone, Serialize)]
@@ -424,8 +424,14 @@ fn model_route_status() -> Result<Vec<ModelRouteStatus>, String> {
 async fn list_provider_models(
     base_url: Option<String>,
     api_key: Option<String>,
+    wire_api: Option<ProviderWireApi>,
 ) -> Result<ListModelsResult, String> {
-    list_models(base_url.as_deref(), api_key.as_deref()).await
+    list_models_with_wire_api(
+        base_url.as_deref(),
+        api_key.as_deref(),
+        wire_api.unwrap_or_default(),
+    )
+    .await
 }
 
 #[tauri::command]

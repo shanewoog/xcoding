@@ -198,6 +198,12 @@ eady=false 时退出码为 2。
 
 ## 会话续聊
 
+## 无损上下文窗口
+
+XCoding 默认保持上下文无损。模型窗口接近配置阈值时，Agent 会从当前用户消息开启新的上下文窗口，不会自动摘要或删除较早消息。模型可通过 `history_list`、`history_read`、`history_search` 找回早期原文，也可用 `notes_*` 工具保存当前工作区的持久事实。
+
+只有明确接受摘要、历史硬截断和大型工具输出截断时，才在 **设置 → 模型上下文** 中开启 **允许有损上下文压缩**。配置项 `lossy_context_compaction_enabled` 默认为 `false`，保存后从下一轮生效。
+
 在已完成的会话上追加提问（同一 session id，共享历史）：
 
 ```bash

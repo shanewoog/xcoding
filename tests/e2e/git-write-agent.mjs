@@ -131,6 +131,15 @@ async function main() {
     assert.deepEqual(
       mock.requests[0].tools.map((tool) => tool.function.name),
       [
+        "new_context",
+        "history_list",
+        "history_read",
+        "history_search",
+        "notes_list",
+        "notes_read",
+        "notes_search",
+        "notes_append",
+        "notes_write",
         "list_dir",
         "read_file",
         "search_code",

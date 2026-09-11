@@ -18,7 +18,7 @@ Covers:
 - running cancel
 - session replay steps
 - feature / bugfix / refactor write loops
-- CLI vs Desktop surface parity (static)
+- CLI vs Desktop surface parity (static method coverage + dynamic trajectory comparison)
 - provider auth failure guidance (mock 401)
 
 ## Live cloud smoke (optional)
@@ -45,8 +45,8 @@ Runs a short monorepo explanation chat against the configured OpenAI-compatible 
 | 7 | Rejected patch leaves workspace clean | deterministic | automated |
 | 8 | Cancel running task | deterministic | automated |
 | 9 | Replay session steps | deterministic | automated |
-| 10 | CLI vs Desktop parity | deterministic (static) | automated |
+| 10 | CLI vs Desktop parity | deterministic (static + dynamic) | automated (`surface-parity.mjs` + `dynamic-surface-parity.mjs`) |
 
 ## 中文
 
-`pnpm test:acceptance` 会先跑确定性 e2e（无需云密钥）。加 `--live` 时再跑一次真实网关冒烟。完整 10 条验收矩阵均已接入确定性自动化：任务 2/3/4 由 `write-loop-agent.mjs` 覆盖，任务 10 由 `surface-parity.mjs` 做 CLI/Desktop 表面一致性检查。
+`pnpm test:acceptance` 会先跑确定性 e2e（无需云密钥）。加 `--live` 时再跑一次真实网关冒烟。完整 10 条验收矩阵均已接入确定性自动化：任务 2/3/4 由 `write-loop-agent.mjs` 覆盖，任务 10 由 `surface-parity.mjs` 检查静态接口，并由 `dynamic-surface-parity.mjs` 对比同一 prompt 下 CLI/server 与 Desktop 核心路径的 Provider 请求、实时事件、回放步骤和任务摘要。

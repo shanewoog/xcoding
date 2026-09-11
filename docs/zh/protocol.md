@@ -1031,6 +1031,24 @@ skill 名称即目录名：`1-64` 个字符，字符集 `[A-Za-z0-9._-]`，且�
 
 ## 7. 权限评估规则
 
+### 无损上下文与历史工具
+
+XCoding 的 `lossy_context_compaction_enabled` 默认为 `false`。上下文接近阈值时，`new_context` 从当前用户消息开启新窗口，较早消息仍按原文保存。把该配置改为 `true` 后，才允许自动摘要、历史硬截断和工具输出截断。
+
+所有 Schema 都拒绝额外字段。列表和搜索调用可选 `offset`（最小 `0`）与 `limit`（`1..100`）。历史只允许访问当前会话，笔记只允许访问规范化后的当前工作区。
+
+| 工具 | 必填输入 | 用途 |
+|---|---|---|
+| `new_context` | 无 | 从当前用户消息开启无损窗口 |
+| `history_list` | 无 | 分页列出当前会话消息 |
+| `history_read` | `message_id` UUID | 读取一条当前会话消息 |
+| `history_search` | 非空 `query` | 搜索当前会话消息 |
+| `notes_list` | 无 | 分页列出当前工作区笔记 |
+| `notes_read` | `note_id` UUID | 读取一条当前工作区笔记 |
+| `notes_search` | 非空 `query` | 搜索当前工作区笔记 |
+| `notes_append` | `content`（1–600 字符） | 新建工作区笔记 |
+| `notes_write` | `note_id`、`content`（1–600 字符） | 替换工作区笔记 |
+
 执行工具前。Phase 1B 只允许执行只读工具，因此 `ask` 和 `auto-edit` 都会自动允许它们：
 
 1. 判断权限类别
