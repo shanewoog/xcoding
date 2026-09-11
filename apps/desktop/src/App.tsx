@@ -2362,6 +2362,7 @@ export function App() {
   function openSettings(): void {
     pendingConversationScrollToBottomRef.current = conversationAtBottomRef.current;
     pendingConversationScrollTopRef.current = conversationRef.current?.scrollTop ?? null;
+    setError(null);
     setView("settings");
   }
 
@@ -2962,7 +2963,7 @@ export function App() {
   );
 
   const persistWorkspaceMode = useCallback(
-    async (nextMode: Mode, previousMode: Mode): Promise<void> => {
+    async (nextMode: Mode, previousMode: Mode, selectedModel: string): Promise<void> => {
       if (!isTauriRuntime) return;
       const root = workspaceRoot.trim();
       if (!root) return;
@@ -2970,12 +2971,14 @@ export function App() {
       const save = async (): Promise<void> => {
         try {
           const current = await invoke<WorkspaceConfig>("workspace_config", { workspaceRoot: root });
+          const effectiveModel = current.model.trim() || selectedModel.trim();
+          if (!effectiveModel) return;
           const saved = await invoke<WorkspaceConfig>("set_workspace_config", {
             params: {
               workspace_root: root,
               mode: nextMode,
               provider: current.provider,
-              model: current.model,
+              model: effectiveModel,
             },
           });
           if (workspaceRootRef.current === root && workspaceModeRevisionRef.current === revision) {
@@ -4315,29 +4318,30 @@ export function App() {
           </div>
         </header>
 
-        {error ? <p className="error-message settings-error">{error}</p> : null}
-
-        <nav className="settings-tabs" role="tablist" aria-label={t(locale, "settings.tabsLabel")}>
-          {settingsTabs.map((tab, index) => {
-            const active = settingsTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                id={`settings-tab-${tab.id}`}
-                className={`settings-tab${active ? " active" : ""}`}
-                aria-selected={active}
-                aria-controls={`settings-panel-${tab.id}`}
-                tabIndex={active ? 0 : -1}
-                onClick={() => setSettingsTab(tab.id)}
-                onKeyDown={(event) => handleSettingsTabKeyDown(event, index)}
-              >
-                {t(locale, tab.labelKey)}
-              </button>
-            );
-          })}
-        </nav>
+        <div className="settings-tabs-header">
+          {error ? <p className="error-message settings-error">{error}</p> : null}
+          <nav className="settings-tabs" role="tablist" aria-label={t(locale, "settings.tabsLabel")}>
+            {settingsTabs.map((tab, index) => {
+              const active = settingsTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  id={`settings-tab-${tab.id}`}
+                  className={`settings-tab${active ? " active" : ""}`}
+                  aria-selected={active}
+                  aria-controls={`settings-panel-${tab.id}`}
+                  tabIndex={active ? 0 : -1}
+                  onClick={() => setSettingsTab(tab.id)}
+                  onKeyDown={(event) => handleSettingsTabKeyDown(event, index)}
+                >
+                  {t(locale, tab.labelKey)}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
 
         <div className="settings-tabs-container">
           <section
@@ -6128,7 +6132,7 @@ export function App() {
                   const nextMode = event.target.value as Mode;
                   const previousMode = mode;
                   setMode(nextMode);
-                  void persistWorkspaceMode(nextMode, previousMode);
+                  void persistWorkspaceMode(nextMode, previousMode, model);
                 }}
                 disabled={isRunning || isSavingConfig}
                 title={t(locale, "field.mode")}

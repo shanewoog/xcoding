@@ -1948,12 +1948,17 @@ input.workspace-missing {
   min-width: 5.5rem;
 }
 .settings-error { margin: 0; color: var(--danger-text); }
+.settings-tabs-header {
+  display: grid;
+  gap: 0.5rem;
+  min-height: 0;
+}
 .settings-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 1rem;
+  margin-bottom: 0;
 }
 .settings-tab {
   appearance: none;

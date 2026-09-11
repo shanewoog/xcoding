@@ -427,7 +427,40 @@ async function main() {
   assert.ok(appSource.includes("workspaceRootRef"), "workspace mode saves should reject stale project callbacks");
   assert.ok(appSource.includes("workspaceModeRevisionRef"), "workspace mode saves should reject stale mode callbacks");
   assert.ok(appSource.includes("workspaceModeSaveChainRef"), "workspace mode saves should be serialized");
+  const persistWorkspaceModeStart = appSource.indexOf("const persistWorkspaceMode = useCallback(");
+  const persistWorkspaceModeEnd = appSource.indexOf("async function sendChatMessage", persistWorkspaceModeStart);
+  assert.ok(
+    persistWorkspaceModeStart >= 0 && persistWorkspaceModeEnd > persistWorkspaceModeStart,
+    "workspace mode persistence source block should be discoverable",
+  );
+  const persistWorkspaceModeSource = appSource.slice(persistWorkspaceModeStart, persistWorkspaceModeEnd);
+  assert.ok(
+    persistWorkspaceModeSource.includes("current.model.trim() || selectedModel.trim()"),
+    "mode changes should fall back to the current composer model for a new workspace",
+  );
+  assert.ok(
+    persistWorkspaceModeSource.includes("if (!effectiveModel) return;"),
+    "mode changes must not submit an empty model to workspace config",
+  );
+  assert.ok(
+    appSource.includes("persistWorkspaceMode(nextMode, previousMode, model)"),
+    "mode changes should pass the current composer model explicitly",
+  );
   assert.ok(appSource.includes("function openSettings(): void"), "Settings navigation should capture the conversation scroll offset");
+  const openSettingsStart = appSource.indexOf("function openSettings(): void");
+  const openSettingsEnd = appSource.indexOf("function returnToWorkbench(): void", openSettingsStart);
+  assert.ok(openSettingsStart >= 0 && openSettingsEnd > openSettingsStart, "settings navigation source block should be discoverable");
+  assert.ok(
+    appSource.slice(openSettingsStart, openSettingsEnd).includes("setError(null);"),
+    "opening settings should clear stale conversation errors",
+  );
+  const settingsViewStart = appSource.indexOf('if (view === "settings") {');
+  const settingsViewEnd = appSource.indexOf('<div className="settings-tabs-container">', settingsViewStart);
+  assert.ok(settingsViewStart >= 0 && settingsViewEnd > settingsViewStart, "settings navigation source block should be discoverable");
+  assert.ok(
+    appSource.slice(settingsViewStart, settingsViewEnd).includes('<div className="settings-tabs-header">'),
+    "settings errors and tabs should share one fixed-grid row",
+  );
   assert.ok(
     appSource.includes("pendingConversationScrollToBottomRef.current = conversationAtBottomRef.current"),
     "Settings navigation should preserve bottom-follow mode while the conversation is unmounted",
