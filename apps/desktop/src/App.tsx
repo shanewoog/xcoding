@@ -256,6 +256,13 @@ function primaryProviderKey(provider: CloudProviderConfig | null | undefined): s
   return (provider.api_key || "").trim();
 }
 
+function providerCredentialsMissing(
+  status: ProviderAuthStatus | null,
+  provider: CloudProviderConfig | null | undefined,
+): boolean {
+  return status?.ready === false && !primaryProviderKey(provider);
+}
+
 function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[]; activeProviderId: string } {
   const configured = (config.providers || [])
     .filter((item) => item && typeof item.id === "string")
@@ -3034,7 +3041,7 @@ export function App() {
       setError(t(locale, "error.needPrompt"));
       return null;
     }
-    if (providerStatus && !providerStatus.ready) {
+    if (providerCredentialsMissing(providerStatus, activeProvider)) {
       setError(t(locale, "error.needProvider"));
       return null;
     }
@@ -4039,11 +4046,12 @@ export function App() {
     !availableModels.some((entry) => entry.id === model.trim());
   const queueMode = !!(isRunning || activeSession?.status === "running" || activeSession?.status === "need_user");
   const hasComposerContent = !!(prompt.trim() || composerImages.length > 0);
+  const providerMissing = providerCredentialsMissing(providerStatus, activeProvider);
   const sendBlockReason = workspaceMissing
       ? "workspace"
       : (!prompt.trim() && composerImages.length === 0)
         ? "prompt"
-        : providerStatus && !providerStatus.ready
+        : providerMissing
           ? "provider"
           : modelMissing
             ? "model"

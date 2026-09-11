@@ -65,6 +65,17 @@ function desktopDoctorReady(checks) {
   return checks.every((check) => check.ok);
 }
 
+function primaryProviderKey(provider) {
+  if (!provider) return "";
+  const pool = (provider.api_keys || []).filter((item) => item.enabled !== false && (item.key || "").trim());
+  if (pool.length > 0) return (pool[0].key || "").trim();
+  return (provider.api_key || "").trim();
+}
+
+function providerCredentialsMissing(status, provider) {
+  return status?.ready === false && !primaryProviderKey(provider);
+}
+
 async function main() {
   const appSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8");
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
@@ -128,6 +139,40 @@ async function main() {
   );
   assert.ok(appSource.includes("onClick={() => startNewTask()}"), "New task button required");
   assert.ok(!/onClick=\{\(\) => startNewTask\(\)\}[^>]*disabled=\{isRunning\}/.test(appSource), "New task must stay available while another session runs");
+  assert.ok(
+    appSource.includes("if (providerCredentialsMissing(providerStatus, activeProvider))"),
+    "sending a new task must accept credentials saved on the active provider",
+  );
+  assert.ok(
+    appSource.includes("const providerMissing = providerCredentialsMissing(providerStatus, activeProvider);"),
+    "the send button must use the same active-provider credential check",
+  );
+  const staleEnvironmentStatus = { ready: false };
+  assert.equal(
+    providerCredentialsMissing(staleEnvironmentStatus, { api_key: "saved-key" }),
+    false,
+    "a saved provider key must keep a new project sendable when environment auth reports missing",
+  );
+  assert.equal(
+    providerCredentialsMissing(staleEnvironmentStatus, {
+      api_keys: [
+        { key: "disabled-key", enabled: false },
+        { key: "pooled-key", enabled: true },
+      ],
+    }),
+    false,
+    "an enabled saved key-pool entry must keep a new project sendable",
+  );
+  assert.equal(
+    providerCredentialsMissing(staleEnvironmentStatus, { api_key: "", api_keys: [] }),
+    true,
+    "a project without environment or saved provider credentials must remain blocked",
+  );
+  assert.equal(
+    providerCredentialsMissing({ ready: true }, { api_key: "", api_keys: [] }),
+    false,
+    "environment credentials must remain a supported fallback",
+  );
 
   const submitStart = appSource.indexOf("async function submit(");
   const submitEnd = appSource.indexOf("async function steerCurrentRun", submitStart);
