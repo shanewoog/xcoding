@@ -1413,6 +1413,7 @@ export function App() {
   const chatGenerationMonoRef = useRef(0);
   const streamedTextBySessionRef = useRef<Map<string, string>>(new Map());
   const drainFollowUpsBySessionRef = useRef<Set<string>>(new Set());
+  const cancellingSessionIdsRef = useRef<Set<string>>(new Set());
   const activeSessionIdRef = useRef<string | null>(null);
   const sessionsRef = useRef<Session[]>([]);
   const workspaceModeRevisionRef = useRef(0);
@@ -3594,7 +3595,14 @@ export function App() {
   async function cancelSession(): Promise<void> {
     if (!activeSessionId) return;
     const sessionId = activeSessionId;
+    if (cancellingSessionIdsRef.current.has(sessionId)) return;
+    cancellingSessionIdsRef.current.add(sessionId);
     setError(null);
+    setFollowUpQueue((current) => {
+      const remaining = current.filter((item) => item.sessionId !== sessionId);
+      followUpQueueRef.current = remaining;
+      return remaining;
+    });
     setRunningSessionIds((current) => current.includes(sessionId) ? current : [...current, sessionId]);
     const previousInFlight = chatInFlightBySessionRef.current.get(sessionId) ?? null;
     try {
@@ -3612,17 +3620,21 @@ export function App() {
       await refreshSessions();
       if (activeSessionIdRef.current === sessionId) await hydrateSession(sessionId);
     } catch (cause) {
-      if (activeSessionIdRef.current === sessionId) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!message.includes("only active sessions can be cancelled") && activeSessionIdRef.current === sessionId) {
+        setError(message);
+      } else {
+        await refreshSessions();
+        if (activeSessionIdRef.current === sessionId) await hydrateSession(sessionId);
       }
     } finally {
+      cancellingSessionIdsRef.current.delete(sessionId);
       setRunningSessionIds((current) => current.filter((id) => id !== sessionId));
       setRunStatusBySession((current) => {
         if (!(sessionId in current)) return current;
         const { [sessionId]: _removed, ...rest } = current;
         return rest;
       });
-      await drainFollowUpQueue(sessionId);
     }
   }
 

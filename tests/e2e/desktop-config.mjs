@@ -465,6 +465,22 @@ async function main() {
     appSource.includes("pendingConversationScrollToBottomRef.current = conversationAtBottomRef.current"),
     "Settings navigation should preserve bottom-follow mode while the conversation is unmounted",
   );
+  const cancelSessionStart = appSource.indexOf("async function cancelSession(): Promise<void>");
+  const cancelSessionEnd = appSource.indexOf("function unhideProjectPath", cancelSessionStart);
+  assert.ok(cancelSessionStart >= 0 && cancelSessionEnd > cancelSessionStart, "cancel session source block should be discoverable");
+  const cancelSessionSource = appSource.slice(cancelSessionStart, cancelSessionEnd);
+  assert.ok(
+    cancelSessionSource.includes("cancellingSessionIdsRef.current.has(sessionId)"),
+    "repeated stop clicks must not cancel an already-cancelling session",
+  );
+  assert.ok(
+    cancelSessionSource.includes("current.filter((item) => item.sessionId !== sessionId)"),
+    "stopping a task must discard its queued follow-ups",
+  );
+  assert.ok(
+    !cancelSessionSource.includes("drainFollowUpQueue(sessionId)"),
+    "stopping a task must not restart it by draining queued follow-ups",
+  );
   assert.ok(appSource.includes("function returnToWorkbench(): void"), "Settings back navigation should restore the workbench view");
   assert.ok(appSource.includes("onClick={openSettings}"), "Sidebar settings entry should capture the conversation scroll offset");
   assert.ok(appSource.includes("node.scrollTop = Math.min(scrollTop, maxScrollTop)"), "Returning from settings should restore the prior conversation scroll offset");
