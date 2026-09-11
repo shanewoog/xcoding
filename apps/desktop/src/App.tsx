@@ -2441,6 +2441,8 @@ export function App() {
         && draftEpochRef.current === composerEpochRef.current
         && !draftKnownSessionIdsRef.current.has(sid)
       ) {
+        patchRunStatus((current) => current ?? { startedAt: Date.now(), phase: "thinking" });
+        setDraftRunStatus(null);
         setActiveSessionId(sid);
         adoptDraftRightPanelState(sid);
       }
@@ -2450,7 +2452,7 @@ export function App() {
         patchStream((current) => current + payload.delta);
         patchRunStatus((current) => current?.phase === "retrying"
           ? { ...current, phase: "thinking", detail: undefined }
-          : (current ?? null));
+          : (current ?? { startedAt: Date.now(), phase: "thinking" }));
       }
       if (payload.type === "context_compacted" && isActive) {
         setCompactedMessageCount(payload.compacted_message_count);

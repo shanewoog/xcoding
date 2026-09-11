@@ -138,6 +138,16 @@ async function main() {
     !patchRunStatusSource.includes("setRunStatusExpanded(false)"),
     "streamed run-status updates must not collapse details opened by the user",
   );
+  assert.match(
+    appSource,
+    /!draftKnownSessionIdsRef\.current\.has\(sid\)[\s\S]*?patchRunStatus\(\(current\) => current \?\? \{ startedAt: Date\.now\(\), phase: "thinking" \}\);[\s\S]*?setDraftRunStatus\(null\);[\s\S]*?setActiveSessionId\(sid\);/,
+    "adopting a real session must preserve a visible run status while leaving the draft",
+  );
+  assert.match(
+    appSource,
+    /payload\.type === "text_delta"[\s\S]*?current \?\? \{ startedAt: Date\.now\(\), phase: "thinking" \}/,
+    "text deltas must restore a missing thinking status after event loss or reordering",
+  );
   assert.ok(
     /runStatus\.phase === "failed"\s*\? t\(locale, "activity\.agentError"\)/.test(appSource),
     "a failed run must show a compact Agent error summary instead of task progress",
