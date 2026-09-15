@@ -268,6 +268,20 @@ impl ProviderError {
         }
     }
 
+    /// Request was rejected because the model does not support image inputs.
+    pub fn is_vision_unsupported(&self) -> bool {
+        match self {
+            Self::HttpStatus { status, body, .. } => {
+                let code = status.as_u16();
+                (code == 400 || code == 422)
+                    && !body_indicates_context_overflow(body)
+                    && !body_indicates_gateway_block(body)
+                    && body_indicates_vision_unsupported(body)
+            }
+            _ => false,
+        }
+    }
+
     /// Cooldown the endpoint asked for, when it sent one. Callers may still
     /// apply their own backoff; this is only the upstream's own hint.
     pub fn retry_after(&self) -> Option<Duration> {
@@ -552,6 +566,29 @@ fn body_indicates_credential_refusal(body: &str) -> bool {
         || lower.contains("billing")
         || lower.contains("suspend")
         || lower.contains("banned")
+}
+
+/// Recognizes a body that indicates the model does not support vision/image inputs.
+fn body_indicates_vision_unsupported(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let has_vision_keyword = lower.contains("image")
+        || lower.contains("vision")
+        || lower.contains("visual")
+        || lower.contains("multimodal")
+        || lower.contains("picture")
+        || lower.contains("photo")
+        || lower.contains("screenshot")
+        || lower.contains("attachment");
+    let has_rejection_keyword = lower.contains("not support")
+        || lower.contains("unsupported")
+        || lower.contains("cannot process")
+        || lower.contains("cannot handle")
+        || lower.contains("does not support")
+        || lower.contains("unable to process")
+        || lower.contains("invalid content")
+        || lower.contains("invalid_image")
+        || lower.contains("invalid image");
+    has_vision_keyword && has_rejection_keyword
 }
 
 fn truncate_provider_body(body: &str, max_chars: usize) -> String {
@@ -3470,3 +3507,4 @@ mod tests {
         let _ = fs::remove_dir_all(&temp);
     }
 }
+

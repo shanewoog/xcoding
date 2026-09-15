@@ -28,11 +28,42 @@ async function main() {
   console.log("Vision delegate E2E passed.");
 }
 
-/// Session model has no vision support, so the attachment must reach the
-/// delegate endpoint and only its description may reach the session model.
+/// Session model returns vision-unsupported on first attempt with images,
+/// so the attachment must reach the delegate endpoint and only its description
+/// may reach the session model on retry.
 async function assertDelegateReplacesImagesAndCachesTheDescription() {
   const vision = await startMockProvider({ text: VISION_DESCRIPTION });
-  const session = await startMockProvider({ text: "Acknowledged." });
+  // Session provider rejects images with vision-unsupported, then succeeds.
+  let sessionAttemptCount = 0;
+  const sessionRequests = [];
+  const visionUnsupportedBody = JSON.stringify({
+    error: { message: "This model does not support image input. Please use a text-only request.", type: "invalid_request_error" }
+  });
+  const sessionServer = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) { chunks.push(chunk); }
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    sessionRequests.push(body);
+    sessionAttemptCount += 1;
+    const hasImages = body.messages.some(m =>
+      Array.isArray(m.content) && m.content.some(p => p.type === "image_url")
+    );
+    if (hasImages && sessionAttemptCount <= 1) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(visionUnsupportedBody);
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "Acknowledged." } }] })}\n\n`);
+    response.end("data: [DONE]\n\n");
+  });
+  await new Promise((resolve, reject) => {
+    sessionServer.once("error", reject);
+    sessionServer.listen(0, "127.0.0.1", resolve);
+  });
+  const sessionAddress = sessionServer.address();
+  const sessionBaseUrl = `http://127.0.0.1:${sessionAddress.port}/v1`;
+  const session = { baseUrl: sessionBaseUrl, requests: sessionRequests, close: () => new Promise(r => sessionServer.close(r)) };
   const context = await startIsolatedServer({
     slug: "vision-delegate",
     sessionBaseUrl: session.baseUrl,
@@ -61,8 +92,9 @@ async function assertDelegateReplacesImagesAndCachesTheDescription() {
       "the delegate must receive the original base64 payload",
     );
 
-    assert.equal(session.requests.length, 1);
-    assertNoImagePartsReachedTheSessionModel(session.requests[0]);
+    // First request failed with vision-unsupported, second succeeded with descriptions.
+    assert.equal(session.requests.length, 2, "session should have 2 requests (first failed, second succeeded)");
+    assertNoImagePartsReachedTheSessionModel(session.requests[1]);
     const firstUserMessage = lastUserMessage(session.requests[0]);
     assert.match(firstUserMessage.content, /Why does this screen fail\?/);
     assert.match(firstUserMessage.content, /<image_description model="mock-vision-model">/);

@@ -26,8 +26,9 @@ use xcoding_protocol::{
 #[cfg(test)]
 use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_STEPS};
 use xcoding_providers::{
-    ChatMessage, OpenAiCompatibleProvider, ProviderError, ProviderEvent, ProviderToolCall,
-    ToolDefinition, load_user_config, provider_retry_delay,
+    ChatContentPart, ChatMessage, ChatMessageContent, OpenAiCompatibleProvider, ProviderError,
+    ProviderEvent, ProviderToolCall, ToolDefinition, load_user_config, normalize_base_url,
+    provider_retry_delay,
 };
 use xcoding_tools::{ToolError, ToolExecution, ToolRegistry, is_local_api_request};
 
@@ -2046,88 +2047,14 @@ impl<'a> AgentService<'a> {
                 budget.dropped_message_count,
             )));
         }
-        // Models without native vision cannot receive image parts. When a
-        // delegate is configured, stored images are described by the delegate
-        // model and only the description text reaches the session model. Stored
-        // history keeps the original attachments either way.
+        // Vision delegate is resolved regardless of model capability;
+        // the per-route cache determines at runtime whether the provider
+        // accepts images natively or needs delegation.
         let vision_delegate = resolve_vision_delegate(&user_config, &session.model);
-        // Index of the message the user just sent, so a delegate call on any
-        // earlier attachment can be reported as historical.
-        let latest_user_index = history
-            .iter()
-            .rposition(|message| message.role == MessageRole::User);
-        // Characters already spent on descriptions of earlier attachments. The
-        // newest attachment is never charged against this, so it always keeps a
-        // full description no matter how much history precedes it.
-        let mut historical_description_chars = 0usize;
-        let mut described_image_count = 0usize;
-        for (index, message) in history.iter().enumerate().skip(compacted_message_count) {
-            let converted = match (&vision_delegate, &message.role) {
-                (Some(delegate), MessageRole::User) => {
-                    let (text, images) = parse_stored_user_message(&message.content);
-                    if images.is_empty() {
-                        provider_message_from_stored(message)
-                    } else {
-                        let historical = latest_user_index != Some(index);
-                        // A delegate failure degrades this one attachment to a
-                        // note instead of aborting the run.
-                        match self
-                            .describe_images(
-                                session, delegate, &text, &images, historical, on_event,
-                            )
-                            .await
-                        {
-                            Ok(described) => {
-                                described_image_count =
-                                    described_image_count.saturating_add(images.len());
-                                let remaining = if historical {
-                                    MAX_HISTORICAL_VISION_DESCRIPTION_CHARS
-                                        .saturating_sub(historical_description_chars)
-                                } else {
-                                    MAX_VISION_DESCRIPTION_CHARS
-                                };
-                                if historical && remaining == 0 {
-                                    ChatMessage::user(message_with_vision_omission(
-                                        &text,
-                                        images.len(),
-                                    ))
-                                } else {
-                                    let clipped = truncate_summary_text(
-                                        described.description.trim(),
-                                        remaining.min(MAX_VISION_DESCRIPTION_CHARS),
-                                    );
-                                    if historical {
-                                        historical_description_chars = historical_description_chars
-                                            .saturating_add(clipped.chars().count());
-                                    }
-                                    ChatMessage::user(message_with_vision_description(
-                                        &text,
-                                        described.attribution(&delegate.model),
-                                        &clipped,
-                                    ))
-                                }
-                            }
-                            Err(_) => {
-                                ChatMessage::user(message_with_vision_failure(&text, images.len()))
-                            }
-                        }
-                    }
-                }
-                _ => provider_message_from_stored(message),
-            };
-            messages.push(converted);
-        }
-        if described_image_count > 0 {
-            self.emit(
-                on_event,
-                SessionEvent::VisionDescriptionsApplied {
-                    session_id: session.id,
-                    image_count: described_image_count,
-                    historical_chars: historical_description_chars,
-                    truncated: historical_description_chars
-                        >= MAX_HISTORICAL_VISION_DESCRIPTION_CHARS,
-                },
-            );
+        let mut vision_route_cache = VisionRouteCache::new();
+        // Build messages from stored history with original images intact.
+        for message in history.iter().skip(compacted_message_count) {
+            messages.push(provider_message_from_stored(message));
         }
 
         if let Some((tool_call, output)) = resolved_tool {
@@ -2345,6 +2272,60 @@ impl<'a> AgentService<'a> {
                     loop {
                         let attempt = retry_attempt + 1;
                         let mut attempt_messages = messages.clone();
+                        // Transform messages based on vision route status.
+                        let route_status = vision_route_cache.status(candidate, &session.model);
+                        let mut attempt_has_new_images = false;
+                        let mut attempt_new_image_keys: Vec<String> = Vec::new();
+                        match route_status {
+                            VisionRouteStatus::Unknown => {
+                                for msg in attempt_messages.iter() {
+                                    if msg.role == "user" {
+                                        attempt_new_image_keys.extend(collect_image_keys_from_message(msg));
+                                    }
+                                }
+                                attempt_has_new_images = !attempt_new_image_keys.is_empty();
+                            }
+                            VisionRouteStatus::NativeSupported => {
+                                let mut transformed = Vec::with_capacity(attempt_messages.len());
+                                for msg in attempt_messages.iter() {
+                                    if msg.role == "user" && chat_message_has_images(msg) {
+                                        let (new_msg, new_keys) = strip_processed_images(msg, vision_route_cache.processed_image_keys_ref());
+                                        attempt_new_image_keys.extend(new_keys);
+                                        transformed.push(new_msg);
+                                    } else {
+                                        transformed.push(msg.clone());
+                                    }
+                                }
+                                attempt_messages = transformed;
+                                attempt_has_new_images = !attempt_new_image_keys.is_empty();
+                            }
+                            VisionRouteStatus::NativeUnsupported => {
+                                let mut transformed = Vec::with_capacity(attempt_messages.len());
+                                for msg in attempt_messages.iter() {
+                                    if msg.role == "user" && chat_message_has_images(msg) {
+                                        let text = extract_user_text(msg);
+                                        let images = extract_images_from_message(msg);
+                                        let key = if images.is_empty() { String::new() } else { vision_cache_key(&images) };
+                                        if let Some(desc) = cached_vision_description(&key) {
+                                            transformed.push(ChatMessage::user(message_with_vision_description(&text, &desc.delegate_model, &desc.description)));
+                                        } else if let Some(ref delegate) = vision_delegate {
+                                            match self.describe_images(session, delegate, &text, &images, false, on_event).await {
+                                                Ok(desc) => {
+                                                    let clipped = truncate_summary_text(desc.description.trim(), MAX_VISION_DESCRIPTION_CHARS);
+                                                    transformed.push(ChatMessage::user(message_with_vision_description(&text, desc.attribution(&delegate.model), &clipped)));
+                                                }
+                                                Err(_) => transformed.push(ChatMessage::user(message_with_vision_failure(&text, images.len()))),
+                                            }
+                                        } else {
+                                            transformed.push(ChatMessage::user(message_with_vision_failure(&text, images.len())));
+                                        }
+                                    } else {
+                                        transformed.push(msg.clone());
+                                    }
+                                }
+                                attempt_messages = transformed;
+                            }
+                        }
                         refresh_token_budget(&mut attempt_messages, &request_budget);
                         match self
                             .stream_provider_attempt(
@@ -2381,6 +2362,10 @@ impl<'a> AgentService<'a> {
                                 );
                                 record_provider_success(candidate, circuit_settings);
                                 record_provider_key_success(candidate);
+                                // Mark route as natively supporting vision if images were sent.
+                                if attempt_has_new_images {
+                                    vision_route_cache.mark_native_supported(candidate, &session.model, &attempt_new_image_keys);
+                                }
                                 completed = Some((content, tool_calls, candidate_index));
                                 break;
                             }
@@ -2401,6 +2386,19 @@ impl<'a> AgentService<'a> {
                                     failure.tool_calls,
                                     Some(message.clone()),
                                 );
+                                // Vision-unsupported: mark route and retry with delegate.
+                                if let AgentError::Provider(ref provider_err) = failure.error {
+                                    if provider_err.is_vision_unsupported() {
+                                        vision_route_cache.mark_native_unsupported(candidate, &session.model);
+                                        self.emit(on_event, SessionEvent::Retrying {
+                                            session_id: session.id,
+                                            attempt,
+                                            max_attempts: max_provider_attempts,
+                                            message: "Provider does not support image input; describing with delegate and retrying.".to_owned(),
+                                        });
+                                        continue;
+                                    }
+                                }
                                 if matches!(failure.error, AgentError::Cancelled) {
                                     return Err(failure.error);
                                 }
@@ -5204,6 +5202,139 @@ struct VisionDelegate {
     timeout: Duration,
 }
 
+/// Vision capability status for a specific provider route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisionRouteStatus {
+    Unknown,
+    NativeSupported,
+    NativeUnsupported,
+}
+
+struct VisionRouteCache {
+    routes: std::collections::HashMap<String, VisionRouteStatus>,
+    processed_image_keys: std::collections::HashSet<String>,
+}
+
+impl VisionRouteCache {
+    fn new() -> Self {
+        Self {
+            routes: std::collections::HashMap::new(),
+            processed_image_keys: std::collections::HashSet::new(),
+        }
+    }
+
+    fn route_key(candidate: &ProviderCandidate, session_model: &str) -> String {
+        let model = candidate.model_for(session_model);
+        let base = normalize_base_url(&candidate.base_url);
+        format!("{}|{}|{}", candidate.id, base, model.to_ascii_lowercase())
+    }
+
+    fn status(&self, candidate: &ProviderCandidate, session_model: &str) -> VisionRouteStatus {
+        let key = Self::route_key(candidate, session_model);
+        self.routes.get(&key).copied().unwrap_or(VisionRouteStatus::Unknown)
+    }
+
+    fn mark_native_supported(&mut self, candidate: &ProviderCandidate, session_model: &str, image_keys: &[String]) {
+        let key = Self::route_key(candidate, session_model);
+        self.routes.insert(key, VisionRouteStatus::NativeSupported);
+        for k in image_keys { self.processed_image_keys.insert(k.clone()); }
+    }
+
+    fn mark_native_unsupported(&mut self, candidate: &ProviderCandidate, session_model: &str) {
+        let key = Self::route_key(candidate, session_model);
+        self.routes.insert(key, VisionRouteStatus::NativeUnsupported);
+    }
+
+    fn processed_image_keys_ref(&self) -> &std::collections::HashSet<String> {
+        &self.processed_image_keys
+    }
+}
+
+fn collect_image_keys_from_message(message: &ChatMessage) -> Vec<String> {
+    let Some(ChatMessageContent::Parts(parts)) = &message.content else {
+        return Vec::new();
+    };
+    let images: Vec<(String, String)> = parts.iter().filter_map(|part| {
+        if let ChatContentPart::ImageUrl { image_url } = part {
+            let url = &image_url.url;
+            if let Some(idx) = url.find(";base64,") {
+                let colon = url.find(':').unwrap_or(0);
+                let mime = &url[5..colon];
+                let data = &url[idx + 8..];
+                Some((mime.to_owned(), data.to_owned()))
+            } else { None }
+        } else { None }
+    }).collect();
+    if images.is_empty() { Vec::new() } else { vec![vision_cache_key(&images)] }
+}
+
+fn chat_message_has_images(message: &ChatMessage) -> bool {
+    match &message.content {
+        Some(ChatMessageContent::Parts(parts)) => parts.iter().any(|p| matches!(p, ChatContentPart::ImageUrl { .. })),
+        _ => false,
+    }
+}
+
+fn strip_processed_images(message: &ChatMessage, processed: &std::collections::HashSet<String>) -> (ChatMessage, Vec<String>) {
+    let Some(ChatMessageContent::Parts(parts)) = &message.content else {
+        return (message.clone(), Vec::new());
+    };
+    let mut new_keys = Vec::new();
+    let mut kept = Vec::new();
+    for part in parts {
+        if let ChatContentPart::ImageUrl { image_url } = part {
+            let url = &image_url.url;
+            if let Some(idx) = url.find(";base64,") {
+                let colon = url.find(':').unwrap_or(0);
+                let mime = &url[5..colon];
+                let data = &url[idx + 8..];
+                let key = vision_cache_key(&[(mime.to_owned(), data.to_owned())]);
+                if !processed.contains(&key) {
+                    new_keys.push(key);
+                    kept.push(part.clone());
+                }
+            }
+        } else {
+            kept.push(part.clone());
+        }
+    }
+    if kept.is_empty() {
+        let text: String = parts.iter().filter_map(|p| {
+            if let ChatContentPart::Text { text } = p { Some(text.as_str()) } else { None }
+        }).collect::<Vec<_>>().join(" ");
+        (ChatMessage::user(text), new_keys)
+    } else {
+        (ChatMessage { role: message.role.clone(), content: Some(ChatMessageContent::Parts(kept)), tool_calls: None, tool_call_id: None }, new_keys)
+    }
+}
+
+fn extract_user_text(message: &ChatMessage) -> String {
+    match &message.content {
+        Some(ChatMessageContent::Text(text)) => text.clone(),
+        Some(ChatMessageContent::Parts(parts)) => parts.iter().filter_map(|p| {
+            if let ChatContentPart::Text { text } = p { Some(text.as_str()) } else { None }
+        }).collect::<Vec<_>>().join(" "),
+        None => String::new(),
+    }
+}
+
+fn extract_images_from_message(message: &ChatMessage) -> Vec<(String, String)> {
+    let Some(ChatMessageContent::Parts(parts)) = &message.content else {
+        return Vec::new();
+    };
+    parts.iter().filter_map(|part| {
+        if let ChatContentPart::ImageUrl { image_url } = part {
+            let url = &image_url.url;
+            if let Some(idx) = url.find(";base64,") {
+                let colon = url.find(':').unwrap_or(0);
+                let mime = &url[5..colon];
+                let data = &url[idx + 8..];
+                Some((mime.to_owned(), data.to_owned()))
+            } else { None }
+        } else { None }
+    }).collect()
+}
+
 /// Cache of delegate descriptions keyed by the image payload alone. Without it
 /// every tool round and every later turn would re-describe the same attachment,
 /// because provider messages are rebuilt from stored history.
@@ -5296,7 +5427,7 @@ fn model_supports_vision(model: &str, capabilities: &BTreeMap<String, ModelCapab
 /// Builds the delegate for this run, or `None` when delegation does not apply:
 /// disabled, incompletely configured, session model already vision-capable, or
 /// the configured provider has no usable credentials.
-fn resolve_vision_delegate(config: &UserConfig, session_model: &str) -> Option<VisionDelegate> {
+fn resolve_vision_delegate(config: &UserConfig, _session_model: &str) -> Option<VisionDelegate> {
     let delegate = config.vision_delegate.as_ref()?;
     if !delegate.enabled {
         return None;
@@ -5305,9 +5436,7 @@ fn resolve_vision_delegate(config: &UserConfig, session_model: &str) -> Option<V
     if model.is_empty() || delegate.provider_id.trim().is_empty() {
         return None;
     }
-    if model_supports_vision(session_model, &config.model_capabilities) {
-        return None;
-    }
+    // Vision capability is now determined at runtime by probing the provider.
 
     let provider_config = config
         .providers
@@ -8150,15 +8279,16 @@ private material
     }
 
     #[test]
-    fn delegate_resolves_only_for_models_without_vision() {
+    fn delegate_resolves_for_any_model_when_configured() {
         let config = vision_config("gpt-4o");
-        // The session model cannot read images, so delegation applies.
+        // Vision capability is now determined at runtime, so the delegate
+        // resolves for any session model when configured.
         let delegate =
             resolve_vision_delegate(&config, "deepseek-chat").expect("delegate resolves");
         assert_eq!(delegate.model, "gpt-4o");
         assert_eq!(delegate.timeout, Duration::from_secs(30));
-        // A vision-capable session model needs no delegate.
-        assert!(resolve_vision_delegate(&config, "gpt-4o").is_none());
+        // Vision-capable models also get a delegate (used as fallback).
+        assert!(resolve_vision_delegate(&config, "gpt-4o").is_some());
     }
 
     #[test]
