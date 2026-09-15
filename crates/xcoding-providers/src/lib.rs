@@ -273,7 +273,8 @@ impl ProviderError {
         match self {
             Self::HttpStatus { status, body, .. } => {
                 let code = status.as_u16();
-                (code == 400 || code == 422)
+                // Support 400, 404, 422 - some providers use 404 for "no vision endpoint"
+                (code == 400 || code == 404 || code == 422)
                     && !body_indicates_context_overflow(body)
                     && !body_indicates_gateway_block(body)
                     && body_indicates_vision_unsupported(body)
@@ -587,7 +588,11 @@ fn body_indicates_vision_unsupported(body: &str) -> bool {
         || lower.contains("unable to process")
         || lower.contains("invalid content")
         || lower.contains("invalid_image")
-        || lower.contains("invalid image");
+        || lower.contains("invalid image")
+        || lower.contains("no endpoints found")
+        || lower.contains("not available")
+        || lower.contains("not implemented")
+        || lower.contains("not supported");
     has_vision_keyword && has_rejection_keyword
 }
 
