@@ -17,6 +17,16 @@ use reqwest::Client;
 pub use reqwest::StatusCode;
 use reqwest::{NoProxy, Proxy};
 use serde::{Deserialize, Serialize};
+/// Deserialize a JSON array that may be null into a Vec.
+/// Some providers (e.g., xiaomimimo) return `null` instead of `[]` for empty arrays.
+fn null_to_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
+}
+
 use serde_json::{Value, json};
 use thiserror::Error;
 use xcoding_protocol::{
@@ -2020,7 +2030,7 @@ fn responses_usage(event: &Value) -> Option<ProviderUsage> {
 struct ChatCompletionChunk {
     #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_empty_vec")]
     choices: Vec<ChatCompletionChoice>,
     /// Sent only by endpoints that honor `stream_options.include_usage`, and
     /// usually on a final chunk that carries no choices.
@@ -2056,7 +2066,7 @@ struct ChatCompletionDelta {
     reasoning_content: Option<String>,
     #[serde(default)]
     reasoning: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_empty_vec")]
     tool_calls: Vec<ToolCallDelta>,
 }
 
