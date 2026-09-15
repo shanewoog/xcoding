@@ -5258,10 +5258,15 @@ fn collect_image_keys_from_message(message: &ChatMessage) -> Vec<String> {
         if let ChatContentPart::ImageUrl { image_url } = part {
             let url = &image_url.url;
             if let Some(idx) = url.find(";base64,") {
-                let colon = url.find(':').unwrap_or(0);
-                let mime = &url[5..colon];
-                let data = &url[idx + 8..];
-                Some((mime.to_owned(), data.to_owned()))
+                // URL format: data:image/png;base64,...
+                if url.starts_with("data:") {
+                    let colon = url.find(':').unwrap_or(0);
+                    if colon >= 5 && colon < idx {
+                        let mime = &url[5..colon];
+                        let data = &url[idx + 8..];
+                        Some((mime.to_owned(), data.to_owned()))
+                    } else { None }
+                } else { None }
             } else { None }
         } else { None }
     }).collect();
@@ -5285,7 +5290,11 @@ fn strip_processed_images(message: &ChatMessage, processed: &std::collections::H
         if let ChatContentPart::ImageUrl { image_url } = part {
             let url = &image_url.url;
             if let Some(idx) = url.find(";base64,") {
+                // URL format: data:image/png;base64,...
                 let colon = url.find(':').unwrap_or(0);
+                if !url.starts_with("data:") || colon < 5 || colon >= idx {
+                    continue;
+                }
                 let mime = &url[5..colon];
                 let data = &url[idx + 8..];
                 let key = vision_cache_key(&[(mime.to_owned(), data.to_owned())]);
@@ -5326,10 +5335,15 @@ fn extract_images_from_message(message: &ChatMessage) -> Vec<(String, String)> {
         if let ChatContentPart::ImageUrl { image_url } = part {
             let url = &image_url.url;
             if let Some(idx) = url.find(";base64,") {
-                let colon = url.find(':').unwrap_or(0);
-                let mime = &url[5..colon];
-                let data = &url[idx + 8..];
-                Some((mime.to_owned(), data.to_owned()))
+                // URL format: data:image/png;base64,...
+                if url.starts_with("data:") {
+                    let colon = url.find(':').unwrap_or(0);
+                    if colon >= 5 && colon < idx {
+                        let mime = &url[5..colon];
+                        let data = &url[idx + 8..];
+                        Some((mime.to_owned(), data.to_owned()))
+                    } else { None }
+                } else { None }
             } else { None }
         } else { None }
     }).collect()
