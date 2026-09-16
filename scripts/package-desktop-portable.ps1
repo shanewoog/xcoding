@@ -12,6 +12,22 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $Root
 
+
+# --- Cleanup stale node processes (>30min) to free memory for Rust compilation ---
+$staleCutoff = (Get-Date).AddMinutes(-30)
+$killedCount = 0
+foreach ($procName in @("node", "node_repl")) {
+  Get-Process -Name $procName -ErrorAction SilentlyContinue |
+    Where-Object { $_.StartTime -lt $staleCutoff } |
+    ForEach-Object {
+      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+      $killedCount++
+    }
+}
+if ($killedCount -gt 0) {
+  Write-Host "Cleaned up $killedCount stale node/node_repl processes (>30min old)."
+  Start-Sleep -Seconds 2  # let OS reclaim memory
+}
 function Ensure-PathPrefix([string]$Prefix) {
   if (Test-Path $Prefix) {
     if (-not (($env:Path -split ";") -contains $Prefix)) {
