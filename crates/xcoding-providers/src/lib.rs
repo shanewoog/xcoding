@@ -57,6 +57,10 @@ pub enum ProviderEvent {
     /// not model output: it exists so the caller can tell a thinking model
     /// apart from a stalled connection.
     ReasoningDelta(String),
+    /// Lifecycle acknowledgement that carries no output. The endpoint accepted
+    /// the request and is working on it, which is how a thinking model is told
+    /// apart from a stream that never started.
+    StreamAlive,
     ToolCall(ProviderToolCall),
     /// Token accounting reported by the endpoint for this request. Optional on
     /// the wire: many OpenAI-compatible endpoints never send it.
@@ -1361,6 +1365,9 @@ impl OpenAiCompatibleProvider {
                                 yield ProviderEvent::ReasoningDelta(delta);
                             }
                         }
+                        ResponsesParsedEvent::Lifecycle => {
+                            yield ProviderEvent::StreamAlive;
+                        }
                         ResponsesParsedEvent::ToolCall(tool_call) => {
                             emitted_event = true;
                             yield ProviderEvent::ToolCall(tool_call);
@@ -1765,6 +1772,8 @@ fn responses_message_item(role: &str, content: ChatMessageContent) -> Value {
 enum ResponsesParsedEvent {
     TextDelta(String),
     ReasoningDelta(String),
+    /// Progress acknowledgement with no payload, e.g. `response.created`.
+    Lifecycle,
     ToolCall(ProviderToolCall),
     Completed {
         usage: Option<ProviderUsage>,
@@ -1799,6 +1808,16 @@ fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderErr
                     .to_owned(),
             ))
         }
+        // Endpoints acknowledge the request long before the first token. Reporting
+        // that as progress is what keeps the first-event timeout from firing while
+        // a reasoning model works through a large prompt.
+        "response.created"
+        | "response.queued"
+        | "response.in_progress"
+        | "response.output_item.added"
+        | "response.content_part.added"
+        | "response.reasoning_summary_part.added"
+        | "response.output_text.annotation.added" => Ok(ResponsesParsedEvent::Lifecycle),
         "response.output_item.done" => {
             let Some(item) = event.get("item") else {
                 return Ok(ResponsesParsedEvent::Ignored);
@@ -2551,6 +2570,38 @@ mod tests {
             ResponsesParsedEvent::ReasoningDelta(delta) => assert_eq!(delta, "step"),
             _ => panic!("expected reasoning delta"),
         }
+    }
+
+    #[test]
+    fn responses_lifecycle_events_report_progress() {
+        // A gateway acknowledges the request seconds after it arrives but can
+        // stay silent for minutes while a reasoning model works through a long
+        // prompt. Treating the acknowledgement as progress is what separates a
+        // working stream from a connection that never started.
+        for data in [
+            r#"{"type":"response.created","response":{"status":"in_progress"}}"#,
+            r#"{"type":"response.queued","response":{"status":"queued"}}"#,
+            r#"{"type":"response.in_progress","response":{"status":"in_progress"}}"#,
+            r#"{"type":"response.output_item.added","item":{"type":"reasoning"}}"#,
+            r#"{"type":"response.content_part.added","part":{"type":"reasoning_text"}}"#,
+            r#"{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text"}}"#,
+        ] {
+            assert!(
+                matches!(
+                    parse_responses_event(data).expect("lifecycle event parses"),
+                    ResponsesParsedEvent::Lifecycle
+                ),
+                "{data} must report progress"
+            );
+        }
+
+        // An unrelated event still carries no meaning for the caller, so the
+        // progress signal stays limited to the acknowledgements above.
+        assert!(matches!(
+            parse_responses_event(r#"{"type":"response.custom.thing"}"#)
+                .expect("unknown event parses"),
+            ResponsesParsedEvent::Ignored
+        ));
     }
 
     #[test]

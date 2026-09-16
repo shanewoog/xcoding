@@ -1832,7 +1832,8 @@ impl<'a> AgentService<'a> {
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
-                            received_event = true;
+                            received_event =
+                                received_event || event_proves_stream_started(&event);
                             last_event_at = tokio::time::Instant::now();
                             if let Err(error) = self.ensure_not_cancelled_preserving(session.id, &content) {
                                 return Err(ProviderAttemptFailure {
@@ -1864,7 +1865,7 @@ impl<'a> AgentService<'a> {
                                 // it must reset the stream deadlines instead of
                                 // letting the first-event timeout fire while a
                                 // reasoning model thinks.
-                                ProviderEvent::ReasoningDelta(_) => {}
+                                ProviderEvent::ReasoningDelta(_) | ProviderEvent::StreamAlive => {}
                                 // Endpoints that report usage let the next
                                 // request's budget use real numbers instead of
                                 // the character heuristic.
@@ -1886,11 +1887,11 @@ impl<'a> AgentService<'a> {
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    let error = if received_event {
-                        AgentError::ProviderStreamIdleTimeout(stream_idle_timeout_secs)
-                    } else {
-                        AgentError::ProviderStreamFirstEventTimeout(stream_first_event_timeout_secs)
-                    };
+                    let error = stream_timeout_error(
+                        received_event,
+                        stream_first_event_timeout_secs,
+                        stream_idle_timeout_secs,
+                    );
                     return Err(ProviderAttemptFailure {
                         error,
                         output_chars: content.chars().count(),
@@ -2946,6 +2947,7 @@ impl<'a> AgentService<'a> {
                 ProviderEvent::ModelReported(_)
                 | ProviderEvent::ReasoningDelta(_)
                 | ProviderEvent::ToolCall(_)
+                | ProviderEvent::StreamAlive
                 | ProviderEvent::Usage(_) => {}
             }
         }
@@ -3061,6 +3063,7 @@ impl<'a> AgentService<'a> {
                     ProviderEvent::ModelReported(_)
                     | ProviderEvent::ReasoningDelta(_)
                     | ProviderEvent::ToolCall(_)
+                    | ProviderEvent::StreamAlive
                     | ProviderEvent::Usage(_),
                 ))) => {}
                 Ok(Some(Err(error))) => {
@@ -5087,6 +5090,36 @@ fn context_block_end(messages: &[ChatMessage], start: usize) -> usize {
     start + 1
 }
 
+/// Which stream timeout applies right now. A provider that acknowledged the
+/// request is working, so the wait moves from the short first-event bound to
+/// the longer idle bound even when no output arrived yet.
+fn stream_timeout_error(
+    received_event: bool,
+    stream_first_event_timeout_secs: u64,
+    stream_idle_timeout_secs: u64,
+) -> AgentError {
+    if received_event {
+        AgentError::ProviderStreamIdleTimeout(stream_idle_timeout_secs)
+    } else {
+        AgentError::ProviderStreamFirstEventTimeout(stream_first_event_timeout_secs)
+    }
+}
+
+/// Whether one provider event proves the stream is alive. Lifecycle and
+/// thinking events carry no output, but they come from a provider that
+/// accepted the request, which is not the same as a stream that never
+/// started.
+fn event_proves_stream_started(event: &ProviderEvent) -> bool {
+    match event {
+        ProviderEvent::TextDelta(_)
+        | ProviderEvent::ModelReported(_)
+        | ProviderEvent::ReasoningDelta(_)
+        | ProviderEvent::StreamAlive
+        | ProviderEvent::ToolCall(_)
+        | ProviderEvent::Usage(_) => true,
+    }
+}
+
 fn estimate_text_tokens(value: &str) -> usize {
     value
         .chars()
@@ -5516,6 +5549,7 @@ async fn stream_vision_description(
                 ProviderEvent::ModelReported(_)
                 | ProviderEvent::ReasoningDelta(_)
                 | ProviderEvent::ToolCall(_)
+                | ProviderEvent::StreamAlive
                 | ProviderEvent::Usage(_),
             ))) => {}
             Ok(Some(Err(error))) => return Err(error.into()),
@@ -8401,6 +8435,29 @@ private material
         assert!(omitted.starts_with("fix this"));
         assert!(omitted.contains("3 image attachment(s) from an earlier turn"));
         assert!(omitted.contains("context budget"));
+    }
+
+    #[test]
+    fn lifecycle_only_stream_waits_on_the_idle_bound() {
+        // The failing case: a Responses endpoint answers `response.created`
+        // in under a second and then thinks for minutes on a large prompt.
+        // Before this, those acknowledgements were dropped and the turn died
+        // on the first-event timeout even though the provider was working.
+        assert!(event_proves_stream_started(&ProviderEvent::StreamAlive));
+        assert!(event_proves_stream_started(&ProviderEvent::ReasoningDelta(
+            "thinking".to_owned()
+        )));
+
+        // Once a lifecycle event lands, a later stall is an idle timeout, not
+        // a stream that never started.
+        assert!(matches!(
+            stream_timeout_error(true, 120, 180),
+            AgentError::ProviderStreamIdleTimeout(180)
+        ));
+        assert!(matches!(
+            stream_timeout_error(false, 120, 180),
+            AgentError::ProviderStreamFirstEventTimeout(120)
+        ));
     }
 
     #[test]
