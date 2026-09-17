@@ -18,13 +18,13 @@ use xcoding_protocol::{
     ChatParams, ChatResult, CloudProviderConfig, ContextCompaction, LocalMemory,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_TOOL_LIMIT, MAX_LOCAL_MEMORY_CHARS,
     MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole,
-    ModelCapabilities, ModelRoute, ModelRouteStatus, PlanStep, PlanStepStatus, ProviderApiKey,
+    ModelRoute, ModelRouteStatus, PlanStep, PlanStepStatus, ProviderApiKey,
     ProviderKeyStatus, ProviderTrustLevel, ProviderWireApi, ResolveActionParams,
     ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session,
     SessionEvent, SessionStatus, ToolCall, ToolName, UserConfig,
 };
 #[cfg(test)]
-use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_STEPS};
+use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_STEPS, ModelCapabilities};
 use xcoding_providers::{
     ChatContentPart, ChatMessage, ChatMessageContent, OpenAiCompatibleProvider, ProviderError,
     ProviderEvent, ProviderToolCall, ToolDefinition, load_user_config, normalize_base_url,
@@ -53,11 +53,6 @@ const MAX_COMPACTION_MESSAGE_CHARS: usize = 4_000;
 /// Cap for one delegate image description, so a runaway delegate response
 /// cannot push the session request past the model window.
 const MAX_VISION_DESCRIPTION_CHARS: usize = 8_000;
-/// Total characters historical image descriptions may add to one request. The
-/// attachment the user just sent is never charged against this, so the newest
-/// image keeps its full description while an accumulating history cannot grow
-/// the prompt without bound.
-const MAX_HISTORICAL_VISION_DESCRIPTION_CHARS: usize = 24_000;
 /// Cap for one image description inside the compaction or memory prompt. Those
 /// prompts summarize many messages at once, so each attachment gets far less
 /// room than it does in the live request.
@@ -5309,30 +5304,13 @@ impl VisionRouteCache {
         }
     }
 
-    /// Load persisted vision-route statuses from the database so that
-    /// providers already known to be unsupported skip the probing request
-    /// on every new session.
-    fn load_persisted(&mut self, core: &CoreService) {
-        // We iterate over all providers in the current config and check the
-        // store for any previously persisted route status.
-        // The route key format is "{provider_id}|{base_url}|{model}" — we
-        // cannot enumerate all possible keys, so we load on-demand when a
-        // provider is first encountered.  See `status_or_load`.
-        let _ = core; // placeholder — actual loading is lazy via status_or_load
-    }
-
     fn route_key(candidate: &ProviderCandidate, session_model: &str) -> String {
         let model = candidate.model_for(session_model);
         let base = normalize_base_url(&candidate.base_url);
         format!("{}|{}|{}", candidate.id, base, model.to_ascii_lowercase())
     }
 
-    fn status(&self, candidate: &ProviderCandidate, session_model: &str) -> VisionRouteStatus {
-        let key = Self::route_key(candidate, session_model);
-        self.routes.get(&key).copied().unwrap_or(VisionRouteStatus::Unknown)
-    }
-
-    /// Like `status()` but loads from the database on cache miss.
+    /// Returns the cached route status, loading it from the database on a miss.
     fn status_or_load(&mut self, candidate: &ProviderCandidate, session_model: &str, core: &CoreService) -> VisionRouteStatus {
         let key = Self::route_key(candidate, session_model);
         if let Some(cached) = self.routes.get(&key) {
@@ -5533,6 +5511,7 @@ fn store_vision_description(key: &str, delegate_model: &str, description: &str) 
 /// Whether `model` can accept image parts directly. An explicit
 /// `model_capabilities` entry always wins; otherwise well-known vision families
 /// are recognized so existing setups keep working without configuration.
+#[cfg(test)]
 fn model_supports_vision(model: &str, capabilities: &BTreeMap<String, ModelCapabilities>) -> bool {
     let normalized = model.trim().to_ascii_lowercase();
     if let Some(capability) = capabilities.get(&normalized) {
@@ -5691,6 +5670,7 @@ fn message_with_vision_description(text: &str, attribution: &str, description: &
 /// Text used when an earlier attachment was described but the per-request
 /// budget for historical descriptions is already spent, so the session model
 /// learns the image exists instead of seeing nothing.
+#[cfg(test)]
 fn message_with_vision_omission(text: &str, image_count: usize) -> String {
     let note = format!(
         "[{image_count} image attachment(s) from an earlier turn were described before, but the description was omitted here to stay inside the context budget. Ask the user to resend the image if you need it.]"

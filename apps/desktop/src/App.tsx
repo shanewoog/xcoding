@@ -276,6 +276,7 @@ function hydrateProviders(config: UserConfig): { providers: CloudProviderConfig[
       trust_level: item.trust_level === "local" || item.trust_level === "official" ? item.trust_level : "relay" as const,
       api_key: item.api_key || undefined,
       api_keys: normalizeProviderApiKeys(item.api_keys),
+      note: item.note || undefined,
     }));
   const providers = configured.length > 0
     ? configured
