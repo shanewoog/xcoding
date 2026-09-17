@@ -11,3 +11,13 @@ apps/desktop/src-tauri/target/
 *.tsbuildinfo
 apps/desktop/src-tauri/gen/
 .tmp-*
+
+# Local scratch artifacts from ad-hoc debugging sessions: probe scripts and
+# throwaway projects. Root-anchored where the name is loose enough to collide
+# with a real fixture.
+_*.py
+_*.ps1
+/test-*.ps1
+/test-*.json
+/test-*/
+/Python/
