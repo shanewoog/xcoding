@@ -1202,9 +1202,12 @@ function renderMarkdownBlocks(content: string, onOpenLink: (url: string) => void
   return nodes;
 }
 
-const INLINE_TOKEN_PATTERN = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\r\n]+)`|\*\*([^*\r\n]+)\*\*|(https?:\/\/[^\s<>()\]]+)/g;
+// A bare URL stops at whitespace, the usual URL-unsafe delimiters, and any
+// CJK/kana/hangul or fullwidth character. Those scripts have no word spaces, so
+// `http://host/path验证` must link the URL only and leave `验证` as plain text.
+const INLINE_TOKEN_PATTERN = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\r\n]+)`|\*\*([^*\r\n]+)\*\*|(https?:\/\/[^\s<>()\]\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]+)/g;
 // Anchored and non-global on purpose: a /g regex keeps lastIndex between tests.
-const BARE_URL_PATTERN = /^https?:\/\/[^\s<>()\]]+$/;
+const BARE_URL_PATTERN = /^https?:\/\/[^\s<>()\]\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]+$/;
 const UNORDERED_ITEM_PATTERN = /^\s*[-*]\s+(.*)$/;
 const ORDERED_ITEM_PATTERN = /^\s*\d+[.)]\s+(.*)$/;
 

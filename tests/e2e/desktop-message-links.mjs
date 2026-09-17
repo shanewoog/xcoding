@@ -33,6 +33,35 @@ async function main() {
   assert.ok(appSource.includes("browserNavigation={browserNavigation}"), "assistant link navigation must be passed to the right tool panel");
   assert.ok(appSource.includes("<AssistantMessageBody content={streamedText}"), "streaming assistant messages must render links before completion");
 
+  // Regression: a bare URL followed by CJK text with no separating space must
+  // link only the URL. Those scripts have no word spaces, so the URL character
+  // class must also stop at CJK/kana/hangul and fullwidth code points.
+  const inlinePatternMatch = appSource.match(/const INLINE_TOKEN_PATTERN = (\/[^\n]*\/g);/);
+  const barePatternMatch = appSource.match(/const BARE_URL_PATTERN = (\/[^\n]*\/);/);
+  assert.ok(inlinePatternMatch, "assistant links must define the inline token pattern");
+  assert.ok(barePatternMatch, "assistant links must define the bare URL pattern");
+  const inlineTokenPattern = eval(inlinePatternMatch[1]);
+  const bareUrlPattern = eval(barePatternMatch[1]);
+  const cjkFollowedUrl = "刷新 http://127.0.0.1:5173/验证：面板上不再显示按键，键盘切工具/删除/旋转均无效，仅 Ctrl+S/zy 仍可用。";
+  inlineTokenPattern.lastIndex = 0;
+  const cjkMatch = inlineTokenPattern.exec(cjkFollowedUrl);
+  assert.ok(cjkMatch, "a bare URL followed by CJK text must still be recognized as a link");
+  assert.equal(
+    cjkMatch[5],
+    "http://127.0.0.1:5173/",
+    "a bare URL must stop at the first CJK character so following text is not glued into the link",
+  );
+  assert.equal(
+    bareUrlPattern.test("http://127.0.0.1:5173/"),
+    true,
+    "the bare URL pattern must still accept a plain URL",
+  );
+  assert.equal(
+    bareUrlPattern.test("http://127.0.0.1:5173/验证"),
+    false,
+    "the bare URL pattern must reject a URL with glued CJK text",
+  );
+
   assert.ok(panelsSource.includes("export type BrowserNavigationRequest"), "right tool panel must accept browser navigation requests");
   assert.ok(panelsSource.includes("forceEmbedded?: boolean"), "browser navigation must support an embedded override");
   assert.ok(panelsSource.includes("openUrl(navigation.url, { forceEmbedded: true })"), "assistant links must always open in the built-in browser");
