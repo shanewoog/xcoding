@@ -2673,7 +2673,12 @@ impl<'a> AgentService<'a> {
                 return Ok(result);
             }
 
-            messages.push(ChatMessage::assistant_tool_calls(tool_calls.clone()));
+            messages.push(ChatMessage::assistant_tool_calls(
+                tool_calls
+                    .iter()
+                    .map(replayable_provider_tool_call)
+                    .collect(),
+            ));
             for provider_call in tool_calls {
                 self.ensure_not_cancelled_preserving(session.id, &last_partial)?;
                 let tool_call = match protocol_tool_call(provider_call) {
@@ -4397,6 +4402,23 @@ struct RejectedToolCall {
     /// Why the call was rejected; becomes a `ToolError::InvalidArguments` when
     /// recorded. Kept as a string so this stays small enough to return by value.
     reason: String,
+}
+
+/// A provider tool call suitable for replay in the assistant history.
+///
+/// The response is decoded from the raw call, so `protocol_tool_call` still
+/// sees the original arguments and can explain a rejection. The assistant
+/// message, however, is replayed on every later request in the same turn, and
+/// providers reject a request whose `function.arguments` is not valid JSON. An
+/// undecodable argument string is therefore replaced with an empty object while
+/// the id and name survive, because this call still owes a matching tool result.
+fn replayable_provider_tool_call(tool_call: &ProviderToolCall) -> ProviderToolCall {
+    let mut replay = tool_call.clone();
+    if serde_json::from_str::<Value>(&replay.function.arguments).is_err() {
+        replay.function.arguments = "{}".to_owned();
+    }
+    replay.truncated = false;
+    replay
 }
 
 fn protocol_tool_call(provider_call: ProviderToolCall) -> Result<ToolCall, RejectedToolCall> {
@@ -8368,6 +8390,43 @@ private material
         let message = rejected.reason;
         assert!(message.contains("not valid JSON"), "{message}");
         assert!(!message.contains("cut off mid-stream"), "{message}");
+    }
+
+    // Regression: a call whose arguments were rejected still had its raw
+    // fragment queued as an assistant tool call, and the next request was
+    // rejected with HTTP 400 "function.arguments must be valid JSON".
+    #[test]
+    fn replayed_tool_call_arguments_are_normalized_to_valid_json() {
+        let undecodable = ProviderToolCall {
+            id: "call_cut_off".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "apply_patch".to_owned(),
+                arguments: r#"{"path":"#.to_owned(),
+            },
+            truncated: true,
+        };
+        let replay = replayable_provider_tool_call(&undecodable);
+        assert_eq!(replay.id, "call_cut_off");
+        assert_eq!(replay.function.name, "apply_patch");
+        assert_eq!(replay.function.arguments, "{}");
+        assert!(!replay.truncated);
+        assert!(
+            serde_json::from_str::<Value>(&replay.function.arguments).is_ok(),
+            "a replayed call must be valid JSON or the provider rejects the request",
+        );
+
+        let decodable = ProviderToolCall {
+            id: "call_ok".to_owned(),
+            kind: "function".to_owned(),
+            function: xcoding_providers::ProviderFunctionCall {
+                name: "read_file".to_owned(),
+                arguments: r#"{"path":"src/lib.rs"}"#.to_owned(),
+            },
+            truncated: false,
+        };
+        let replay = replayable_provider_tool_call(&decodable);
+        assert_eq!(replay.function.arguments, r#"{"path":"src/lib.rs"}"#);
     }
 
     #[test]

@@ -989,11 +989,19 @@ type RunStatus = {
   detail?: string;
 };
 
+function formatDurationSeconds(seconds: number): string {
+  const wholeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(wholeSeconds / 60);
+  const remainder = wholeSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainder}s` : `${wholeSeconds}s`;
+}
+
 function formatRunElapsed(startedAt: number, now: number): string {
-  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return minutes > 0 ? `${minutes}m ${remainder}s` : `${seconds}s`;
+  return formatDurationSeconds((now - startedAt) / 1000);
+}
+
+function formatMillisecondsAsDuration(milliseconds: number): string {
+  return formatDurationSeconds(milliseconds / 1000);
 }
 
 function completedRunElapsedByMessageId(messages: Message[]): Record<string, string> {
@@ -4212,10 +4220,10 @@ export function App() {
                       <div><dt>{t(locale, "logs.output")}</dt><dd>{t(locale, "logs.outputSummary", { chars: event.output_chars, tools: event.tool_calls })}</dd></div>
                     ) : null}
                     {event.ttft_ms != null ? (
-                      <div><dt>{t(locale, "logs.ttft")}</dt><dd>{event.ttft_ms} ms</dd></div>
+                      <div><dt>{t(locale, "logs.ttft")}</dt><dd>{formatMillisecondsAsDuration(event.ttft_ms)}</dd></div>
                     ) : null}
                     {event.total_ms != null ? (
-                      <div><dt>{t(locale, "logs.duration")}</dt><dd>{event.total_ms} ms</dd></div>
+                      <div><dt>{t(locale, "logs.duration")}</dt><dd>{formatMillisecondsAsDuration(event.total_ms)}</dd></div>
                     ) : null}
                   </dl>
                   {!event.success && event.error ? (

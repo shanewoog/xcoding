@@ -1580,6 +1580,7 @@ fn chat_completions_request_body(
     tools: &[ToolDefinition],
     reasoning_effort: Option<&str>,
 ) -> Value {
+    let messages = sanitize_tool_call_arguments(messages);
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -1615,12 +1616,34 @@ fn chat_completions_request_body(
     body
 }
 
+/// Providers reject a request whose assistant `tool_calls[].function.arguments`
+/// is not valid JSON. Replayed history can carry a fragment the upstream model
+/// never finished writing, so re-emit such a call with an empty object instead
+/// of failing the whole request. The Anthropic path already parses its input and
+/// needs no equivalent.
+fn sanitize_tool_call_arguments(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            if let Some(tool_calls) = message.tool_calls.as_mut() {
+                for call in tool_calls {
+                    if serde_json::from_str::<Value>(&call.function.arguments).is_err() {
+                        call.function.arguments = "{}".to_owned();
+                    }
+                }
+            }
+            message
+        })
+        .collect()
+}
+
 fn responses_request_body(
     model: &str,
     messages: Vec<ChatMessage>,
     tools: &[ToolDefinition],
     reasoning_effort: Option<&str>,
 ) -> Value {
+    let messages = sanitize_tool_call_arguments(messages);
     let mut instructions = Vec::new();
     let mut input = Vec::new();
     for message in messages {
@@ -2864,6 +2887,60 @@ mod tests {
         assert_eq!(body["tools"][0]["strict"], false);
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    // Regression: providers reject a request whose assistant
+    // `function.arguments` is not valid JSON (HTTP 400). A call cut off
+    // mid-stream must be neutralized before the body is sent.
+    #[test]
+    fn chat_completions_request_body_replaces_invalid_tool_arguments() {
+        let body = chat_completions_request_body(
+            "gpt-test",
+            vec![ChatMessage::assistant_tool_calls(vec![ProviderToolCall {
+                id: "call_cut_off".to_owned(),
+                kind: "function".to_owned(),
+                function: ProviderFunctionCall {
+                    name: "apply_patch".to_owned(),
+                    arguments: r#"{"path":"#.to_owned(),
+                },
+                truncated: true,
+            }])],
+            &[],
+            None,
+        );
+
+        assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_cut_off");
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["function"]["name"],
+            "apply_patch"
+        );
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["function"]["arguments"],
+            "{}"
+        );
+    }
+
+    #[test]
+    fn responses_request_body_replaces_invalid_tool_arguments() {
+        let body = responses_request_body(
+            "gpt-test",
+            vec![ChatMessage::assistant_tool_calls(vec![ProviderToolCall {
+                id: "call_cut_off".to_owned(),
+                kind: "function".to_owned(),
+                function: ProviderFunctionCall {
+                    name: "apply_patch".to_owned(),
+                    arguments: r#"{"path":"#.to_owned(),
+                },
+                truncated: true,
+            }])],
+            &[],
+            None,
+        );
+
+        assert_eq!(body["input"][0]["type"], "function_call");
+        assert_eq!(body["input"][0]["call_id"], "call_cut_off");
+        assert_eq!(body["input"][0]["name"], "apply_patch");
+        assert_eq!(body["input"][0]["arguments"], "{}");
     }
 
     #[test]
