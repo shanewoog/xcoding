@@ -595,12 +595,13 @@ pub fn provider_key_statuses(config: &UserConfig) -> Vec<ProviderKeyStatus> {
     statuses
 }
 
-/// Clear the runtime block on one configured credential so the user can put a
-/// key the endpoint refused (`Rejected`) back into rotation without editing its
-/// value. This is the manual escape hatch for the `Rejected` state, which is
-/// otherwise only lifted by changing the key or by a later success. The health
-/// counters are kept so the settings view still reports what this process did;
-/// only the block is dropped. Returns whether a credential matched.
+/// Clear the runtime block on one configured credential so the user can put it
+/// back into rotation immediately. Covers both the `Rejected` state — otherwise
+/// only lifted by editing the key or a later success — and the time-based
+/// cooldowns (`RateLimited` / `Unstable`) when the user does not want to wait
+/// them out. The health counters are kept so the settings view still reports
+/// what this process did; only the block is dropped. Returns whether a
+/// credential matched.
 pub fn clear_provider_key_block(
     config: &UserConfig,
     provider_id: &str,
@@ -7327,7 +7328,7 @@ private material
     }
 
     #[test]
-    fn a_rejected_key_can_be_restored_manually_without_editing_it() {
+    fn any_blocked_key_can_be_restored_manually_without_editing_it() {
         let provider_id = format!("key-restore-{}", std::process::id());
         let key = test_key("a", 1);
         let mut config = UserConfig::default();
@@ -7352,6 +7353,22 @@ private material
         let restored = provider_key_statuses(&config);
         assert_eq!(restored[0].state, "ready");
         assert_eq!(restored[0].failure_count, 1, "counters survive a manual restore");
+        assert!(provider_key_is_available(&candidate));
+
+        // The same escape hatch lifts the time-based cooldowns so the user can
+        // skip the wait without editing anything.
+        record_provider_key_failure(&candidate, &http_status_error(429));
+        assert_eq!(provider_key_statuses(&config)[0].state, "rate_limited");
+        assert!(!provider_key_is_available(&candidate));
+        assert!(clear_provider_key_block(&config, &provider_id, &key.id));
+        assert_eq!(provider_key_statuses(&config)[0].state, "ready");
+        assert!(provider_key_is_available(&candidate));
+
+        record_provider_key_failure(&candidate, &http_status_error(503));
+        assert_eq!(provider_key_statuses(&config)[0].state, "unstable");
+        assert!(!provider_key_is_available(&candidate));
+        assert!(clear_provider_key_block(&config, &provider_id, &key.id));
+        assert_eq!(provider_key_statuses(&config)[0].state, "ready");
         assert!(provider_key_is_available(&candidate));
 
         // Unknown targets report no match instead of silently succeeding.

@@ -230,6 +230,13 @@ function providerId(): string {
 const MIN_PROVIDER_KEY_WEIGHT = 0;
 const MAX_PROVIDER_KEY_WEIGHT = 1000;
 
+/** Blocked credential states the user can clear manually from settings: a
+ * refused key (`rejected`) and the time-based cooldowns (`rate_limited` /
+ * `unstable`). `disabled` / `ready` are not blocks, so they get no button. */
+function providerKeyStateCanRestore(state: string | undefined): boolean {
+  return state === "rejected" || state === "rate_limited" || state === "unstable";
+}
+
 function providerKeyId(): string {
   return globalThis.crypto?.randomUUID?.() || `key-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -4532,7 +4539,7 @@ export function App() {
                             {t(locale, "keyStats.cooldown", { seconds: String(singleKeyStatus.cooldown_secs) })}
                           </span>
                         ) : null}
-                        {singleKeyStatus.state === "rejected" ? (
+                        {providerKeyStateCanRestore(singleKeyStatus.state) ? (
                           <button
                             type="button"
                             className="quiet-button provider-key-restore"
@@ -4627,7 +4634,7 @@ export function App() {
                               {t(locale, "keyStats.cooldown", { seconds: String(keyStatus.cooldown_secs) })}
                             </span>
                           ) : null}
-                          {keyStatus.state === "rejected" ? (
+                          {providerKeyStateCanRestore(keyStatus.state) ? (
                             <button
                               type="button"
                               className="quiet-button provider-key-restore"
