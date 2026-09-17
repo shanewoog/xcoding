@@ -206,6 +206,7 @@ $releaseGitPaths = @(
   "crates/xcoding-tools/src/lib.rs",
   "crates/xcoding-policy/src/lib.rs",
   "crates/xcoding-protocol/src/lib.rs",
+  "crates/xcoding-providers/Cargo.toml",
   "crates/xcoding-providers/src/lib.rs",
   "packages/protocol/src/index.ts",
   "apps/desktop/src/i18n.ts",

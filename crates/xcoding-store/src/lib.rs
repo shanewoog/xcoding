@@ -340,10 +340,8 @@ impl SessionStore {
             "DELETE FROM context_compactions WHERE session_id = ?1",
             params![id],
         )?;
-        self.connection.execute(
-            "DELETE FROM vision_descriptions WHERE session_id = ?1",
-            params![id],
-        )?;
+        // NOTE: vision_descriptions are NOT deleted with the session because
+        // they are keyed by image content hash and reusable across sessions.
         let deleted = self
             .connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -394,10 +392,7 @@ impl SessionStore {
                 "DELETE FROM context_compactions WHERE session_id = ?1",
                 params![id],
             )?;
-            transaction.execute(
-                "DELETE FROM vision_descriptions WHERE session_id = ?1",
-                params![id],
-            )?;
+            // NOTE: vision_descriptions are preserved across sessions.
             transaction.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         }
 
@@ -899,6 +894,40 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Returns the persisted vision-route status for a provider route key,
+    /// or `None` when the provider has not been probed yet.
+    pub fn get_vision_route_status(
+        &self,
+        route_key: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT status FROM vision_routes WHERE route_key = ?1",
+                params![route_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Persists the vision-route status ("NativeSupported" or
+    /// "NativeUnsupported") so future sessions skip the probing request.
+    pub fn save_vision_route_status(
+        &self,
+        route_key: &str,
+        status: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO vision_routes (route_key, status, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(route_key) DO UPDATE SET
+                status = excluded.status,
+                updated_at = excluded.updated_at",
+            params![route_key, status, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn create_pending_action(
         &self,
         session_id: Uuid,
@@ -1296,6 +1325,17 @@ impl SessionStore {
         // and the session id lets `delete_session` clean up after itself.
         self.ensure_column("vision_descriptions", "delegate_model", "TEXT")?;
         self.ensure_column("vision_descriptions", "session_id", "TEXT")?;
+
+        // Persisted vision-route status: remembers which providers do not
+        // support image input so the agent can skip the probing attempt.
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS vision_routes (
+                route_key TEXT PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )?;
+
         Ok(())
     }
 

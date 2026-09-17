@@ -629,6 +629,18 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    pub fn get_vision_route_status(&self, route_key: &str) -> Result<Option<String>, CoreError> {
+        self.store
+            .get_vision_route_status(route_key)
+            .map_err(CoreError::from)
+    }
+
+    pub fn save_vision_route_status(&self, route_key: &str, status: &str) -> Result<(), CoreError> {
+        self.store
+            .save_vision_route_status(route_key, status)
+            .map_err(CoreError::from)
+    }
+
     pub fn session(&self, session_id: uuid::Uuid) -> Result<Session, CoreError> {
         self.store
             .get_session(session_id)?

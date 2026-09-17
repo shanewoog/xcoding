@@ -688,6 +688,9 @@ pub struct CloudProviderConfig {
     /// over the legacy single `api_key` field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<ProviderApiKey>,
+    /// Optional user-facing remark for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// One provider share for a single logical model. Several routes of the same
@@ -833,6 +836,7 @@ impl Default for UserConfig {
             trust_level: ProviderTrustLevel::Relay,
             api_key: None,
             api_keys: Vec::new(),
+            note: None,
         };
         Self {
             locale: default_locale(),
@@ -1179,6 +1183,12 @@ pub enum SessionEvent {
         /// reported one. The request and response bodies are never persisted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_reported: Option<String>,
+        /// Milliseconds from request start until the first proven stream event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttft_ms: Option<u64>,
+        /// Total wall-clock milliseconds for the entire provider attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_ms: Option<u64>,
     },
     /// Vision delegate started processing images.
     VisionDelegateStart {

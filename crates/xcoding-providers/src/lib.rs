@@ -7,8 +7,19 @@ use std::{
     env, fs,
     path::PathBuf,
     pin::Pin,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+/// Log to file for debugging (visible even in GUI apps)
+fn log_to_file(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("xcoding-http-debug.log"))
+    {
+        let _ = writeln!(f, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
+    }
+}
 
 use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
@@ -782,6 +793,7 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
             trust_level: xcoding_protocol::ProviderTrustLevel::Relay,
             api_key: config.api_key.clone(),
             api_keys: Vec::new(),
+            note: None,
         });
         config.active_provider_id = Some(id);
     }
@@ -1213,6 +1225,8 @@ impl OpenAiCompatibleProvider {
 
         let stream = try_stream! {
             let mut bytes = response.bytes_stream();
+            let stream_start = Instant::now();
+            let mut first_chunk = true;
             let mut buffer = Vec::new();
             let mut tool_calls = BTreeMap::new();
             let mut body_sample = Vec::new();
@@ -1223,6 +1237,10 @@ impl OpenAiCompatibleProvider {
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                if first_chunk {
+                    first_chunk = false;
+                    log_to_file(&format!("[XCoding HTTP] first stream chunk after {:?} size={}bytes", stream_start.elapsed(), chunk.len()));
+                }
                 append_stream_body_sample(&mut body_sample, &mut body_sample_truncated, &chunk);
                 buffer.extend_from_slice(&chunk);
 
@@ -1292,7 +1310,29 @@ impl OpenAiCompatibleProvider {
     }
 
     async fn open_chat_completion(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
-        let request = self.client.post(self.chat_url()).json(body);
+        let url = self.chat_url();
+        let body_size = serde_json::to_string(body).map(|s| s.len()).unwrap_or(0);
+        let proxy = resolve_http_proxy();
+        log_to_file(&format!("[XCoding HTTP] POST {} body={}bytes proxy={:?}", url, body_size, proxy));
+        // Log key request body fields for debugging large-request issues
+        {
+            let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+            let tool_count = body.get("tools").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let input_count = body.get("input").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let instructions_len = body.get("instructions").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+            let tool_names: Vec<&str> = body.get("tools")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter()
+                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                    .collect())
+                .unwrap_or_default();
+            log_to_file(&format!(
+                "[XCoding HTTP] body summary: model={} tools={}({}) inputs={} instructions_len={}",
+                model, tool_count, tool_names.join(","), input_count, instructions_len
+            ));
+        }
+        let start = Instant::now();
+        let request = self.client.post(&url).json(body);
         let request = match self.wire_api {
             ProviderWireApi::AnthropicMessages => request
                 .header("x-api-key", &self.api_key)
@@ -1301,12 +1341,17 @@ impl OpenAiCompatibleProvider {
                 request.bearer_auth(&self.api_key)
             }
         };
-        let response = request.send().await?;
+        let response = request.send().await.map_err(|e| {
+            log_to_file(&format!("[XCoding HTTP] request failed after {:?}: {}", start.elapsed(), e));
+            ProviderError::from(e)
+        })?;
+        log_to_file(&format!("[XCoding HTTP] response status={} elapsed={:?}", response.status(), start.elapsed()));
 
         if !response.status().is_success() {
             let status = response.status();
             let retry_after_secs = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
+            log_to_file(&format!("[XCoding HTTP] error response body (first 2000chars): {}", &body[..body.len().min(2000)]));
             return Err(ProviderError::HttpStatus {
                 status,
                 body,
@@ -1330,6 +1375,8 @@ impl OpenAiCompatibleProvider {
 
         let stream = try_stream! {
             let mut bytes = response.bytes_stream();
+            let stream_start = Instant::now();
+            let mut first_chunk = true;
             let mut buffer = Vec::new();
             let mut body_sample = Vec::new();
             let mut body_sample_truncated = false;
@@ -1338,6 +1385,10 @@ impl OpenAiCompatibleProvider {
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                if first_chunk {
+                    first_chunk = false;
+                    log_to_file(&format!("[XCoding HTTP] first stream chunk after {:?} size={}bytes", stream_start.elapsed(), chunk.len()));
+                }
                 append_stream_body_sample(&mut body_sample, &mut body_sample_truncated, &chunk);
                 buffer.extend_from_slice(&chunk);
 
@@ -1421,6 +1472,8 @@ impl OpenAiCompatibleProvider {
 
         let stream = try_stream! {
             let mut bytes = response.bytes_stream();
+            let stream_start = Instant::now();
+            let mut first_chunk = true;
             let mut buffer = Vec::new();
             let mut body_sample = Vec::new();
             let mut body_sample_truncated = false;
@@ -1433,6 +1486,10 @@ impl OpenAiCompatibleProvider {
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                if first_chunk {
+                    first_chunk = false;
+                    log_to_file(&format!("[XCoding HTTP] first stream chunk after {:?} size={}bytes", stream_start.elapsed(), chunk.len()));
+                }
                 append_stream_body_sample(&mut body_sample, &mut body_sample_truncated, &chunk);
                 buffer.extend_from_slice(&chunk);
 
@@ -3446,6 +3503,7 @@ mod tests {
                 trust_level: xcoding_protocol::ProviderTrustLevel::Official,
                 api_key: Some("sk-official".to_owned()),
                 api_keys: Vec::new(),
+            note: None,
             },
             CloudProviderConfig {
                 id: "relay".to_owned(),
@@ -3455,6 +3513,7 @@ mod tests {
                 trust_level: xcoding_protocol::ProviderTrustLevel::Relay,
                 api_key: Some("sk-relay".to_owned()),
                 api_keys: Vec::new(),
+            note: None,
             },
         ];
         config.active_provider_id = Some("official".to_owned());

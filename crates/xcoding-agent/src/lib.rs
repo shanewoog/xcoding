@@ -187,6 +187,8 @@ struct ProviderAttemptFailure {
     error: AgentError,
     output_chars: usize,
     tool_calls: usize,
+    ttft_ms: Option<u64>,
+    total_ms: Option<u64>,
 }
 
 /// Smooth weighted round-robin state for one provider's independent accounts.
@@ -1784,7 +1786,7 @@ impl<'a> AgentService<'a> {
         stream_idle: Duration,
         stream_idle_timeout_secs: u64,
         on_event: &mut F,
-    ) -> Result<(String, Vec<ProviderToolCall>, Option<String>), ProviderAttemptFailure>
+    ) -> Result<(String, Vec<ProviderToolCall>, Option<String>, Option<u64>, Option<u64>), ProviderAttemptFailure>
     where
         F: FnMut(SessionEvent),
     {
@@ -1804,6 +1806,8 @@ impl<'a> AgentService<'a> {
                     error: error.into(),
                     output_chars: 0,
                     tool_calls: 0,
+                    ttft_ms: None,
+                    total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
                 });
             }
             Err(_) => {
@@ -1813,6 +1817,8 @@ impl<'a> AgentService<'a> {
                     ),
                     output_chars: 0,
                     tool_calls: 0,
+                    ttft_ms: None,
+                    total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
                 });
             }
         };
@@ -1820,6 +1826,7 @@ impl<'a> AgentService<'a> {
         let mut tool_calls = Vec::new();
         let mut model_reported = None;
         let mut received_event = false;
+        let mut first_event_at: Option<tokio::time::Instant> = None;
         let mut last_event_at = attempt_started_at;
 
         loop {
@@ -1832,14 +1839,18 @@ impl<'a> AgentService<'a> {
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
+                            let just_started = !received_event && event_proves_stream_started(&event);
                             received_event =
-                                received_event || event_proves_stream_started(&event);
+                                received_event || just_started;
+                            if just_started { first_event_at = Some(tokio::time::Instant::now()); }
                             last_event_at = tokio::time::Instant::now();
                             if let Err(error) = self.ensure_not_cancelled_preserving(session.id, &content) {
                                 return Err(ProviderAttemptFailure {
                                     error,
                                     output_chars: content.chars().count(),
                                     tool_calls: tool_calls.len(),
+                                    ttft_ms: first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
+                                    total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
                                 });
                             }
                             match event {
@@ -1881,6 +1892,8 @@ impl<'a> AgentService<'a> {
                                 error: error.into(),
                                 output_chars: content.chars().count(),
                                 tool_calls: tool_calls.len(),
+                                ttft_ms: first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
+                                total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
                             });
                         }
                         None => break,
@@ -1896,6 +1909,8 @@ impl<'a> AgentService<'a> {
                         error,
                         output_chars: content.chars().count(),
                         tool_calls: tool_calls.len(),
+                        ttft_ms: first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
+                        total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
                     });
                 }
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {
@@ -1904,6 +1919,8 @@ impl<'a> AgentService<'a> {
                             error,
                             output_chars: content.chars().count(),
                             tool_calls: tool_calls.len(),
+                            ttft_ms: first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
+                            total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
                         });
                     }
                 }
@@ -1915,6 +1932,8 @@ impl<'a> AgentService<'a> {
                 error,
                 output_chars: content.chars().count(),
                 tool_calls: tool_calls.len(),
+                ttft_ms: first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
+                total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
             });
         }
         if content.trim().is_empty() && tool_calls.is_empty() {
@@ -1922,9 +1941,11 @@ impl<'a> AgentService<'a> {
                 error: AgentError::EmptyProviderResponse,
                 output_chars: 0,
                 tool_calls: 0,
+                ttft_ms: None,
+                total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
             });
         }
-        Ok((content, tool_calls, model_reported))
+        Ok((content, tool_calls, model_reported, first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64), Some(attempt_started_at.elapsed().as_millis() as u64)))
     }
 
     async fn run_session<F>(
@@ -2240,6 +2261,8 @@ impl<'a> AgentService<'a> {
                                 0,
                                 0,
                                 Some(message.clone()),
+                                None,
+                                None,
                             );
                             record_provider_failure(candidate, circuit_settings);
                             failures.push(format!("{candidate_label}: {message}"));
@@ -2274,7 +2297,7 @@ impl<'a> AgentService<'a> {
                         let attempt = retry_attempt + 1;
                         let mut attempt_messages = messages.clone();
                         // Transform messages based on vision route status.
-                        let route_status = vision_route_cache.status(candidate, &session.model);
+                        let route_status = vision_route_cache.status_or_load(candidate, &session.model, self.core);
                         let mut attempt_has_new_images = false;
                         let mut attempt_new_image_keys: Vec<String> = Vec::new();
                         match route_status {
@@ -2344,7 +2367,7 @@ impl<'a> AgentService<'a> {
                             )
                             .await
                         {
-                            Ok((content, tool_calls, model_reported)) => {
+                            Ok((content, tool_calls, model_reported, ttft_ms, total_ms)) => {
                                 self.emit_model_call_with_reported(
                                     on_event,
                                     session,
@@ -2360,12 +2383,14 @@ impl<'a> AgentService<'a> {
                                     tool_calls.len(),
                                     None,
                                     model_reported,
+                                    ttft_ms,
+                                    total_ms,
                                 );
                                 record_provider_success(candidate, circuit_settings);
                                 record_provider_key_success(candidate);
                                 // Mark route as natively supporting vision if images were sent.
                                 if attempt_has_new_images {
-                                    vision_route_cache.mark_native_supported(candidate, &session.model, &attempt_new_image_keys);
+                                    vision_route_cache.mark_native_supported(candidate, &session.model, &attempt_new_image_keys, self.core);
                                 }
                                 completed = Some((content, tool_calls, candidate_index));
                                 break;
@@ -2386,11 +2411,13 @@ impl<'a> AgentService<'a> {
                                     failure.output_chars,
                                     failure.tool_calls,
                                     Some(message.clone()),
+                                    failure.ttft_ms,
+                                    failure.total_ms,
                                 );
                                 // Vision-unsupported: mark route and retry with delegate.
                                 if let AgentError::Provider(ref provider_err) = failure.error {
                                     if provider_err.is_vision_unsupported() {
-                                        vision_route_cache.mark_native_unsupported(candidate, &session.model);
+                                        vision_route_cache.mark_native_unsupported(candidate, &session.model, self.core);
                                         self.emit(on_event, SessionEvent::Retrying {
                                             session_id: session.id,
                                             attempt,
@@ -2892,6 +2919,8 @@ impl<'a> AgentService<'a> {
                     0,
                     0,
                     Some(error.to_string()),
+                    None,
+                    None,
                 );
                 return Err(error.into());
             }
@@ -2915,6 +2944,8 @@ impl<'a> AgentService<'a> {
                         summary.chars().count(),
                         0,
                         Some(error.to_string()),
+                        None,
+                        None,
                     );
                     return Err(error.into());
                 }
@@ -2938,6 +2969,8 @@ impl<'a> AgentService<'a> {
                         summary.chars().count(),
                         0,
                         Some(error.to_string()),
+                        None,
+                        None,
                     );
                     return Err(error);
                 }
@@ -2968,6 +3001,8 @@ impl<'a> AgentService<'a> {
                 0,
                 0,
                 Some(error.to_string()),
+                None,
+                None,
             );
             return Err(error);
         }
@@ -2984,6 +3019,8 @@ impl<'a> AgentService<'a> {
             true,
             summary.chars().count(),
             0,
+            None,
+            None,
             None,
         );
         Ok(summary)
@@ -3051,6 +3088,8 @@ impl<'a> AgentService<'a> {
                     0,
                     0,
                     Some(error.to_string()),
+                    None,
+                    None,
                 );
                 return;
             }
@@ -3081,6 +3120,8 @@ impl<'a> AgentService<'a> {
                         extracted.chars().count(),
                         0,
                         Some(error.to_string()),
+                        None,
+                        None,
                     );
                     return;
                 }
@@ -3103,6 +3144,8 @@ impl<'a> AgentService<'a> {
                             "memory extraction stream was idle for {} seconds",
                             stream_idle.as_secs()
                         )),
+                        None,
+                        None,
                     );
                     return;
                 }
@@ -3130,6 +3173,8 @@ impl<'a> AgentService<'a> {
             true,
             extracted.chars().count(),
             0,
+            None,
+            None,
             None,
         );
     }
@@ -3250,6 +3295,8 @@ impl<'a> AgentService<'a> {
         output_chars: usize,
         tool_calls: usize,
         error: Option<String>,
+        ttft_ms: Option<u64>,
+        total_ms: Option<u64>,
     ) where
         F: FnMut(SessionEvent),
     {
@@ -3268,6 +3315,8 @@ impl<'a> AgentService<'a> {
             tool_calls,
             error,
             None,
+            ttft_ms,
+            total_ms,
         );
     }
 
@@ -3287,6 +3336,8 @@ impl<'a> AgentService<'a> {
         tool_calls: usize,
         error: Option<String>,
         model_reported: Option<String>,
+        ttft_ms: Option<u64>,
+        total_ms: Option<u64>,
     ) where
         F: FnMut(SessionEvent),
     {
@@ -3311,6 +3362,8 @@ impl<'a> AgentService<'a> {
                 tool_calls,
                 error,
                 model_reported,
+                ttft_ms,
+                total_ms,
             },
         );
     }
@@ -5256,6 +5309,18 @@ impl VisionRouteCache {
         }
     }
 
+    /// Load persisted vision-route statuses from the database so that
+    /// providers already known to be unsupported skip the probing request
+    /// on every new session.
+    fn load_persisted(&mut self, core: &CoreService) {
+        // We iterate over all providers in the current config and check the
+        // store for any previously persisted route status.
+        // The route key format is "{provider_id}|{base_url}|{model}" — we
+        // cannot enumerate all possible keys, so we load on-demand when a
+        // provider is first encountered.  See `status_or_load`.
+        let _ = core; // placeholder — actual loading is lazy via status_or_load
+    }
+
     fn route_key(candidate: &ProviderCandidate, session_model: &str) -> String {
         let model = candidate.model_for(session_model);
         let base = normalize_base_url(&candidate.base_url);
@@ -5267,15 +5332,36 @@ impl VisionRouteCache {
         self.routes.get(&key).copied().unwrap_or(VisionRouteStatus::Unknown)
     }
 
-    fn mark_native_supported(&mut self, candidate: &ProviderCandidate, session_model: &str, image_keys: &[String]) {
+    /// Like `status()` but loads from the database on cache miss.
+    fn status_or_load(&mut self, candidate: &ProviderCandidate, session_model: &str, core: &CoreService) -> VisionRouteStatus {
         let key = Self::route_key(candidate, session_model);
-        self.routes.insert(key, VisionRouteStatus::NativeSupported);
-        for k in image_keys { self.processed_image_keys.insert(k.clone()); }
+        if let Some(cached) = self.routes.get(&key) {
+            return *cached;
+        }
+        // Try loading from DB.
+        if let Ok(Some(status_str)) = core.get_vision_route_status(&key) {
+            let status = match status_str.as_str() {
+                "NativeSupported" => VisionRouteStatus::NativeSupported,
+                "NativeUnsupported" => VisionRouteStatus::NativeUnsupported,
+                _ => VisionRouteStatus::Unknown,
+            };
+            self.routes.insert(key, status);
+            return status;
+        }
+        VisionRouteStatus::Unknown
     }
 
-    fn mark_native_unsupported(&mut self, candidate: &ProviderCandidate, session_model: &str) {
+    fn mark_native_supported(&mut self, candidate: &ProviderCandidate, session_model: &str, image_keys: &[String], core: &CoreService) {
         let key = Self::route_key(candidate, session_model);
-        self.routes.insert(key, VisionRouteStatus::NativeUnsupported);
+        self.routes.insert(key.clone(), VisionRouteStatus::NativeSupported);
+        for k in image_keys { self.processed_image_keys.insert(k.clone()); }
+        let _ = core.save_vision_route_status(&key, "NativeSupported");
+    }
+
+    fn mark_native_unsupported(&mut self, candidate: &ProviderCandidate, session_model: &str, core: &CoreService) {
+        let key = Self::route_key(candidate, session_model);
+        self.routes.insert(key.clone(), VisionRouteStatus::NativeUnsupported);
+        let _ = core.save_vision_route_status(&key, "NativeUnsupported");
     }
 
     fn processed_image_keys_ref(&self) -> &std::collections::HashSet<String> {
@@ -5292,13 +5378,10 @@ fn collect_image_keys_from_message(message: &ChatMessage) -> Vec<String> {
             let url = &image_url.url;
             if let Some(idx) = url.find(";base64,") {
                 // URL format: data:image/png;base64,...
-                if url.starts_with("data:") {
-                    let colon = url.find(':').unwrap_or(0);
-                    if colon >= 5 && colon < idx {
-                        let mime = &url[5..colon];
-                        let data = &url[idx + 8..];
-                        Some((mime.to_owned(), data.to_owned()))
-                    } else { None }
+                if url.starts_with("data:") && idx > 5 {
+                    let mime = &url[5..idx];
+                    let data = &url[idx + 8..];
+                    Some((mime.to_owned(), data.to_owned()))
                 } else { None }
             } else { None }
         } else { None }
@@ -5324,11 +5407,10 @@ fn strip_processed_images(message: &ChatMessage, processed: &std::collections::H
             let url = &image_url.url;
             if let Some(idx) = url.find(";base64,") {
                 // URL format: data:image/png;base64,...
-                let colon = url.find(':').unwrap_or(0);
-                if !url.starts_with("data:") || colon < 5 || colon >= idx {
+                if !url.starts_with("data:") || idx <= 5 {
                     continue;
                 }
-                let mime = &url[5..colon];
+                let mime = &url[5..idx];
                 let data = &url[idx + 8..];
                 let key = vision_cache_key(&[(mime.to_owned(), data.to_owned())]);
                 if !processed.contains(&key) {
@@ -5369,13 +5451,10 @@ fn extract_images_from_message(message: &ChatMessage) -> Vec<(String, String)> {
             let url = &image_url.url;
             if let Some(idx) = url.find(";base64,") {
                 // URL format: data:image/png;base64,...
-                if url.starts_with("data:") {
-                    let colon = url.find(':').unwrap_or(0);
-                    if colon >= 5 && colon < idx {
-                        let mime = &url[5..colon];
-                        let data = &url[idx + 8..];
-                        Some((mime.to_owned(), data.to_owned()))
-                    } else { None }
+                if url.starts_with("data:") && idx > 5 {
+                    let mime = &url[5..idx];
+                    let data = &url[idx + 8..];
+                    Some((mime.to_owned(), data.to_owned()))
                 } else { None }
             } else { None }
         } else { None }
@@ -5955,6 +6034,7 @@ mod tests {
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("primary-key".to_owned()),
                 api_keys: Vec::new(),
+                note: None,
             },
             CloudProviderConfig {
                 id: "backup".to_owned(),
@@ -5964,6 +6044,7 @@ mod tests {
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("backup-key".to_owned()),
                 api_keys: Vec::new(),
+                note: None,
             },
         ];
         config.active_provider_id = Some("backup".to_owned());
@@ -5995,6 +6076,7 @@ mod tests {
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("primary-key".to_owned()),
                 api_keys: Vec::new(),
+                note: None,
             },
             CloudProviderConfig {
                 id: "backup".to_owned(),
@@ -6004,6 +6086,7 @@ mod tests {
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("backup-key".to_owned()),
                 api_keys: Vec::new(),
+                note: None,
             },
         ];
         config.active_provider_id = Some("primary".to_owned());
@@ -6031,6 +6114,7 @@ mod tests {
                 trust_level: ProviderTrustLevel::Official,
                 api_key: Some("official-key".to_owned()),
                 api_keys: Vec::new(),
+                note: None,
             },
             CloudProviderConfig {
                 id: "relay".to_owned(),
@@ -6040,6 +6124,7 @@ mod tests {
                 trust_level: ProviderTrustLevel::Relay,
                 api_key: Some("relay-key".to_owned()),
                 api_keys: Vec::new(),
+                note: None,
             },
         ];
         config.active_provider_id = Some("official".to_owned());
@@ -6067,6 +6152,7 @@ mod tests {
             trust_level: ProviderTrustLevel::Relay,
             api_key: None,
             api_keys: Vec::new(),
+            note: None,
         }];
         config.active_provider_id = Some("relay".to_owned());
 
@@ -6587,6 +6673,7 @@ private material
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some("solo-key".to_owned()),
             api_keys: Vec::new(),
+            note: None,
         }];
         config.active_provider_id = Some("solo".to_owned());
 
@@ -6607,6 +6694,7 @@ private material
             trust_level: ProviderTrustLevel::Relay,
             api_key: None,
             api_keys: vec![test_key("a", 3), test_key("b", 1)],
+            note: None,
         }];
         config.active_provider_id = Some("pool".to_owned());
 
@@ -6636,6 +6724,7 @@ private material
             trust_level: ProviderTrustLevel::Relay,
             api_key: key.map(str::to_owned),
             api_keys: Vec::new(),
+            note: None,
         }
     }
 
@@ -7174,6 +7263,7 @@ private material
             trust_level: ProviderTrustLevel::Relay,
             api_key: None,
             api_keys: vec![rejected.clone(), healthy.clone(), disabled.clone()],
+            note: None,
         }];
         let rejected_candidate = key_candidate(&provider_id, &rejected.id, &rejected.key);
         let healthy_candidate = key_candidate(&provider_id, &healthy.id, &healthy.key);
@@ -8279,6 +8369,7 @@ private material
             trust_level: ProviderTrustLevel::Relay,
             api_key: Some("vision-key".to_owned()),
             api_keys: Vec::new(),
+            note: None,
         }];
         config.vision_delegate = Some(xcoding_protocol::VisionDelegateConfig {
             enabled: true,
@@ -8466,6 +8557,8 @@ private material
             error: AgentError::ProviderStreamIdleTimeout(180),
             output_chars: 0,
             tool_calls: 5,
+            ttft_ms: None,
+            total_ms: None,
         };
         assert!(!visible_output_was_started(&failure));
     }
@@ -8485,6 +8578,8 @@ private material
                 error,
                 output_chars: 45,
                 tool_calls: 0,
+                ttft_ms: None,
+                total_ms: None,
             };
             assert!(visible_output_was_started(&failure));
             assert!(stream_restart_discards_partial_output(&failure.error));
@@ -8503,6 +8598,8 @@ private material
             }),
             output_chars: 100,
             tool_calls: 5,
+            ttft_ms: None,
+            total_ms: None,
         };
         assert!(visible_output_was_started(&failure));
         assert!(!stream_restart_discards_partial_output(&failure.error));

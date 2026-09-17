@@ -4187,6 +4187,12 @@ export function App() {
                     {event.success ? (
                       <div><dt>{t(locale, "logs.output")}</dt><dd>{t(locale, "logs.outputSummary", { chars: event.output_chars, tools: event.tool_calls })}</dd></div>
                     ) : null}
+                    {event.ttft_ms != null ? (
+                      <div><dt>{t(locale, "logs.ttft")}</dt><dd>{event.ttft_ms} ms</dd></div>
+                    ) : null}
+                    {event.total_ms != null ? (
+                      <div><dt>{t(locale, "logs.duration")}</dt><dd>{event.total_ms} ms</dd></div>
+                    ) : null}
                   </dl>
                   {!event.success && event.error ? (
                     <div className="model-log-error-wrap">
@@ -4418,6 +4424,16 @@ export function App() {
                     disabled={anySessionRunning || isSavingConfig}
                     spellCheck={false}
                   />
+                  <label className="field-label" htmlFor={`provider-note-${selectedProvider.id}`}>{t(locale, "field.providerNote")}</label>
+                  <textarea
+                    id={`provider-note-${selectedProvider.id}`}
+                    rows={2}
+                    value={selectedProvider.note || ""}
+                    onChange={(event) => updateProvider(selectedProvider.id, { note: event.target.value || undefined })}
+                    disabled={anySessionRunning || isSavingConfig}
+                    spellCheck={false}
+                    placeholder={t(locale, "field.providerNotePlaceholder")}
+                  />
                   <label className="field-label" htmlFor={`provider-wire-api-${selectedProvider.id}`}>{t(locale, "field.providerProtocol")}</label>
                   <select
                     id={`provider-wire-api-${selectedProvider.id}`}
@@ -4476,6 +4492,35 @@ export function App() {
                       </button>
                     </div>
                   ) : null}
+                  {(selectedProvider.api_keys || []).length === 0 ? (() => {
+                    const singleKeyStatus = providerKeyStatuses.find((status) => status.provider_id === selectedProvider.id);
+                    if (!singleKeyStatus) return null;
+                    const singleKeyStateLabel: MessageKey = singleKeyStatus.state === "rejected"
+                      ? "keyState.rejected"
+                      : singleKeyStatus.state === "rate_limited"
+                        ? "keyState.rateLimited"
+                        : singleKeyStatus.state === "unstable"
+                          ? "keyState.unstable"
+                          : singleKeyStatus.state === "disabled"
+                            ? "keyState.disabled"
+                            : "keyState.ready";
+                    return (
+                      <div className={`provider-key-status ${singleKeyStatus.state}`}>
+                        <span className="provider-key-state">{t(locale, singleKeyStateLabel)}</span>
+                        <span className="provider-key-usage">
+                          {t(locale, "keyStats.usage", {
+                            ok: String(singleKeyStatus.success_count),
+                            fail: String(singleKeyStatus.failure_count),
+                          })}
+                        </span>
+                        {singleKeyStatus.cooldown_secs ? (
+                          <span className="provider-key-cooldown">
+                            {t(locale, "keyStats.cooldown", { seconds: String(singleKeyStatus.cooldown_secs) })}
+                          </span>
+                        ) : null}
+                      </div>
+                    );
+                  })() : null}
                   <div className="provider-key-pool" id={`provider-key-pool-${selectedProvider.id}`}>
                     {(selectedProvider.api_keys || []).map((keyEntry, keyIndex) => {
                       const keyStatus = providerKeyStatusById.get(`${selectedProvider.id}|${keyEntry.id}`);

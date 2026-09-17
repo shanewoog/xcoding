@@ -5425,7 +5425,7 @@ dependencies = [
 
 [[package]]
 name = "xcoding-desktop"
-version = "1.0.47"
+version = "1.0.49"
 dependencies = [
  "dotenvy",
  "pinyin",
@@ -5476,6 +5476,7 @@ name = "xcoding-providers"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "chrono",
  "dotenvy",
  "futures-util",
  "reqwest 0.12.28",

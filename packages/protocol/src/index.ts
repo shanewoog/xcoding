@@ -139,6 +139,8 @@ export interface CloudProviderConfig {
   api_key?: string;
   /** Weighted key pool for this provider. Falls back to api_key when empty. */
   api_keys?: ProviderApiKey[];
+  /** Optional user-facing remark for this provider. */
+  note?: string;
 }
 
 /**
@@ -604,6 +606,10 @@ export type SessionEvent =
       error?: string;
       /** Model identifier reported back by the upstream, when it sent one. */
       model_reported?: string;
+      /** Milliseconds from request start until the first proven stream event. */
+      ttft_ms?: number;
+      /** Total wall-clock milliseconds for the entire provider attempt. */
+      total_ms?: number;
     }
   | {
       type: "vision_delegate_start";
