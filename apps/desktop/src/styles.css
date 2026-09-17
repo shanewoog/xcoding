@@ -2283,6 +2283,10 @@ input.workspace-missing {
 .provider-key-cooldown {
   font-variant-numeric: tabular-nums;
 }
+.provider-key-restore {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+}
 .model-route-section {
   border-top: 1px solid var(--border);
   margin-top: 0.9rem;

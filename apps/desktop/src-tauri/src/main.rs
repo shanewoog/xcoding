@@ -416,6 +416,13 @@ fn provider_key_status() -> Result<Vec<ProviderKeyStatus>, String> {
 }
 
 #[tauri::command]
+fn clear_provider_key_block(provider_id: String, key_id: String) -> Result<Vec<ProviderKeyStatus>, String> {
+    let config = load_user_config();
+    xcoding_agent::clear_provider_key_block(&config, &provider_id, &key_id);
+    Ok(xcoding_agent::provider_key_statuses(&config))
+}
+
+#[tauri::command]
 fn model_route_status() -> Result<Vec<ModelRouteStatus>, String> {
     Ok(xcoding_agent::model_route_statuses(&load_user_config()))
 }
@@ -881,6 +888,7 @@ fn main() {
             show_main_window,
             provider_status,
             provider_key_status,
+            clear_provider_key_block,
             model_route_status,
             get_user_config,
             list_provider_models,

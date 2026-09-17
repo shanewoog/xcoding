@@ -306,7 +306,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use portable_pty::{native_pty_system, PtySize};
 
     use super::{shell_command, TerminalStartResult};
 

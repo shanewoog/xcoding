@@ -1880,6 +1880,19 @@ export function App() {
     }
   }, []);
 
+  const restoreProviderKeyBlock = useCallback(async (providerId: string, keyId: string) => {
+    if (!isTauriRuntime) return;
+    try {
+      const statuses = await invoke<ProviderKeyStatus[]>("clear_provider_key_block", {
+        providerId,
+        keyId,
+      });
+      setProviderKeyStatuses(Array.isArray(statuses) ? statuses : []);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
   const refreshModelRouteStatuses = useCallback(async () => {
     if (!isTauriRuntime) return;
     try {
@@ -4519,6 +4532,15 @@ export function App() {
                             {t(locale, "keyStats.cooldown", { seconds: String(singleKeyStatus.cooldown_secs) })}
                           </span>
                         ) : null}
+                        {singleKeyStatus.state === "rejected" ? (
+                          <button
+                            type="button"
+                            className="quiet-button provider-key-restore"
+                            onClick={() => void restoreProviderKeyBlock(singleKeyStatus.provider_id, singleKeyStatus.key_id)}
+                          >
+                            {t(locale, "action.restoreKey")}
+                          </button>
+                        ) : null}
                       </div>
                     );
                   })() : null}
@@ -4604,6 +4626,15 @@ export function App() {
                             <span className="provider-key-cooldown">
                               {t(locale, "keyStats.cooldown", { seconds: String(keyStatus.cooldown_secs) })}
                             </span>
+                          ) : null}
+                          {keyStatus.state === "rejected" ? (
+                            <button
+                              type="button"
+                              className="quiet-button provider-key-restore"
+                              onClick={() => void restoreProviderKeyBlock(keyStatus.provider_id, keyStatus.key_id)}
+                            >
+                              {t(locale, "action.restoreKey")}
+                            </button>
                           ) : null}
                         </div>
                       ) : null}

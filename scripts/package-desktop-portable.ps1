@@ -191,6 +191,7 @@ $releaseGitPaths = @(
   "apps/desktop/src-tauri/Cargo.lock",
   "apps/desktop/src-tauri/tauri.conf.json",
   "apps/desktop/src-tauri/src/main.rs",
+  "apps/desktop/src-tauri/src/terminal.rs",
   "crates/xcoding-agent/Cargo.toml",
   "crates/xcoding-agent/examples/desktop_trajectory.rs",
   "Cargo.toml",

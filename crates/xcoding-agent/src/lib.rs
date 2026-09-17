@@ -595,6 +595,49 @@ pub fn provider_key_statuses(config: &UserConfig) -> Vec<ProviderKeyStatus> {
     statuses
 }
 
+/// Clear the runtime block on one configured credential so the user can put a
+/// key the endpoint refused (`Rejected`) back into rotation without editing its
+/// value. This is the manual escape hatch for the `Rejected` state, which is
+/// otherwise only lifted by changing the key or by a later success. The health
+/// counters are kept so the settings view still reports what this process did;
+/// only the block is dropped. Returns whether a credential matched.
+pub fn clear_provider_key_block(
+    config: &UserConfig,
+    provider_id: &str,
+    key_id: &str,
+) -> bool {
+    let Some(provider) = config
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+    else {
+        return false;
+    };
+    let api_key = if provider.api_keys.is_empty() {
+        provider.api_key.as_deref()
+    } else {
+        provider
+            .api_keys
+            .iter()
+            .find(|entry| entry.id == key_id)
+            .map(|entry| entry.key.as_str())
+    };
+    let health_id = provider_key_health_id(provider_id, key_id, api_key);
+    let health = PROVIDER_KEY_HEALTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut health) = health.lock() else {
+        return false;
+    };
+    match health.get_mut(&health_id) {
+        Some(state) => {
+            state.block = None;
+            state.blocked_until = None;
+            state.cooldown_strikes = 0;
+            true
+        }
+        None => false,
+    }
+}
+
 /// Per-model provider routes with the state Desktop settings shows. Read-only:
 /// it never mutates rotation or health state, so opening the settings view
 /// cannot change which provider the next turn picks.
@@ -7281,6 +7324,41 @@ private material
         assert!(!third.enabled);
 
         clear_key_health(&[&rejected_candidate, &healthy_candidate, &disabled_candidate]);
+    }
+
+    #[test]
+    fn a_rejected_key_can_be_restored_manually_without_editing_it() {
+        let provider_id = format!("key-restore-{}", std::process::id());
+        let key = test_key("a", 1);
+        let mut config = UserConfig::default();
+        config.providers = vec![CloudProviderConfig {
+            id: provider_id.clone(),
+            name: "Pool".to_owned(),
+            base_url: "https://pool.example.test".to_owned(),
+            wire_api: ProviderWireApi::ChatCompletions,
+            trust_level: ProviderTrustLevel::Relay,
+            api_key: None,
+            api_keys: vec![key.clone()],
+            note: None,
+        }];
+        let candidate = key_candidate(&provider_id, &key.id, &key.key);
+        clear_key_health(&[&candidate]);
+
+        record_provider_key_failure(&candidate, &http_status_error(401));
+        assert_eq!(provider_key_statuses(&config)[0].state, "rejected");
+        assert!(!provider_key_is_available(&candidate));
+
+        assert!(clear_provider_key_block(&config, &provider_id, &key.id));
+        let restored = provider_key_statuses(&config);
+        assert_eq!(restored[0].state, "ready");
+        assert_eq!(restored[0].failure_count, 1, "counters survive a manual restore");
+        assert!(provider_key_is_available(&candidate));
+
+        // Unknown targets report no match instead of silently succeeding.
+        assert!(!clear_provider_key_block(&config, &provider_id, "missing"));
+        assert!(!clear_provider_key_block(&config, "missing-provider", &key.id));
+
+        clear_key_health(&[&candidate]);
     }
 
     #[test]
