@@ -59,6 +59,24 @@ async function main() {
     appSource.includes('"logs.purpose.memoryExtraction"'),
     "memory extraction calls need their own log label",
   );
+  assert.ok(
+    appSource.includes("function formatMillisecondsAsDuration"),
+    "model log durations should be formatted from milliseconds",
+  );
+  assert.ok(
+    appSource.includes("return minutes > 0 ? `${minutes}m ${remainder}s` : `${wholeSeconds}s`;"),
+    "model log durations should show seconds and include minutes after one minute",
+  );
+  assert.ok(
+    appSource.includes("formatMillisecondsAsDuration(event.ttft_ms)"),
+    "time to first token should render using the duration formatter",
+  );
+  assert.ok(
+    appSource.includes("formatMillisecondsAsDuration(event.total_ms)"),
+    "total duration should render using the duration formatter",
+  );
+  assert.ok(!appSource.includes("{event.ttft_ms} ms"), "time to first token should not render raw milliseconds");
+  assert.ok(!appSource.includes("{event.total_ms} ms"), "total duration should not render raw milliseconds");
   assert.ok(i18nSource.includes('"logs.credential"'), "credential label translation is missing");
   assert.ok(i18nSource.includes('"logs.protocol"'), "wire protocol label translation is missing");
   assert.ok(
