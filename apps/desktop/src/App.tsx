@@ -1167,6 +1167,24 @@ function renderMarkdownBlocks(content: string, onOpenLink: (url: string) => void
       index += 1;
       continue;
     }
+    const codeFence = CODE_FENCE_PATTERN.exec(line);
+    if (codeFence) {
+      const language = codeFence[2].trim().split(/\s+/)[0];
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !CODE_FENCE_CLOSE_PATTERN.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      nodes.push(
+        <pre className="assistant-code-block" key={`md-code-${blockKey}`}>
+          <code className={language ? `language-${language}` : undefined}>{codeLines.join("\n")}</code>
+        </pre>,
+      );
+      blockKey += 1;
+      continue;
+    }
     const orderedMatch = ORDERED_ITEM_PATTERN.exec(line);
     const unorderedMatch = !orderedMatch && UNORDERED_ITEM_PATTERN.exec(line);
     if (orderedMatch || unorderedMatch) {
@@ -1218,6 +1236,8 @@ const INLINE_TOKEN_PATTERN = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\r\n
 const BARE_URL_PATTERN = /^https?:\/\/[^\s<>()\]\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]+$/;
 const UNORDERED_ITEM_PATTERN = /^\s*[-*]\s+(.*)$/;
 const ORDERED_ITEM_PATTERN = /^\s*\d+[.)]\s+(.*)$/;
+const CODE_FENCE_PATTERN = /^\s*(`{3,})([^\r\n]*)\s*$/;
+const CODE_FENCE_CLOSE_PATTERN = /^\s*`{3,}\s*$/;
 
 function AssistantMessageBody({ content, onOpenLink }: { content: string; onOpenLink: (url: string) => void }) {
   if (!content) return <>{content}</>;

@@ -544,6 +544,16 @@ fn format_http_status_message(status: &StatusCode, body: &str) -> String {
             truncated
         );
     }
+    if matches!(
+        *status,
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+    ) {
+        return format!(
+            "Upstream gateway error (HTTP {}): the request did not reach the model API, so this is not an API key or base URL issue. It is usually transient and is retried automatically; retry shortly, check the proxy in Settings, or route this model to another provider. Provider response: {}",
+            status.as_u16(),
+            truncated
+        );
+    }
     format!(
         "Cloud provider request failed (HTTP {}). Check OPENAI_API_KEY and XCODING_OPENAI_BASE_URL if this looks like an auth or endpoint issue. Provider response: {}",
         status.as_u16(),
@@ -3347,15 +3357,39 @@ mod tests {
     fn non_auth_status_message_includes_truncated_body() {
         let long_body = "x".repeat(400);
         let message = ProviderError::HttpStatus {
-            status: StatusCode::BAD_GATEWAY,
+            status: StatusCode::TOO_MANY_REQUESTS,
             body: long_body,
             retry_after_secs: None,
         }
         .to_string();
-        assert!(message.contains("Cloud provider request failed (HTTP 502)"));
+        assert!(message.contains("Cloud provider request failed (HTTP 429)"));
         assert!(message.contains("OPENAI_API_KEY"));
         assert!(message.ends_with("..."));
         assert!(message.len() < 500);
+    }
+
+    #[test]
+    fn gateway_status_message_does_not_blame_the_api_key() {
+        for status in [
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            let message = ProviderError::HttpStatus {
+                status,
+                body: "(empty body)".to_owned(),
+                retry_after_secs: None,
+            }
+            .to_string();
+            assert!(
+                message.contains(&format!("Upstream gateway error (HTTP {})", status.as_u16())),
+                "unexpected message for {status}: {message}"
+            );
+            assert!(
+                !message.contains("OPENAI_API_KEY"),
+                "gateway error must not blame the credential: {message}"
+            );
+        }
     }
 
     #[test]

@@ -26,6 +26,12 @@ async function main() {
   assert.ok(appSource.includes('className="assistant-message-link"'), "assistant links must use the link visual treatment");
   assert.ok(appSource.includes("onOpenLink(url);"), "assistant link clicks must be handled by the application");
   assert.ok(
+    appSource.includes("const CODE_FENCE_PATTERN") &&
+      appSource.includes('className="assistant-code-block"') &&
+      appSource.includes("codeLines.join(\"\\n\")"),
+    "assistant messages must render fenced Markdown code blocks as preformatted code",
+  );
+  assert.ok(
     appSource.includes("BARE_URL_PATTERN.test(fenced.url)") && appSource.includes("<code>{url}</code>"),
     "a URL wrapped in backticks must still render as a clickable link",
   );
@@ -94,6 +100,7 @@ async function main() {
   assert.ok(mainSource.includes("browser::browser_set_user_agent"), "Tauri must register the user-agent command");
 
   assert.match(cssSource, /\.assistant-message-link\s*\{[\s\S]*text-decoration:\s*underline;/, "assistant links must be visibly underlined");
+  assert.match(cssSource, /\.assistant-code-block\s*\{[\s\S]*overflow-x:\s*auto;/, "assistant code blocks must scroll horizontally when needed");
   console.log("Desktop assistant link checks passed.");
 }
 

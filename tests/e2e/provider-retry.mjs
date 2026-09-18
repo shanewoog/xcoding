@@ -179,7 +179,8 @@ async function assertRetryThenFail() {
       (error) => {
         assert.ok(error instanceof Error, "expected Error");
         assert.match(error.message, /RPC 11\d{2}:/);
-        assert.match(error.message, /Cloud provider request failed \(HTTP 503\)/);
+        assert.match(error.message, /Upstream gateway error \(HTTP 503\)/);
+        assert.doesNotMatch(error.message, /OPENAI_API_KEY/);
         return true;
       },
     );

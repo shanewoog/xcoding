@@ -1143,6 +1143,20 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
+.assistant-code-block {
+  background: var(--bg-readonly);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 0.75rem 0.9rem;
+  white-space: pre;
+}
+.assistant-code-block code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9em;
+}
 .message-user {
   align-self: flex-end;
   background: transparent;
