@@ -244,6 +244,32 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Some relay gateways encode a temporary channel throttle as HTTP 403:
+    /// `not allowed to use channel ... (allowed: [...])`. It is safe to retry
+    /// this narrow response, while ordinary permission failures remain fatal.
+    pub fn is_transient_channel_rejection(&self) -> bool {
+        match self {
+            Self::HttpStatus { status, body, .. } => {
+                *status == StatusCode::FORBIDDEN
+                    && body_indicates_transient_channel_rejection(body)
+            }
+            _ => false,
+        }
+    }
+
+    /// The provider received a tool result whose tool-use block is absent from
+    /// the request transcript. Resending the same transcript cannot fix this;
+    /// the caller must rebuild or discard the orphaned result first.
+    pub fn is_tool_result_mismatch(&self) -> bool {
+        match self {
+            Self::HttpStatus { status, body, .. } => {
+                *status == StatusCode::BAD_REQUEST && body_indicates_tool_result_mismatch(body)
+            }
+            Self::InvalidResponse(message) => body_indicates_tool_result_mismatch(message),
+            _ => false,
+        }
+    }
+
     /// Transient transport / upstream failures worth retrying before failing the turn.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -256,6 +282,12 @@ impl ProviderError {
                     || (!error.is_decode() && error.status().is_none())
             }
             Self::HttpStatus { status, .. } => {
+                if self.is_tool_result_mismatch() {
+                    return false;
+                }
+                if self.is_transient_channel_rejection() {
+                    return true;
+                }
                 // Context overflow (400 + overflow body) needs history trimming, not a plain resend.
                 if self.is_context_overflow() {
                     return false;
@@ -341,7 +373,11 @@ impl ProviderError {
         };
         match status.as_u16() {
             401 => true,
-            403 => !body_indicates_gateway_block(body) && body_indicates_credential_refusal(body),
+            403 => {
+                !body_indicates_gateway_block(body)
+                    && !body_indicates_transient_channel_rejection(body)
+                    && body_indicates_credential_refusal(body)
+            }
             _ => false,
         }
     }
@@ -532,6 +568,12 @@ fn format_http_status_message(status: &StatusCode, body: &str) -> String {
             truncated
         );
     }
+    if *status == StatusCode::FORBIDDEN && body_indicates_transient_channel_rejection(body) {
+        return format!(
+            "Provider channel is temporarily throttled (HTTP 403); retrying automatically. Provider response: {}",
+            truncated
+        );
+    }
     if *status == StatusCode::FORBIDDEN {
         return format!(
             "Cloud provider refused the request (HTTP 403). The endpoint accepted the connection but declined this request: check that the credential is allowed to use this model and that the endpoint is not blocking this client. Provider response: {}",
@@ -541,6 +583,12 @@ fn format_http_status_message(status: &StatusCode, body: &str) -> String {
     if *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body) {
         return format!(
             "Context window exceeded (HTTP 400): conversation history is too long for this model. History will be trimmed before retrying. Provider response: {}",
+            truncated
+        );
+    }
+    if *status == StatusCode::BAD_REQUEST && body_indicates_tool_result_mismatch(body) {
+        return format!(
+            "Provider rejected the tool transcript (HTTP 400): a tool result has no matching tool call. The transcript will be repaired before retrying. Provider response: {}",
             truncated
         );
     }
@@ -1626,6 +1674,19 @@ fn chat_completions_request_body(
     body
 }
 
+fn body_indicates_tool_result_mismatch(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("tool result")
+        && (lower.contains("no matching tool use")
+            || lower.contains("no matching tool_use")
+            || lower.contains("matching tool call"))
+}
+
+fn body_indicates_transient_channel_rejection(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("not allowed to use channel") && lower.contains("allowed:")
+}
+
 /// Providers reject a request whose assistant `tool_calls[].function.arguments`
 /// is not valid JSON. Replayed history can carry a fragment the upstream model
 /// never finished writing, so re-emit such a call with an empty object instead
@@ -1730,12 +1791,59 @@ fn anthropic_messages_request_body(
 ) -> Value {
     let mut system = Vec::new();
     let mut anthropic_messages = Vec::new();
+    let mut pending_tool_use_ids = BTreeSet::new();
     for message in messages {
         if message.role == "system" {
             if let Some(content) = message.content {
                 system.push(chat_content_as_text(content));
             }
             continue;
+        }
+
+        if message.role == "assistant" {
+            pending_tool_use_ids.clear();
+            if let Some(tool_calls) = message.tool_calls.as_ref() {
+                pending_tool_use_ids
+                    .extend(tool_calls.iter().map(|tool_call| tool_call.id.clone()));
+            }
+        }
+
+        if message.role == "tool" {
+            let tool_use_id = message.tool_call_id.as_deref().unwrap_or_default();
+            if pending_tool_use_ids.remove(tool_use_id) {
+                let content = message
+                    .content
+                    .map(anthropic_content_blocks)
+                    .unwrap_or_default();
+                push_anthropic_message(
+                    &mut anthropic_messages,
+                    "user",
+                    vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": content
+                    })],
+                );
+            } else if let Some(content) = message.content.map(chat_content_as_text) {
+                // A stale result is not a valid Anthropic tool_result anymore,
+                // but keeping it as ordinary text lets the model continue with
+                // the already-executed result instead of repeating the tool.
+                if !content.trim().is_empty() {
+                    push_anthropic_message(
+                        &mut anthropic_messages,
+                        "user",
+                        vec![json!({
+                            "type": "text",
+                            "text": format!("[Recovered tool output]\n{content}")
+                        })],
+                    );
+                }
+            }
+            continue;
+        }
+
+        if message.role != "assistant" {
+            pending_tool_use_ids.clear();
         }
 
         let mut blocks = Vec::new();
@@ -1754,14 +1862,7 @@ fn anthropic_messages_request_body(
                 })
             }));
         }
-        if message.role == "tool" {
-            blocks = vec![json!({
-                "type": "tool_result",
-                "tool_use_id": message.tool_call_id.unwrap_or_default(),
-                "content": blocks
-            })];
-            push_anthropic_message(&mut anthropic_messages, "user", blocks);
-        } else if !blocks.is_empty() {
+        if !blocks.is_empty() {
             push_anthropic_message(&mut anthropic_messages, &message.role, blocks);
         }
     }
@@ -2819,6 +2920,30 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_recovers_orphaned_tool_results_as_text() {
+        let body = anthropic_messages_request_body(
+            "claude-test",
+            vec![
+                ChatMessage::assistant_tool_calls(vec![ProviderToolCall {
+                    id: "toolu_valid".to_owned(),
+                    kind: "function".to_owned(),
+                    function: ProviderFunctionCall {
+                        name: "read_file".to_owned(),
+                        arguments: "{}".to_owned(),
+                    },
+                    truncated: false,
+                }]),
+                ChatMessage::tool_result("toolu_stale", "already read"),
+            ],
+            &[],
+        );
+
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "[Recovered tool output]\nalready read");
+    }
+
+    #[test]
     fn parses_native_anthropic_stream_events() {
         match parse_anthropic_event(r#"{"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":42}}}"#).unwrap() {
             AnthropicParsedEvent::MessageStart { model, usage } => assert_eq!((model.as_deref(), usage), (Some("claude-test"), 42)),
@@ -3248,6 +3373,35 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    #[test]
+    fn tool_result_mismatch_is_not_retried_as_the_same_request() {
+        let error = ProviderError::HttpStatus {
+            status: StatusCode::BAD_REQUEST,
+            body: r#"{"error":{"message":"tool result \"toolu_stale\" has no matching tool use"}}"#
+                .to_owned(),
+            retry_after_secs: None,
+        };
+
+        assert!(error.is_tool_result_mismatch());
+        assert!(!error.is_retryable());
+        assert!(error.to_string().contains("tool transcript"));
+    }
+
+    #[test]
+    fn relay_channel_throttle_403_is_retryable_without_rejecting_the_key() {
+        let error = ProviderError::HttpStatus {
+            status: StatusCode::FORBIDDEN,
+            body: r#"{"error":{"message":"this API key is not allowed to use channel \"kiro\" (allowed: [\"replay-aigateway\"] )"}}"#
+                .to_owned(),
+            retry_after_secs: None,
+        };
+
+        assert!(error.is_transient_channel_rejection());
+        assert!(error.is_retryable());
+        assert!(!error.is_credential_rejection());
+        assert!(error.to_string().contains("temporarily throttled"));
     }
 
     #[test]

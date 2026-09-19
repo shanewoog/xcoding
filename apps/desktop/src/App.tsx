@@ -547,10 +547,33 @@ type ComposerImage = {
   previewUrl: string;
 };
 
+type ComposerTextFile = {
+  id: string;
+  name: string;
+  content: string;
+  language: string;
+};
+
+type QueuedFollowUp = {
+  id: string;
+  sessionId: string;
+  text: string;
+  images: ChatImageAttachment[];
+  textFiles: ComposerTextFile[];
+};
+
 const IMAGE_BEGIN = "<!-- xcoding-images";
 const IMAGE_END = "xcoding-images -->";
-const MAX_COMPOSER_IMAGES = 4;
+const MAX_COMPOSER_ATTACHMENTS = 4;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_TEXT_FILE_BYTES = 1 * 1024 * 1024;
+const TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "md", "markdown", "json", "yaml", "yml", "toml", "xml", "csv", "log",
+  "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "kts",
+  "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "css", "scss", "less", "html", "htm",
+  "sql", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "vue", "svelte", "ini",
+  "conf", "cfg", "env", "gitignore",
+]);
 const SYSTEM_CONTEXT_TOKEN_RESERVE = 4_000;
 const IMAGE_CONTEXT_TOKEN_ESTIMATE = 2_000;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
@@ -996,6 +1019,68 @@ function formatDurationSeconds(seconds: number): string {
   return minutes > 0 ? `${minutes}m ${remainder}s` : `${wholeSeconds}s`;
 }
 
+function isComposerTextFile(file: File): boolean {
+  const mime = (file.type || "").toLowerCase();
+  if (mime.startsWith("text/")) return true;
+  const baseName = (file.name || "").toLowerCase().split(/[\\/]/).pop() || "";
+  const extension = baseName.includes(".") ? baseName.split(".").pop() || "" : baseName;
+  return TEXT_FILE_EXTENSIONS.has(extension);
+}
+
+function composerFileLanguage(name: string): string {
+  const baseName = name.toLowerCase().split(/[\\/]/).pop() || "";
+  const extension = baseName.includes(".") ? baseName.split(".").pop() || "" : "text";
+  const aliases: Record<string, string> = {
+    md: "markdown",
+    yml: "yaml",
+    ts: "typescript",
+    tsx: "tsx",
+    js: "javascript",
+    jsx: "jsx",
+    mjs: "javascript",
+    cjs: "javascript",
+    py: "python",
+    rs: "rust",
+    sh: "bash",
+    zsh: "bash",
+    ps1: "powershell",
+    cs: "csharp",
+    htm: "html",
+  };
+  return aliases[extension] || extension || "text";
+}
+
+async function fileToComposerTextFile(file: File): Promise<ComposerTextFile> {
+  if (!isComposerTextFile(file)) throw new Error("type");
+  if (file.size > MAX_TEXT_FILE_BYTES) throw new Error("size");
+  try {
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+    if (content.includes("\u0000")) throw new Error("binary");
+    return {
+      id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: file.name || "attachment.txt",
+      content,
+      language: composerFileLanguage(file.name || "attachment.txt"),
+    };
+  } catch {
+    throw new Error("read");
+  }
+}
+
+function formatComposerTextFile(file: ComposerTextFile): string {
+  const longestFence = Math.max(
+    2,
+    ...Array.from(file.content.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const fence = "`".repeat(longestFence + 1);
+  return `[Attached file: ${file.name}]\n${fence}${file.language}\n${file.content}\n${fence}`;
+}
+
+function messageWithComposerTextFiles(message: string, files: ComposerTextFile[]): string {
+  if (files.length === 0) return message;
+  return [message.trim(), ...files.map(formatComposerTextFile)].filter((part) => part.length > 0).join("\n\n");
+}
+
 function formatRunElapsed(startedAt: number, now: number): string {
   return formatDurationSeconds((now - startedAt) / 1000);
 }
@@ -1380,6 +1465,7 @@ export function App() {
   const [projectMenu, setProjectMenu] = useState<{ root: string; x: number; y: number } | null>(null);
   const [prompt, setPrompt] = useState("");
   const [composerImages, setComposerImages] = useState<ComposerImage[]>([]);
+  const [composerTextFiles, setComposerTextFiles] = useState<ComposerTextFile[]>([]);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState("");
@@ -1432,8 +1518,8 @@ export function App() {
   const autoRestoredSessionRef = useRef(false);
   const [sessionMenu, setSessionMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
-  const [followUpQueue, setFollowUpQueue] = useState<Array<{ id: string; sessionId: string; text: string; images: ChatImageAttachment[] }>>([]);
-  const followUpQueueRef = useRef<Array<{ id: string; sessionId: string; text: string; images: ChatImageAttachment[] }>>([]);
+  const [followUpQueue, setFollowUpQueue] = useState<QueuedFollowUp[]>([]);
+  const followUpQueueRef = useRef<QueuedFollowUp[]>([]);
   const [composerSendMode, setComposerSendMode] = useState<"queue" | "steer">("queue");
   // Per-session in-flight workers so multiple tasks can run in parallel.
   const chatInFlightBySessionRef = useRef<Map<string, Promise<string | null>>>(new Map());
@@ -1715,13 +1801,14 @@ export function App() {
       + retainedMessages.reduce((total, message) => total + estimateMessageTokens(message), 0)
       + estimateTextTokens(streamedText)
       + estimateTextTokens(prompt)
+      + composerTextFiles.reduce((total, file) => total + estimateTextTokens(file.content), 0)
       + composerImages.length * IMAGE_CONTEXT_TOKEN_ESTIMATE;
     return {
       limit,
       percent: Math.min(100, Math.round((used / limit) * 100)),
       used,
     };
-  }, [compactedMessageCount, composerImages.length, contextCompactionSummary, messages, model, modelContextWindows, prompt, streamedText]);
+  }, [compactedMessageCount, composerImages.length, composerTextFiles, contextCompactionSummary, messages, model, modelContextWindows, prompt, streamedText]);
 
   const filteredPluginItems = useMemo(() => {
     const query = pluginSearch.trim().toLowerCase();
@@ -2810,6 +2897,7 @@ export function App() {
     composerEpochRef.current += 1;
     setActiveSessionId(null);
     setComposerImages([]);
+    setComposerTextFiles([]);
     setMessages([]);
     setCompactedMessageCount(0);
     setContextCompactionSummary("");
@@ -2843,12 +2931,18 @@ export function App() {
     resetComposerSession();
   }
 
-  function enqueueFollowUp(sessionId: string, text: string, images: ChatImageAttachment[] = []): void {
+  function enqueueFollowUp(
+    sessionId: string,
+    text: string,
+    images: ChatImageAttachment[] = [],
+    textFiles: ComposerTextFile[] = [],
+  ): void {
     const item = {
       id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       sessionId,
       text,
       images,
+      textFiles,
     };
     setFollowUpQueue((current) => {
       const next = [...current, item];
@@ -2865,7 +2959,7 @@ export function App() {
     });
   }
 
-  function visibleFollowUps(sessionId: string | null): Array<{ id: string; sessionId: string; text: string; images: ChatImageAttachment[] }> {
+  function visibleFollowUps(sessionId: string | null): QueuedFollowUp[] {
     if (!sessionId) return [];
     return followUpQueue.filter((item) => item.sessionId === sessionId);
   }
@@ -2884,6 +2978,7 @@ export function App() {
         previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
       })),
     );
+    setComposerTextFiles(item.textFiles.map((file) => ({ ...file, id: `edit-${Date.now()}-${file.id}` })));
     setError(null);
   }
 
@@ -2899,6 +2994,7 @@ export function App() {
         previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
       })),
     );
+    setComposerTextFiles([]);
     setError(null);
   }
 
@@ -2906,7 +3002,12 @@ export function App() {
     const item = followUpQueueRef.current.find((entry) => entry.id === id) || followUpQueue.find((entry) => entry.id === id);
     if (!item) return;
     removeFollowUp(id);
-    await sendChatMessage(item.text, { steer: true, sessionId: item.sessionId, images: item.images });
+    await sendChatMessage(item.text, {
+      steer: true,
+      sessionId: item.sessionId,
+      images: item.images,
+      textFiles: item.textFiles,
+    });
   }
 
   useEffect(() => {
@@ -3058,6 +3159,7 @@ export function App() {
       sessionId?: string | null;
       skipDrain?: boolean;
       images?: ChatImageAttachment[];
+      textFiles?: ComposerTextFile[];
     },
   ): Promise<string | null> {
     const targetSessionIdEarly = options?.sessionId ?? activeSessionId;
@@ -3093,7 +3195,9 @@ export function App() {
       return null;
     }
     const images = options?.images ?? [];
-    if (!message.trim() && images.length === 0) {
+    const textFiles = options?.textFiles ?? [];
+    const messageWithFiles = messageWithComposerTextFiles(message, textFiles);
+    if (!messageWithFiles.trim() && images.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return null;
     }
@@ -3263,7 +3367,7 @@ export function App() {
               setPatchPreview(null);
               setTaskSummary(null);
               setRunStatusExpanded(false);
-              const localContent = encodeLocalUserContent(message, images);
+              const localContent = encodeLocalUserContent(messageWithFiles, images);
               setMessages((current) => [
                 ...current,
                 {
@@ -3279,7 +3383,7 @@ export function App() {
 
           const params: ChatParams = {
             workspace_root: root,
-            message: message.trim() ? message : (images.length > 0 ? " " : message),
+            message: messageWithFiles.trim() ? messageWithFiles : (images.length > 0 ? " " : messageWithFiles),
             mode,
             provider: defaultProvider,
             model,
@@ -3432,7 +3536,12 @@ export function App() {
         return remaining;
       });
       // Keep the guard until this send finishes, then chain the next item explicitly.
-      await sendChatMessage(next.text, { sessionId, skipDrain: true, images: next.images });
+      await sendChatMessage(next.text, {
+        sessionId,
+        skipDrain: true,
+        images: next.images,
+        textFiles: next.textFiles,
+      });
     } finally {
       drainFollowUpsBySessionRef.current.delete(sessionId);
     }
@@ -3441,25 +3550,38 @@ export function App() {
 
   async function addComposerFiles(fileList: FileList | File[] | null | undefined): Promise<void> {
     if (!fileList) return;
-    const files = Array.from(fileList).filter((file) => file.type.startsWith("image/"));
+    const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || isComposerTextFile(file));
     if (files.length === 0) return;
-    const next: ComposerImage[] = [];
+    const nextImages: ComposerImage[] = [];
+    const nextTextFiles: ComposerTextFile[] = [];
     for (const file of files) {
-      if (composerImages.length + next.length >= MAX_COMPOSER_IMAGES) {
-        setError(t(locale, "composer.imageLimit"));
+      if (composerImages.length + composerTextFiles.length + nextImages.length + nextTextFiles.length >= MAX_COMPOSER_ATTACHMENTS) {
+        setError(t(locale, "composer.fileLimit"));
         break;
       }
       try {
-        next.push(await fileToComposerImage(file));
+        if (file.type.startsWith("image/")) {
+          nextImages.push(await fileToComposerImage(file));
+        } else {
+          nextTextFiles.push(await fileToComposerTextFile(file));
+        }
       } catch (cause) {
         const code = cause instanceof Error ? cause.message : "read";
-        if (code === "size") setError(t(locale, "composer.imageTooLarge"));
-        else if (code === "type") setError(t(locale, "composer.imageType"));
-        else setError(t(locale, "composer.imageType"));
+        if (file.type.startsWith("image/")) {
+          if (code === "size") setError(t(locale, "composer.imageTooLarge"));
+          else setError(t(locale, "composer.imageType"));
+        } else if (code === "size") {
+          setError(t(locale, "composer.fileTooLarge"));
+        } else if (code === "type") {
+          setError(t(locale, "composer.fileType"));
+        } else {
+          setError(t(locale, "composer.fileRead"));
+        }
       }
     }
-    if (next.length > 0) {
-      setComposerImages((current) => [...current, ...next].slice(0, MAX_COMPOSER_IMAGES));
+    if (nextImages.length > 0 || nextTextFiles.length > 0) {
+      setComposerImages((current) => [...current, ...nextImages].slice(0, MAX_COMPOSER_ATTACHMENTS));
+      setComposerTextFiles((current) => [...current, ...nextTextFiles].slice(0, MAX_COMPOSER_ATTACHMENTS));
       setError(null);
     }
   }
@@ -3473,10 +3595,9 @@ export function App() {
     if (!items) return;
     const files: File[] = [];
     for (const item of Array.from(items)) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
-        const file = item.getAsFile();
-        if (file) files.push(file);
-      }
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (file && (file.type.startsWith("image/") || isComposerTextFile(file))) files.push(file);
     }
     if (files.length === 0) return;
     event.preventDefault();
@@ -3490,7 +3611,7 @@ export function App() {
 
   // Restores composer content when a send never reached the model, so an
   // interrupted steer cannot silently swallow the user's message.
-  function restoreComposerDraft(message: string, images: ChatImageAttachment[]): void {
+  function restoreComposerDraft(message: string, images: ChatImageAttachment[], textFiles: ComposerTextFile[] = []): void {
     setPrompt((current) => (current.trim() ? current : message));
     setComposerImages((current) =>
       current.length > 0
@@ -3500,9 +3621,10 @@ export function App() {
             mime_type: image.mime_type,
             data_base64: image.data_base64,
             name: image.name,
-            previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
-          })),
+          previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
+        })),
     );
+    setComposerTextFiles((current) => (current.length > 0 ? current : textFiles));
   }
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -3517,7 +3639,8 @@ export function App() {
       data_base64,
       name,
     }));
-    if (!message && images.length === 0) {
+    const textFiles = composerTextFiles;
+    if (!message && images.length === 0 && textFiles.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return;
     }
@@ -3531,21 +3654,24 @@ export function App() {
       if (composerSendMode === "steer") {
         setPrompt("");
         setComposerImages([]);
-        const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images });
-        if (!sent) restoreComposerDraft(message, images);
+        setComposerTextFiles([]);
+        const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images, textFiles });
+        if (!sent) restoreComposerDraft(message, images, textFiles);
         setComposerSendMode("queue");
         return;
       }
-      enqueueFollowUp(activeSessionId, message, images);
+      enqueueFollowUp(activeSessionId, message, images, textFiles);
       setPrompt("");
       setComposerImages([]);
+      setComposerTextFiles([]);
       setError(null);
       return;
     }
 
     setPrompt("");
     setComposerImages([]);
-    await sendChatMessage(message, { images });
+    setComposerTextFiles([]);
+    await sendChatMessage(message, { images, textFiles });
   }
 
   async function steerCurrentRun(): Promise<void> {
@@ -3555,7 +3681,8 @@ export function App() {
       data_base64,
       name,
     }));
-    if (!message && images.length === 0) {
+    const textFiles = composerTextFiles;
+    if (!message && images.length === 0 && textFiles.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return;
     }
@@ -3565,8 +3692,9 @@ export function App() {
     }
     setPrompt("");
     setComposerImages([]);
-    const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images });
-    if (!sent) restoreComposerDraft(message, images);
+    setComposerTextFiles([]);
+    const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images, textFiles });
+    if (!sent) restoreComposerDraft(message, images, textFiles);
   }
 
   async function resolveAction(approved: boolean): Promise<void> {
@@ -4112,11 +4240,11 @@ export function App() {
     availableModels.length > 0 &&
     !availableModels.some((entry) => entry.id === model.trim());
   const queueMode = !!(isRunning || activeSession?.status === "running" || activeSession?.status === "need_user");
-  const hasComposerContent = !!(prompt.trim() || composerImages.length > 0);
+  const hasComposerContent = !!(prompt.trim() || composerImages.length > 0 || composerTextFiles.length > 0);
   const providerMissing = providerCredentialsMissing(providerStatus, activeProvider);
   const sendBlockReason = workspaceMissing
       ? "workspace"
-      : (!prompt.trim() && composerImages.length === 0)
+      : (!prompt.trim() && composerImages.length === 0 && composerTextFiles.length === 0)
         ? "prompt"
         : providerMissing
           ? "provider"
@@ -5891,7 +6019,12 @@ export function App() {
             <article className="message message-user message-queued" key={item.id}>
               <div className="message-bubble">
                 <UserMessageBody
-                  content={item.text || (item.images.length > 0 ? t(locale, "message.imageCount", { count: String(item.images.length) }) : "")}
+                  content={
+                    messageWithComposerTextFiles(
+                      item.text || (item.images.length > 0 ? t(locale, "message.imageCount", { count: String(item.images.length) }) : ""),
+                      item.textFiles,
+                    )
+                  }
                 />
               </div>
               <div className="message-meta">
@@ -6118,6 +6251,24 @@ export function App() {
               ))}
             </div>
           ) : null}
+          {composerTextFiles.length > 0 ? (
+            <div className="composer-text-files" aria-label={t(locale, "composer.filesLabel")}>
+              {composerTextFiles.map((file) => (
+                <div className="composer-text-file" key={file.id}>
+                  <span className="composer-text-file-name" title={file.name}>{file.name}</span>
+                  <button
+                    type="button"
+                    className="composer-text-file-remove"
+                    onClick={() => setComposerTextFiles((current) => current.filter((item) => item.id !== file.id))}
+                    title={t(locale, "composer.removeFile")}
+                    aria-label={t(locale, "composer.removeFile")}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
@@ -6135,7 +6286,7 @@ export function App() {
           <input
             ref={imageInputRef}
             type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
+            accept="image/png,image/jpeg,image/webp,image/gif,text/*,.txt,.md,.markdown,.json,.yaml,.yml,.toml,.xml,.csv,.log,.rs,.ts,.tsx,.js,.jsx,.mjs,.cjs,.py,.go,.java,.kt,.kts,.c,.h,.cc,.cpp,.cxx,.hpp,.cs,.css,.scss,.less,.html,.htm,.sql,.sh,.bash,.zsh,.fish,.ps1,.bat,.cmd,.vue,.svelte,.ini,.conf,.cfg,.env,.gitignore"
             multiple
             hidden
             onChange={(event) => void onComposerImagePick(event)}
@@ -6273,9 +6424,9 @@ export function App() {
                 type="button"
                 className="quiet-button composer-attach"
                 onClick={() => imageInputRef.current?.click()}
-                disabled={composerImages.length >= MAX_COMPOSER_IMAGES}
-                title={t(locale, "action.attachImage")}
-                aria-label={t(locale, "action.attachImage")}
+                disabled={composerImages.length + composerTextFiles.length >= MAX_COMPOSER_ATTACHMENTS}
+                title={t(locale, "action.attachFile")}
+                aria-label={t(locale, "action.attachFile")}
               >
                 +
               </button>

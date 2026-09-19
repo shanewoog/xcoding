@@ -2567,6 +2567,38 @@ input.workspace-missing {
   line-height: 1;
   padding: 0;
 }
+.composer-text-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.7rem;
+}
+.composer-text-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: min(100%, 24rem);
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.82rem;
+}
+.composer-text-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-text-file-remove {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+}
 .message-images {
   display: flex;
   flex-wrap: wrap;

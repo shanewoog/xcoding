@@ -1,7 +1,7 @@
 //! Shared guarded coding-agent loop for XCoding clients.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -2195,6 +2195,11 @@ impl<'a> AgentService<'a> {
                 &request_budget,
                 user_config.lossy_context_compaction_enabled,
             );
+            // Keep a provider request valid even when history compaction or a
+            // resumed approval left a tool result without its assistant call.
+            // The already-recorded output is preserved as text; the tool is
+            // never executed again.
+            let mut tool_transcript_repaired = repair_tool_transcript(&mut messages) > 0;
             let (content, tool_calls, completed_candidate_index) = {
                 let mut failures = Vec::new();
                 let mut completed = None;
@@ -2468,6 +2473,33 @@ impl<'a> AgentService<'a> {
                                 }
                                 if matches!(failure.error, AgentError::Cancelled) {
                                     return Err(failure.error);
+                                }
+                                if let AgentError::Provider(provider_error) = &failure.error {
+                                    if provider_error.is_tool_result_mismatch()
+                                        && !tool_transcript_repaired
+                                        && retry_attempt < max_provider_retries
+                                    {
+                                        let repaired = repair_tool_transcript(&mut messages);
+                                        tool_transcript_repaired = true;
+                                        if repaired > 0 {
+                                            retry_attempt += 1;
+                                            self.emit(
+                                                on_event,
+                                                SessionEvent::Retrying {
+                                                    session_id: session.id,
+                                                    attempt: retry_attempt,
+                                                    max_attempts: max_provider_attempts,
+                                                    message: format!(
+                                                        "Provider rejected a stale tool result; repaired {} transcript item(s) and retrying.",
+                                                        repaired
+                                                    ),
+                                                },
+                                            );
+                                            tokio::time::sleep(provider_retry_delay(retry_attempt))
+                                                .await;
+                                            continue;
+                                        }
+                                    }
                                 }
                                 let restart_after_visible_output =
                                     visible_output_was_started(&failure)
@@ -5119,6 +5151,71 @@ fn bounded_tool_result(tool_call_id: &str, output: &str, allow_lossy: bool) -> C
     ChatMessage::tool_result(tool_call_id, content)
 }
 
+/// Repair a transcript whose tool result survived after its assistant tool call
+/// was trimmed or lost during resume. The result is kept as ordinary user text
+/// so the model can use the already-computed output without re-running a tool.
+/// Returns the number of orphaned results converted.
+fn repair_tool_transcript(messages: &mut Vec<ChatMessage>) -> usize {
+    let mut pending_tool_use_ids = BTreeSet::new();
+    let mut repaired = 0;
+    let mut normalized = Vec::with_capacity(messages.len());
+
+    for message in messages.drain(..) {
+        if message.role == "assistant" {
+            pending_tool_use_ids.clear();
+            if let Some(tool_calls) = message.tool_calls.as_ref() {
+                pending_tool_use_ids
+                    .extend(tool_calls.iter().map(|tool_call| tool_call.id.clone()));
+            }
+            normalized.push(message);
+            continue;
+        }
+
+        if message.role == "tool" {
+            let tool_call_id = message.tool_call_id.as_deref().unwrap_or_default();
+            if !tool_call_id.is_empty() && pending_tool_use_ids.remove(tool_call_id) {
+                normalized.push(message);
+                continue;
+            }
+
+            let output = message
+                .content
+                .as_ref()
+                .map(chat_message_content_as_text)
+                .unwrap_or_default();
+            if !output.trim().is_empty() {
+                normalized.push(ChatMessage::user(format!(
+                    "[Recovered tool output]\n{output}"
+                )));
+            }
+            repaired += 1;
+            continue;
+        }
+
+        if message.role != "system" {
+            pending_tool_use_ids.clear();
+        }
+        normalized.push(message);
+    }
+
+    *messages = normalized;
+    repaired
+}
+
+fn chat_message_content_as_text(content: &ChatMessageContent) -> String {
+    match content {
+        ChatMessageContent::Text(text) => text.clone(),
+        ChatMessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                ChatContentPart::Text { text } => Some(text.as_str()),
+                ChatContentPart::ImageUrl { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     if output.chars().count() <= max_chars {
         return output.to_owned();
@@ -6462,6 +6559,31 @@ private material
     }
 
     #[test]
+    fn repairs_orphaned_tool_results_without_rerunning_the_tool() {
+        let mut messages = vec![
+            ChatMessage::assistant_tool_calls(vec![ProviderToolCall {
+                id: "toolu_valid".to_owned(),
+                kind: "function".to_owned(),
+                function: xcoding_providers::ProviderFunctionCall {
+                    name: "read_file".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+                truncated: false,
+            }]),
+            ChatMessage::tool_result("toolu_valid", "valid output"),
+            ChatMessage::tool_result("toolu_stale", "already executed"),
+        ];
+
+        assert_eq!(repair_tool_transcript(&mut messages), 1);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(
+            chat_message_content_as_text(messages[2].content.as_ref().unwrap()),
+            "[Recovered tool output]\nalready executed"
+        );
+    }
+
+    #[test]
     fn circuit_recovers_after_the_configured_half_open_successes() {
         let candidate = ProviderCandidate {
             id: format!("circuit-test-{}", std::process::id()),
@@ -7143,6 +7265,24 @@ private material
             "a timed cooldown must yield one attempt rather than a dead turn"
         );
         clear_key_health(&borrowed);
+    }
+
+    #[test]
+    fn relay_channel_throttle_403_uses_unstable_cooldown() {
+        let provider_id = format!("key-channel-throttle-{}", std::process::id());
+        let candidate = key_candidate(&provider_id, "a", "sk-channel-throttle");
+        clear_key_health(&[&candidate]);
+        let error = http_status_error_with_body(
+            403,
+            r#"{"error":{"message":"this API key is not allowed to use channel \"kiro\" (allowed: [\"replay-aigateway\"] )"}}"#,
+        );
+
+        assert_eq!(
+            record_provider_key_failure(&candidate, &error),
+            Some(ProviderKeyBlock::Unstable)
+        );
+        assert!(!provider_key_is_available(&candidate));
+        clear_key_health(&[&candidate]);
     }
 
     #[test]
@@ -8469,6 +8609,18 @@ private material
         });
         assert!(!is_context_overflow_error(&error));
         assert!(provider_rejected_selected_model(&error));
+    }
+
+    #[test]
+    fn relay_channel_throttle_403_is_retryable_by_the_agent_loop() {
+        let error = AgentError::Provider(ProviderError::HttpStatus {
+            status: xcoding_providers::StatusCode::FORBIDDEN,
+            body: r#"{"error":{"message":"this API key is not allowed to use channel \"kiro\" (allowed: [\"replay-aigateway\"] )"}}"#
+                .to_owned(),
+            retry_after_secs: None,
+        });
+
+        assert!(is_retryable_provider_attempt(&error));
     }
 
     #[test]
