@@ -48,7 +48,7 @@ async function main() {
     assert.equal(presentStatus.has_api_key, true);
     assert.equal(presentStatus.ready, true);
     assert.equal(presentStatus.base_url, "https://example.test/v1");
-    assert.equal(presentStatus.key_hint, "...cdef");
+    assert.equal(presentStatus.key_hint, "sk-te********bcdef");
     assert.match(presentStatus.message, /OPENAI_API_KEY is set/);
 
     console.log("Provider status E2E passed.");
