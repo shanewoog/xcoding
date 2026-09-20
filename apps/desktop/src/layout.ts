@@ -88,7 +88,7 @@ const RIGHT_PANEL_WIDTH_KEY = "xcoding.rightPanelWidth";
 export const DEFAULT_RIGHT_PANEL_WIDTH = 420;
 export const MIN_RIGHT_PANEL_WIDTH = 280;
 // Keep enough room for the composer footer controls to stay on one line.
-const MIN_CHAT_WIDTH = 620;
+const MIN_CHAT_WIDTH = 1060;
 const MIN_SIDEBAR_WIDTH = 230;
 
 export function clampRightPanelWidth(

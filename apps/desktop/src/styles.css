@@ -183,7 +183,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   overflow: hidden;
 }
 .workbench.has-right-panel {
-  grid-template-columns: minmax(230px, 280px) minmax(620px, 1fr) var(--right-panel-width, 420px);
+  grid-template-columns: minmax(230px, 280px) minmax(1060px, 1fr) var(--right-panel-width, 420px);
 }
 
 .sessions-panel {
