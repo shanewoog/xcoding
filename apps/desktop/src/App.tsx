@@ -263,6 +263,13 @@ function primaryProviderKey(provider: CloudProviderConfig | null | undefined): s
   return (provider.api_key || "").trim();
 }
 
+function maskApiKeyForDisplay(key: string): string {
+  const chars = Array.from(key.trim());
+  if (chars.length === 0) return "";
+  if (chars.length <= 10) return "*".repeat(chars.length);
+  return `${chars.slice(0, 5).join("")}${"*".repeat(chars.length - 10)}${chars.slice(-5).join("")}`;
+}
+
 function providerCredentialsMissing(
   status: ProviderAuthStatus | null,
   provider: CloudProviderConfig | null | undefined,
@@ -2030,10 +2037,8 @@ export function App() {
   }, []);
 
   const maskApiKeyHint = useCallback((key: string): string | undefined => {
-    const trimmed = key.trim();
-    if (!trimmed) return undefined;
-    if (trimmed.length <= 4) return "****";
-    return `...${trimmed.slice(-4)}`;
+    const masked = maskApiKeyForDisplay(key);
+    return masked || undefined;
   }, []);
 
   const refreshModels = useCallback(async (options?: {
@@ -4659,9 +4664,15 @@ export function App() {
                     <div className="secret-field">
                       <input
                         id={`provider-api-key-${selectedProvider.id}`}
-                        type={showApiKey ? "text" : "password"}
-                        value={selectedProvider.api_key || ""}
+                        type="text"
+                        value={showApiKey
+                          ? selectedProvider.api_key || ""
+                          : maskApiKeyForDisplay(selectedProvider.api_key || "")}
                         onChange={(event) => updateProvider(selectedProvider.id, { api_key: event.target.value })}
+                        readOnly={!showApiKey && Boolean((selectedProvider.api_key || "").trim())}
+                        onFocus={() => {
+                          if (!(selectedProvider.api_key || "").trim()) setShowApiKey(true);
+                        }}
                         disabled={anySessionRunning || isSavingConfig}
                         spellCheck={false}
                         autoComplete="off"
@@ -4736,9 +4747,13 @@ export function App() {
                         />
                         <input
                           className="provider-key-secret"
-                          type={showApiKey ? "text" : "password"}
-                          value={keyEntry.key || ""}
+                          type="text"
+                          value={showApiKey ? keyEntry.key || "" : maskApiKeyForDisplay(keyEntry.key || "")}
                           onChange={(event) => updateProviderKey(selectedProvider.id, keyEntry.id, { key: event.target.value })}
+                          readOnly={!showApiKey && Boolean((keyEntry.key || "").trim())}
+                          onFocus={() => {
+                            if (!(keyEntry.key || "").trim()) setShowApiKey(true);
+                          }}
                           disabled={anySessionRunning || isSavingConfig}
                           spellCheck={false}
                           autoComplete="off"
@@ -4832,6 +4847,13 @@ export function App() {
                       disabled={anySessionRunning || isSavingConfig}
                     >
                       {t(locale, "action.addApiKey")}
+                    </button>
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      onClick={() => setShowApiKey((current) => !current)}
+                    >
+                      {showApiKey ? t(locale, "action.hideKey") : t(locale, "action.showKey")}
                     </button>
                     <span className="provider-key-pool-hint">{t(locale, "help.apiKeyPool")}</span>
                   </div>

@@ -1164,11 +1164,15 @@ pub fn inspect_auth() -> ProviderAuthStatus {
 
 fn mask_api_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
-    if chars.len() <= 4 {
-        return "****".to_owned();
+    if chars.is_empty() {
+        return String::new();
     }
-    let suffix: String = chars[chars.len().saturating_sub(4)..].iter().collect();
-    format!("...{suffix}")
+    if chars.len() <= 10 {
+        return "*".repeat(chars.len());
+    }
+    let prefix: String = chars[..5].iter().collect();
+    let suffix: String = chars[chars.len() - 5..].iter().collect();
+    format!("{prefix}{}{}", "*".repeat(chars.len() - 10), suffix)
 }
 
 impl OpenAiCompatibleProvider {
@@ -3629,7 +3633,7 @@ mod tests {
     fn inspect_auth_reports_missing_key() {
         // Cannot safely clear process env for concurrent tests; assert shape via mask helper.
         assert_eq!(mask_api_key("abcd"), "****");
-        assert_eq!(mask_api_key("sk-1234567890"), "...7890");
+        assert_eq!(mask_api_key("sk-1234567890"), "sk-12***67890");
     }
 
     #[test]

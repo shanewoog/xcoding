@@ -347,6 +347,8 @@ async function main() {
   assert.ok(appSource.includes("function normalizeProviderApiKeys"), "App must normalize the provider key pool before saving");
   assert.ok(appSource.includes("provider-key-pool"), "provider editor should render a key pool");
   assert.ok(appSource.includes("provider-key-row"), "key pool should render one row per key");
+  assert.ok(appSource.includes("function maskApiKeyForDisplay"), "provider editor must mask API keys at both ends");
+  assert.ok(appSource.includes("readOnly={!showApiKey"), "masked API keys must not be edited as masked text");
   assert.ok(appSource.includes('t(locale, "action.addApiKey")'), "key pool needs an add-key action");
   assert.ok(appSource.includes('t(locale, "action.deleteApiKey")'), "key pool needs a remove-key action");
   assert.ok(appSource.includes('aria-label={t(locale, "field.keyWeight")}'), "weight input needs an accessible label");

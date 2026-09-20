@@ -524,8 +524,9 @@ pub struct ProviderKeyStatus {
     pub provider_name: String,
     pub key_id: String,
     pub label: String,
-    /// Masked tail such as `...ab12`, or `env` when the value comes from the
-    /// environment instead of the configuration file.
+    /// Masked key with the first and last five characters visible, or `env`
+    /// when the value comes from the environment instead of the configuration
+    /// file.
     pub key_hint: String,
     pub weight: u32,
     pub enabled: bool,

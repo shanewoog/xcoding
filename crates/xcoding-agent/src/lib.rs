@@ -358,18 +358,19 @@ fn api_key_fingerprint(api_key: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// Masked tail of a key, for operator-facing messages. Mirrors the provider
-/// crate's `mask_api_key` shape.
+/// Masked key for operator-facing messages. Keep the first and last five
+/// characters visible while hiding the middle.
 fn provider_key_hint(api_key: Option<&str>) -> String {
     let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
         return "env".to_owned();
     };
     let chars: Vec<char> = api_key.chars().collect();
-    if chars.len() <= 4 {
-        return "****".to_owned();
+    if chars.len() <= 10 {
+        return "*".repeat(chars.len());
     }
-    let suffix: String = chars[chars.len().saturating_sub(4)..].iter().collect();
-    format!("...{suffix}")
+    let prefix: String = chars[..5].iter().collect();
+    let suffix: String = chars[chars.len() - 5..].iter().collect();
+    format!("{prefix}{}{}", "*".repeat(chars.len() - 10), suffix)
 }
 
 fn provider_key_is_available(candidate: &ProviderCandidate) -> bool {
@@ -7423,7 +7424,7 @@ private material
         let candidate = key_candidate("pool", "second-account", "sk-live-abcdefgh1234");
         let label = candidate.display_label(true);
         assert!(label.contains("second-account"));
-        assert!(label.contains("...1234"));
+        assert!(label.contains("sk-li**********h1234"));
         assert!(!label.contains("sk-live-abcdefgh1234"));
         assert_eq!(candidate.display_label(false), "Pool");
         assert_eq!(provider_key_hint(None), "env");
@@ -7473,7 +7474,7 @@ private material
         assert_eq!(first.failure_count, 1);
         assert_eq!(first.success_count, 0);
         assert_eq!(first.weight, 3);
-        assert_eq!(first.key_hint, "...aaaa");
+        assert_eq!(first.key_hint, "sk-li***********-aaaa");
         assert!(!first.key_hint.contains("sk-live"));
         assert_eq!(first.provider_name, "Pool");
 
