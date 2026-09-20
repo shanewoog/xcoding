@@ -236,6 +236,7 @@ $releaseGitPaths = @(
   "tests/e2e/custom-command-allowlist.mjs",
   "tests/e2e/provider-auth-error.mjs",
   "tests/e2e/vision-delegate.mjs",
+  "apps/desktop/src/layout.ts",
   "tests/e2e/write-loop-agent.mjs",
   "tests/e2e/model-plan-agent.mjs",
   "tests/e2e/fixtures/model-plan-agent",
