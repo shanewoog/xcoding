@@ -200,6 +200,7 @@ $releaseGitPaths = @(
   "tests/e2e/running-cancel-agent.mjs",
   "tests/acceptance/run.mjs",
   "crates/xcoding-agent/src/lib.rs",
+  "crates/xcoding-server/src/main.rs",
   "crates/xcoding-core/src/lib.rs",
   "crates/xcoding-context/src/lib.rs",
   "crates/xcoding-store/Cargo.toml",

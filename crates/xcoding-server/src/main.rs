@@ -336,6 +336,7 @@ fn rpc_error_for_agent(error: AgentError) -> RpcError {
         AgentError::InvalidProviderToolCall(message) => RpcError::provider_error(message),
         AgentError::ToolCallLimit
         | AgentError::EmptyProviderResponse
+        | AgentError::ProviderBusyResponse(_)
         | AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
         | AgentError::ProviderFallbackExhausted(_)

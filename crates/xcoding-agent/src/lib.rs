@@ -109,6 +109,8 @@ pub enum AgentError {
     ProviderFallbackExhausted(String),
     #[error("model returned an empty response; please retry")]
     EmptyProviderResponse,
+    #[error("provider returned a transient busy response: {0}")]
+    ProviderBusyResponse(String),
     #[error("sensitive content is blocked from relay provider")]
     SensitiveDataBlocked,
     #[error("provider reported model `{reported}` instead of requested model `{requested}`")]
@@ -1478,7 +1480,8 @@ fn is_retryable_provider_attempt(error: &AgentError) -> bool {
     match error {
         AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
-        | AgentError::EmptyProviderResponse => true,
+        | AgentError::EmptyProviderResponse
+        | AgentError::ProviderBusyResponse(_) => true,
         AgentError::Provider(provider_error) => {
             // Context overflow needs history trimming, not a plain retry.
             if provider_error.is_context_overflow() {
@@ -1506,7 +1509,8 @@ fn visible_output_was_started(failure: &ProviderAttemptFailure) -> bool {
 fn stream_restart_discards_partial_output(error: &AgentError) -> bool {
     match error {
         AgentError::ProviderStreamFirstEventTimeout(_)
-        | AgentError::ProviderStreamIdleTimeout(_) => true,
+        | AgentError::ProviderStreamIdleTimeout(_)
+        | AgentError::ProviderBusyResponse(_) => true,
         AgentError::Provider(provider_error) => matches!(
             provider_error,
             ProviderError::StreamDisconnected(_) | ProviderError::Http(_)
@@ -2396,7 +2400,7 @@ impl<'a> AgentService<'a> {
                             }
                         }
                         refresh_token_budget(&mut attempt_messages, &request_budget);
-                        match self
+                        let attempt_result = self
                             .stream_provider_attempt(
                                 session,
                                 &provider,
@@ -2410,8 +2414,23 @@ impl<'a> AgentService<'a> {
                                 stream_idle_timeout_secs,
                                 on_event,
                             )
-                            .await
-                        {
+                            .await;
+                        let attempt_result = match attempt_result {
+                            Ok((content, tool_calls, _model_reported, ttft_ms, total_ms))
+                                if is_transient_provider_busy_response(&content, &tool_calls) =>
+                            {
+                                let output_chars = content.chars().count();
+                                Err(ProviderAttemptFailure {
+                                    error: AgentError::ProviderBusyResponse(content),
+                                    output_chars,
+                                    tool_calls: tool_calls.len(),
+                                    ttft_ms,
+                                    total_ms,
+                                })
+                            }
+                            other => other,
+                        };
+                        match attempt_result {
                             Ok((content, tool_calls, model_reported, ttft_ms, total_ms)) => {
                                 self.emit_model_call_with_reported(
                                     on_event,
@@ -4435,6 +4454,46 @@ struct RejectedToolCall {
     /// Why the call was rejected; becomes a `ToolError::InvalidArguments` when
     /// recorded. Kept as a string so this stays small enough to return by value.
     reason: String,
+}
+
+/// Some relays return a provider-capacity failure as a successful text answer
+/// instead of an HTTP 429/503. Treat only short, explicit retry notices as
+/// transient failures so ordinary answers discussing capacity are untouched.
+fn is_transient_provider_busy_response(content: &str, tool_calls: &[ProviderToolCall]) -> bool {
+    if !tool_calls.is_empty() {
+        return false;
+    }
+    let text = content.trim();
+    if text.is_empty() || text.chars().count() > 1_000 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    let busy_marker = [
+        "资源繁忙",
+        "暂无可用资源",
+        "请求量较大",
+        "no available resources",
+        "server is busy",
+        "temporarily unavailable",
+        "insufficient capacity",
+        "capacity exceeded",
+        "rate limit",
+        "too many requests",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let retry_marker = [
+        "稍后重试",
+        "请稍后",
+        "切换至其他模型",
+        "try again",
+        "retry later",
+        "switch to another model",
+        "another model",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    busy_marker && retry_marker
 }
 
 /// A provider tool call suitable for replay in the assistant history.
@@ -8890,5 +8949,35 @@ private material
         };
         assert!(visible_output_was_started(&failure));
         assert!(!stream_restart_discards_partial_output(&failure.error));
+    }
+
+    #[test]
+    fn provider_busy_notice_is_classified_as_retryable() {
+        let notice = "资源繁忙通知：当前模型 [deepseek-v4-flash] 请求量较大，暂无可用资源处理您的请求。请稍后重试，或切换至其他模型。（您的IP：154.219.117.63）";
+        assert!(is_transient_provider_busy_response(notice, &[]));
+
+        let error = AgentError::ProviderBusyResponse(notice.to_owned());
+        assert!(is_retryable_provider_attempt(&error));
+        assert!(stream_restart_discards_partial_output(&error));
+    }
+
+    #[test]
+    fn provider_busy_notice_detection_avoids_normal_answers_and_tool_calls() {
+        assert!(!is_transient_provider_busy_response(
+            "资源繁忙通常表示服务端容量不足，但我可以继续解释它的原理。",
+            &[]
+        ));
+        assert!(!is_transient_provider_busy_response(
+            "The server is busy; try again later.",
+            &[ProviderToolCall {
+                id: "call_1".to_owned(),
+                kind: "function".to_owned(),
+                function: xcoding_providers::ProviderFunctionCall {
+                    name: "read_file".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+                truncated: false,
+            }]
+        ));
     }
 }
