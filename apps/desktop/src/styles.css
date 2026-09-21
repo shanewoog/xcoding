@@ -178,12 +178,12 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   background: var(--bg);
   color: var(--text);
   display: grid;
-  grid-template-columns: minmax(230px, 280px) minmax(1060px, 1fr);
+  grid-template-columns: 280px minmax(1060px, 1fr);
   height: 100vh;
   overflow: hidden;
 }
 .workbench.has-right-panel {
-  grid-template-columns: minmax(230px, 280px) minmax(1060px, 1fr) var(--right-panel-width, 420px);
+  grid-template-columns: 280px minmax(1060px, 1fr) var(--right-panel-width, 420px);
 }
 
 .sessions-panel {
@@ -1084,8 +1084,8 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 .activity.policy-conflict { border-color: var(--amber); }
 
 @media (max-width: 920px) {
-  .workbench { grid-template-columns: 220px minmax(1060px, 1fr); }
-  .workbench.has-right-panel { grid-template-columns: 200px minmax(1060px, 1fr) minmax(240px, var(--right-panel-width, 300px)); }
+  .workbench { grid-template-columns: 280px minmax(1060px, 1fr); }
+  .workbench.has-right-panel { grid-template-columns: 280px minmax(1060px, 1fr) minmax(240px, var(--right-panel-width, 300px)); }
 }
 
 @media (max-width: 620px) {
