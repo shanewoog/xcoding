@@ -298,7 +298,7 @@ impl ProviderError {
                 // Only a different provider (or a proxy) can.
                 matches!(
                     status.as_u16(),
-                    400 | 401 | 404 | 408 | 409 | 429 | 500 | 502 | 503 | 504
+                    400 | 401 | 404 | 408 | 409 | 429 | 500 | 502 | 503 | 504 | 522 | 525
                 )
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
@@ -3354,6 +3354,22 @@ mod tests {
             ProviderError::HttpStatus {
                 status: StatusCode::BAD_REQUEST,
                 body: "bad request".to_owned(),
+                retry_after_secs: None,
+            }
+            .is_retryable()
+        );
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::from_u16(522).unwrap(),
+                body: "error code: 522".to_owned(),
+                retry_after_secs: None,
+            }
+            .is_retryable()
+        );
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::from_u16(525).unwrap(),
+                body: "error code: 525".to_owned(),
                 retry_after_secs: None,
             }
             .is_retryable()
