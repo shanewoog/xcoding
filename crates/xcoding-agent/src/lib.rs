@@ -18,13 +18,13 @@ use xcoding_protocol::{
     ChatParams, ChatResult, CloudProviderConfig, ContextCompaction, LocalMemory,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_TOOL_LIMIT, MAX_LOCAL_MEMORY_CHARS,
     MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole,
-    ModelRoute, ModelRouteStatus, PlanStep, PlanStepStatus, ProviderApiKey,
+    ModelCapabilities, ModelRoute, ModelRouteStatus, PlanStep, PlanStepStatus, ProviderApiKey,
     ProviderKeyStatus, ProviderTrustLevel, ProviderWireApi, ResolveActionParams,
     ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session,
     SessionEvent, SessionStatus, ToolCall, ToolName, UserConfig,
 };
 #[cfg(test)]
-use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_STEPS, ModelCapabilities};
+use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_STEPS};
 use xcoding_providers::{
     ChatContentPart, ChatMessage, ChatMessageContent, OpenAiCompatibleProvider, ProviderError,
     ProviderEvent, ProviderToolCall, ToolDefinition, load_user_config, normalize_base_url,
@@ -53,6 +53,10 @@ const MAX_COMPACTION_MESSAGE_CHARS: usize = 4_000;
 /// Cap for one delegate image description, so a runaway delegate response
 /// cannot push the session request past the model window.
 const MAX_VISION_DESCRIPTION_CHARS: usize = 8_000;
+/// Total characters historical image descriptions may add to one request. The
+/// attachment the user just sent is never charged against this, so its
+/// description remains complete while accumulated history stays bounded.
+const MAX_HISTORICAL_VISION_DESCRIPTION_CHARS: usize = 24_000;
 /// Cap for one image description inside the compaction or memory prompt. Those
 /// prompts summarize many messages at once, so each attachment gets far less
 /// room than it does in the live request.
@@ -2118,6 +2122,7 @@ impl<'a> AgentService<'a> {
         // accepts images natively or needs delegation.
         let vision_delegate = resolve_vision_delegate(&user_config, &session.model);
         let mut vision_route_cache = VisionRouteCache::new();
+        let mut vision_descriptions_applied = false;
         // Build messages from stored history with original images intact.
         for message in history.iter().skip(compacted_message_count) {
             messages.push(provider_message_from_stored(message));
@@ -2205,6 +2210,8 @@ impl<'a> AgentService<'a> {
             // The already-recorded output is preserved as text; the tool is
             // never executed again.
             let mut tool_transcript_repaired = repair_tool_transcript(&mut messages) > 0;
+            let configured_capability =
+                model_vision_capability(&session.model, &user_config.model_capabilities);
             let (content, tool_calls, completed_candidate_index) = {
                 let mut failures = Vec::new();
                 let mut completed = None;
@@ -2342,11 +2349,17 @@ impl<'a> AgentService<'a> {
                         return Err(AgentError::SensitiveDataBlocked);
                     }
                     let mut retry_attempt = 0u32;
+                    let mut route_status = match configured_capability {
+                        Some(true) => VisionRouteStatus::NativeSupported,
+                        Some(false) => VisionRouteStatus::NativeUnsupported,
+                        None => {
+                            vision_route_cache.status_or_load(candidate, &session.model, self.core)
+                        }
+                    };
                     loop {
                         let attempt = retry_attempt + 1;
                         let mut attempt_messages = messages.clone();
                         // Transform messages based on vision route status.
-                        let route_status = vision_route_cache.status_or_load(candidate, &session.model, self.core);
                         let mut attempt_has_new_images = false;
                         let mut attempt_new_image_keys: Vec<String> = Vec::new();
                         match route_status {
@@ -2374,29 +2387,105 @@ impl<'a> AgentService<'a> {
                             }
                             VisionRouteStatus::NativeUnsupported => {
                                 let mut transformed = Vec::with_capacity(attempt_messages.len());
-                                for msg in attempt_messages.iter() {
+                                let latest_user_index = attempt_messages
+                                    .iter()
+                                    .rposition(|message| message.role == "user");
+                                let mut historical_description_chars = 0usize;
+                                let mut historical_description_truncated = false;
+                                let mut described_image_count = 0usize;
+                                for (message_index, msg) in attempt_messages.iter().enumerate() {
                                     if msg.role == "user" && chat_message_has_images(msg) {
                                         let text = extract_user_text(msg);
                                         let images = extract_images_from_message(msg);
-                                        let key = if images.is_empty() { String::new() } else { vision_cache_key(&images) };
-                                        if let Some(desc) = cached_vision_description(&key) {
-                                            transformed.push(ChatMessage::user(message_with_vision_description(&text, &desc.delegate_model, &desc.description)));
-                                        } else if let Some(ref delegate) = vision_delegate {
-                                            match self.describe_images(session, delegate, &text, &images, false, on_event).await {
+                                        let historical = latest_user_index != Some(message_index);
+                                        let converted = if let Some(ref delegate) = vision_delegate {
+                                            match self
+                                                .describe_images(
+                                                    session,
+                                                    delegate,
+                                                    &text,
+                                                    &images,
+                                                    historical,
+                                                    on_event,
+                                                )
+                                                .await
+                                            {
                                                 Ok(desc) => {
-                                                    let clipped = truncate_summary_text(desc.description.trim(), MAX_VISION_DESCRIPTION_CHARS);
-                                                    transformed.push(ChatMessage::user(message_with_vision_description(&text, desc.attribution(&delegate.model), &clipped)));
+                                                    described_image_count = described_image_count
+                                                        .saturating_add(images.len());
+                                                    let remaining = if historical {
+                                                        MAX_HISTORICAL_VISION_DESCRIPTION_CHARS
+                                                            .saturating_sub(
+                                                                historical_description_chars,
+                                                            )
+                                                    } else {
+                                                        MAX_VISION_DESCRIPTION_CHARS
+                                                    };
+                                                    if historical && remaining == 0 {
+                                                        historical_description_truncated = true;
+                                                        ChatMessage::user(
+                                                            message_with_vision_omission(
+                                                                &text,
+                                                                images.len(),
+                                                            ),
+                                                        )
+                                                    } else {
+                                                        let source = desc.description.trim();
+                                                        let clipped = truncate_summary_text(
+                                                            source,
+                                                            remaining
+                                                                .min(MAX_VISION_DESCRIPTION_CHARS),
+                                                        );
+                                                        if historical {
+                                                            if clipped.chars().count()
+                                                                < source.chars().count()
+                                                            {
+                                                                historical_description_truncated =
+                                                                    true;
+                                                            }
+                                                            historical_description_chars =
+                                                                historical_description_chars
+                                                                    .saturating_add(
+                                                                        clipped.chars().count(),
+                                                                    );
+                                                        }
+                                                        ChatMessage::user(
+                                                            message_with_vision_description(
+                                                                &text,
+                                                                desc.attribution(&delegate.model),
+                                                                &clipped,
+                                                            ),
+                                                        )
+                                                    }
                                                 }
-                                                Err(_) => transformed.push(ChatMessage::user(message_with_vision_failure(&text, images.len()))),
+                                                Err(_) => ChatMessage::user(
+                                                    message_with_vision_failure(&text, images.len()),
+                                                ),
                                             }
                                         } else {
-                                            transformed.push(ChatMessage::user(message_with_vision_failure(&text, images.len())));
-                                        }
+                                            ChatMessage::user(message_with_vision_failure(
+                                                &text,
+                                                images.len(),
+                                            ))
+                                        };
+                                        transformed.push(converted);
                                     } else {
                                         transformed.push(msg.clone());
                                     }
                                 }
                                 attempt_messages = transformed;
+                                if !vision_descriptions_applied && described_image_count > 0 {
+                                    self.emit(
+                                        on_event,
+                                        SessionEvent::VisionDescriptionsApplied {
+                                            session_id: session.id,
+                                            image_count: described_image_count,
+                                            historical_chars: historical_description_chars,
+                                            truncated: historical_description_truncated,
+                                        },
+                                    );
+                                    vision_descriptions_applied = true;
+                                }
                             }
                         }
                         refresh_token_budget(&mut attempt_messages, &request_budget);
@@ -2432,6 +2521,36 @@ impl<'a> AgentService<'a> {
                         };
                         match attempt_result {
                             Ok((content, tool_calls, model_reported, ttft_ms, total_ms)) => {
+                                if attempt_has_new_images
+                                    && response_refuses_vision(&content, &tool_calls)
+                                {
+                                    route_status = VisionRouteStatus::NativeUnsupported;
+                                    vision_route_cache.mark_native_unsupported(
+                                        candidate,
+                                        &session.model,
+                                        self.core,
+                                    );
+                                    self.emit(
+                                        on_event,
+                                        SessionEvent::StreamReset {
+                                            session_id: session.id,
+                                            discarded_chars: content.chars().count(),
+                                            reason: "Model cannot read the attached image; retrying with vision delegate."
+                                                .to_owned(),
+                                        },
+                                    );
+                                    self.emit(
+                                        on_event,
+                                        SessionEvent::Retrying {
+                                            session_id: session.id,
+                                            attempt,
+                                            max_attempts: max_provider_attempts,
+                                            message: "Model cannot read the attached image; describing with delegate and retrying."
+                                                .to_owned(),
+                                        },
+                                    );
+                                    continue;
+                                }
                                 self.emit_model_call_with_reported(
                                     on_event,
                                     session,
@@ -2453,7 +2572,7 @@ impl<'a> AgentService<'a> {
                                 record_provider_success(candidate, circuit_settings);
                                 record_provider_key_success(candidate);
                                 // Mark route as natively supporting vision if images were sent.
-                                if attempt_has_new_images {
+                                if configured_capability == Some(true) && attempt_has_new_images {
                                     vision_route_cache.mark_native_supported(candidate, &session.model, &attempt_new_image_keys, self.core);
                                 }
                                 completed = Some((content, tool_calls, candidate_index));
@@ -2481,6 +2600,7 @@ impl<'a> AgentService<'a> {
                                 // Vision-unsupported: mark route and retry with delegate.
                                 if let AgentError::Provider(ref provider_err) = failure.error {
                                     if provider_err.is_vision_unsupported() {
+                                        route_status = VisionRouteStatus::NativeUnsupported;
                                         vision_route_cache.mark_native_unsupported(candidate, &session.model, self.core);
                                         self.emit(on_event, SessionEvent::Retrying {
                                             session_id: session.id,
@@ -5731,16 +5851,18 @@ fn store_vision_description(key: &str, delegate_model: &str, description: &str) 
     );
 }
 
-/// Whether `model` can accept image parts directly. An explicit
-/// `model_capabilities` entry always wins; otherwise well-known vision families
-/// are recognized so existing setups keep working without configuration.
-#[cfg(test)]
-fn model_supports_vision(model: &str, capabilities: &BTreeMap<String, ModelCapabilities>) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
+/// Resolves known image-input capability without probing the provider. Explicit
+/// configuration wins, followed by stable model-family knowledge; only unknown
+/// models fall back to runtime probing and the persisted route cache.
+fn model_vision_capability(
+    model: &str,
+    capabilities: &BTreeMap<String, ModelCapabilities>,
+) -> Option<bool> {
+    let normalized = normalized_model_id(model);
     if let Some(capability) = capabilities.get(&normalized) {
-        return capability.supports_vision;
+        return Some(capability.supports_vision);
     }
-    normalized.contains("gpt-4o")
+    if normalized.contains("gpt-4o")
         || normalized.contains("gpt-4.1")
         || normalized.contains("gpt-4-turbo")
         || normalized.contains("gpt-5")
@@ -5750,6 +5872,41 @@ fn model_supports_vision(model: &str, capabilities: &BTreeMap<String, ModelCapab
         || normalized.contains("grok-2-vision")
         || normalized.contains("-vl")
         || normalized.contains("vision")
+    {
+        return Some(true);
+    }
+    if normalized.contains("deepseek")
+        || normalized.contains("kimi-k2")
+        || normalized.starts_with("llama-")
+    {
+        return Some(false);
+    }
+    None
+}
+
+/// Detects an HTTP-200 answer whose only content is an explicit refusal to
+/// inspect the attachment. Tool-calling answers are never treated as refusals.
+fn response_refuses_vision(content: &str, tool_calls: &[ProviderToolCall]) -> bool {
+    if !tool_calls.is_empty() {
+        return false;
+    }
+    let opening: String = content
+        .chars()
+        .take(300)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "读不出图里的信息",
+        "看不到图片",
+        "无法读取图片",
+        "cannot read the image",
+        "can't read the image",
+        "cannot see the image",
+        "unable to read the image",
+        "only receive base64",
+    ]
+    .iter()
+    .any(|marker| opening.contains(marker))
 }
 
 /// Builds the delegate for this run, or `None` when delegation does not apply:
@@ -5893,7 +6050,6 @@ fn message_with_vision_description(text: &str, attribution: &str, description: &
 /// Text used when an earlier attachment was described but the per-request
 /// budget for historical descriptions is already spent, so the session model
 /// learns the image exists instead of seeing nothing.
-#[cfg(test)]
 fn message_with_vision_omission(text: &str, image_count: usize) -> String {
     let note = format!(
         "[{image_count} image attachment(s) from an earlier turn were described before, but the description was omitted here to stay inside the context budget. Ask the user to resend the image if you need it.]"
@@ -8727,24 +8883,28 @@ private material
     }
 
     #[test]
-    fn known_vision_families_are_detected_without_configuration() {
+    fn model_vision_capability_has_explicit_known_and_unknown_states() {
         let capabilities = BTreeMap::new();
         for model in ["gpt-4o", "GPT-4.1-mini", "claude-sonnet-4", "qwen2.5-vl-7b"] {
             assert!(
-                model_supports_vision(model, &capabilities),
+                model_vision_capability(model, &capabilities) == Some(true),
                 "{model} should be treated as vision capable"
             );
         }
         for model in ["deepseek-chat", "kimi-k2", "llama-3.3-70b"] {
             assert!(
-                !model_supports_vision(model, &capabilities),
+                model_vision_capability(model, &capabilities) == Some(false),
                 "{model} should not be treated as vision capable"
             );
         }
+        assert_eq!(
+            model_vision_capability("fixture-model", &capabilities),
+            None
+        );
     }
 
     #[test]
-    fn explicit_capability_overrides_the_family_heuristic() {
+    fn explicit_capability_overrides_the_family_heuristic_with_normalized_keys() {
         let mut capabilities = BTreeMap::new();
         // A proxy may expose a vision-named model that cannot read images.
         capabilities.insert(
@@ -8759,8 +8919,54 @@ private material
                 supports_vision: true,
             },
         );
-        assert!(!model_supports_vision("gpt-4o", &capabilities));
-        assert!(model_supports_vision("deepseek-chat", &capabilities));
+        assert_eq!(
+            model_vision_capability(" GPT-4O ", &capabilities),
+            Some(false)
+        );
+        assert_eq!(
+            model_vision_capability("DEEPSEEK-CHAT", &capabilities),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn explicit_and_known_capability_ignore_unknown_route_cache_state() {
+        let capabilities = BTreeMap::new();
+        assert_eq!(
+            model_vision_capability("gpt-4o-mock", &capabilities),
+            Some(true)
+        );
+        assert_eq!(
+            model_vision_capability("deepseek-v4.1-flash", &capabilities),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn vision_refusal_detection_ignores_long_answers_and_tool_calls() {
+        assert!(response_refuses_vision("读不出图里的信息。", &[]));
+        assert!(response_refuses_vision("I cannot see the image.", &[]));
+        assert!(response_refuses_vision(
+            "I can only receive base64 input.",
+            &[]
+        ));
+        let long_answer = format!(
+            "Earlier context. {} I cannot see the image.",
+            "x".repeat(300)
+        );
+        assert!(!response_refuses_vision(&long_answer, &[]));
+        assert!(!response_refuses_vision(
+            "I cannot see the image.",
+            &[ProviderToolCall {
+                id: "call_1".to_owned(),
+                kind: "function".to_owned(),
+                function: xcoding_providers::ProviderFunctionCall {
+                    name: "read_file".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+                truncated: false,
+            }],
+        ));
     }
 
     #[test]

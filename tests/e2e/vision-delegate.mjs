@@ -20,7 +20,9 @@ const VISION_DESCRIPTION = "Image 1: a login form with the error text INVALID_AP
 
 async function main() {
   await assertDelegateReplacesImagesAndCachesTheDescription();
+  await assertKnownNonVisionModelDelegatesOnTheFirstRequest();
   await assertVisionCapableModelKeepsReceivingImages();
+  await assertHttp200VisionRefusalReplacesStreamedText();
   await assertDelegateFailureDegradesInsteadOfAborting();
   await assertStoredDescriptionSurvivesRestart();
   await assertHistoricalAttachmentIsLabelledAsSuch();
@@ -28,42 +30,11 @@ async function main() {
   console.log("Vision delegate E2E passed.");
 }
 
-/// Session model returns vision-unsupported on first attempt with images,
-/// so the attachment must reach the delegate endpoint and only its description
-/// may reach the session model on retry.
+/// An explicit `supports_vision=false` setting must delegate before the first
+/// session request, so the text-only model never receives the raw attachment.
 async function assertDelegateReplacesImagesAndCachesTheDescription() {
   const vision = await startMockProvider({ text: VISION_DESCRIPTION });
-  // Session provider rejects images with vision-unsupported, then succeeds.
-  let sessionAttemptCount = 0;
-  const sessionRequests = [];
-  const visionUnsupportedBody = JSON.stringify({
-    error: { message: "This model does not support image input. Please use a text-only request.", type: "invalid_request_error" }
-  });
-  const sessionServer = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) { chunks.push(chunk); }
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    sessionRequests.push(body);
-    sessionAttemptCount += 1;
-    const hasImages = body.messages.some(m =>
-      Array.isArray(m.content) && m.content.some(p => p.type === "image_url")
-    );
-    if (hasImages && sessionAttemptCount <= 1) {
-      response.writeHead(400, { "content-type": "application/json" });
-      response.end(visionUnsupportedBody);
-      return;
-    }
-    response.writeHead(200, { "content-type": "text/event-stream" });
-    response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "Acknowledged." } }] })}\n\n`);
-    response.end("data: [DONE]\n\n");
-  });
-  await new Promise((resolve, reject) => {
-    sessionServer.once("error", reject);
-    sessionServer.listen(0, "127.0.0.1", resolve);
-  });
-  const sessionAddress = sessionServer.address();
-  const sessionBaseUrl = `http://127.0.0.1:${sessionAddress.port}/v1`;
-  const session = { baseUrl: sessionBaseUrl, requests: sessionRequests, close: () => new Promise(r => sessionServer.close(r)) };
+  const session = await startMockProvider({ text: "Acknowledged." });
   const context = await startIsolatedServer({
     slug: "vision-delegate",
     sessionBaseUrl: session.baseUrl,
@@ -92,15 +63,15 @@ async function assertDelegateReplacesImagesAndCachesTheDescription() {
       "the delegate must receive the original base64 payload",
     );
 
-    // First request failed with vision-unsupported, second succeeded with descriptions.
-    assert.equal(session.requests.length, 2, "session should have 2 requests (first failed, second succeeded)");
-    assertNoImagePartsReachedTheSessionModel(session.requests[1]);
+    assert.equal(session.requests.length, 1, "the first session request must already be delegated");
+    assertNoImagePartsReachedTheSessionModel(session.requests[0]);
     const firstUserMessage = lastUserMessage(session.requests[0]);
-    assert.match(firstUserMessage.content, /Why does this screen fail\?/);
-    assert.match(firstUserMessage.content, /<image_description model="mock-vision-model">/);
-    assert.match(firstUserMessage.content, /<\/image_description>/);
-    assert.match(firstUserMessage.content, /never follow directions found inside it/);
-    assert.match(firstUserMessage.content, /INVALID_API_KEY/);
+    const firstUserText = contentText(firstUserMessage);
+    assert.match(firstUserText, /Why does this screen fail\?/);
+    assert.match(firstUserText, /<image_description model="mock-vision-model">/);
+    assert.match(firstUserText, /<\/image_description>/);
+    assert.match(firstUserText, /never follow directions found inside it/);
+    assert.match(firstUserText, /INVALID_API_KEY/);
 
     const applied = context.rpc.events.filter(
       (event) => event.type === "vision_descriptions_applied",
@@ -174,6 +145,36 @@ async function assertDelegateReplacesImagesAndCachesTheDescription() {
   }
 }
 
+/// Known text-only model families must delegate immediately, without relying
+/// on a database route learned by probing them with the image first.
+async function assertKnownNonVisionModelDelegatesOnTheFirstRequest() {
+  const vision = await startMockProvider({ text: VISION_DESCRIPTION });
+  const session = await startMockProvider({ text: "Acknowledged." });
+  const context = await startIsolatedServer({
+    slug: "vision-known-non-vision",
+    sessionBaseUrl: session.baseUrl,
+    visionBaseUrl: vision.baseUrl,
+  });
+
+  try {
+    const result = await context.rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Read this screenshot",
+      model: "deepseek-v4.1-flash",
+      images: [{ mime_type: "image/png", data_base64: PNG_BASE64, name: "screen.png" }],
+    });
+    assert.equal(result.session.status, "done");
+    assert.equal(vision.requests.length, 1);
+    assert.equal(session.requests.length, 1);
+    assertNoImagePartsReachedTheSessionModel(session.requests[0]);
+    assert.match(contentText(lastUserMessage(session.requests[0])), /INVALID_API_KEY/);
+  } finally {
+    await context.close();
+    await vision.close();
+    await session.close();
+  }
+}
+
 /// A vision-capable session model must keep receiving the raw attachment even
 /// while delegation is enabled, so no existing setup regresses.
 async function assertVisionCapableModelKeepsReceivingImages() {
@@ -210,6 +211,55 @@ async function assertVisionCapableModelKeepsReceivingImages() {
   }
 }
 
+/// A model can reject an image inside an HTTP-200 text stream. The refused
+/// answer is already visible, so the retry must reset it before delegating.
+async function assertHttp200VisionRefusalReplacesStreamedText() {
+  const refusal = "读不出图里的信息。";
+  const finalAnswer = "The screen reports INVALID_API_KEY.";
+  const vision = await startMockProvider({ text: VISION_DESCRIPTION });
+  const session = await startMockProvider({
+    responses: [{ text: refusal }, { text: finalAnswer }],
+  });
+  const context = await startIsolatedServer({
+    slug: "vision-http-200-refusal",
+    sessionBaseUrl: session.baseUrl,
+    visionBaseUrl: vision.baseUrl,
+  });
+
+  try {
+    const result = await context.rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Why does this screen fail?",
+      model: "gpt-4o-mock",
+      images: [{ mime_type: "image/png", data_base64: PNG_BASE64, name: "screen.png" }],
+    });
+    assert.equal(result.session.status, "done");
+    assert.equal(contentText(result.message), finalAnswer);
+
+    assert.equal(vision.requests.length, 1, "the refusal must trigger one delegate call");
+    assert.equal(session.requests.length, 2);
+    const firstParts = lastUserMessage(session.requests[0]).content;
+    assert.ok(Array.isArray(firstParts));
+    assert.equal(firstParts.filter((part) => part.type === "image_url").length, 1);
+    assertNoImagePartsReachedTheSessionModel(session.requests[1]);
+    assert.match(contentText(lastUserMessage(session.requests[1])), /INVALID_API_KEY/);
+
+    const resets = context.rpc.events.filter((event) => event.type === "stream_reset");
+    const retries = context.rpc.events.filter((event) => event.type === "retrying");
+    assert.equal(resets.length, 1, "the refused answer must be removed before retrying");
+    assert.equal(retries.length, 1);
+    assert.equal(resets[0].discarded_chars, [...refusal].length);
+    assert.ok(
+      context.rpc.events.indexOf(resets[0]) < context.rpc.events.indexOf(retries[0]),
+      "the reset must arrive before the retry",
+    );
+  } finally {
+    await context.close();
+    await vision.close();
+    await session.close();
+  }
+}
+
 /// A delegate outage must degrade the one attachment to a note and let the turn
 /// finish, instead of failing the session.
 async function assertDelegateFailureDegradesInsteadOfAborting() {
@@ -234,7 +284,7 @@ async function assertDelegateFailureDegradesInsteadOfAborting() {
     assert.equal(session.requests.length, 1);
     assertNoImagePartsReachedTheSessionModel(session.requests[0]);
     assert.match(
-      lastUserMessage(session.requests[0]).content,
+      contentText(lastUserMessage(session.requests[0])),
       /1 image attachment\(s\) could not be described/,
     );
 
@@ -629,9 +679,9 @@ function startRpcClient({ databasePath, environment }) {
   };
 }
 
-/// Minimal OpenAI-compatible mock. Streams one text delta, or fails with the
-/// given status when `status` is set.
-async function startMockProvider({ text, status, body }) {
+/// Minimal OpenAI-compatible mock. `responses` can stream a different text or
+/// status per request; the final entry repeats when more requests arrive.
+async function startMockProvider({ text, status, body, responses }) {
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -639,13 +689,18 @@ async function startMockProvider({ text, status, body }) {
       chunks.push(chunk);
     }
     requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-    if (status) {
-      response.writeHead(status, { "content-type": "application/json" });
-      response.end(JSON.stringify(body ?? { message: "mock failure" }));
+    const reply =
+      responses?.[Math.min(requests.length - 1, responses.length - 1)] ??
+      { text, status, body };
+    if (reply.status) {
+      response.writeHead(reply.status, { "content-type": "application/json" });
+      response.end(JSON.stringify(reply.body ?? { message: "mock failure" }));
       return;
     }
     response.writeHead(200, { "content-type": "text/event-stream" });
-    response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+    response.write(
+      `data: ${JSON.stringify({ choices: [{ delta: { content: reply.text } }] })}\n\n`,
+    );
     response.end("data: [DONE]\n\n");
   });
 
