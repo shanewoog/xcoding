@@ -213,7 +213,7 @@ export interface UserConfig {
   /** Technical provider id used by sessions (currently always openai-compatible). */
   provider: string;
   model: string;
-  /** Reasoning effort for compatible models: none | low | medium | high. */
+  /** Reasoning effort for compatible models: minimal | low | medium | high | xhigh | max | ultra. */
   reasoning_effort?: string;
   /** Retries after the initial failed request for one provider before XCoding tries a backup provider. */
   max_provider_retries?: number;

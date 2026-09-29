@@ -91,6 +91,22 @@ async function main() {
   assert.ok(i18nSource.includes("export function saveLocale"), "i18n.ts missing saveLocale");
   assert.ok(i18nSource.includes('"lang.label"'), "i18n.ts missing lang.label");
   assert.ok(i18nSource.includes("简体中文"), "i18n.ts missing Chinese labels");
+  const reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+  const reasoningEffortList = reasoningEfforts.map((effort) => `"${effort}"`).join(", ");
+  assert.ok(
+    appSource.includes(`const REASONING_EFFORTS = [${reasoningEffortList}] as const;`),
+    "the reasoning selector must expose all seven supported effort levels",
+  );
+  assert.ok(appSource.includes("REASONING_EFFORTS.map"), "the reasoning selector must render every supported effort level");
+  assert.ok(!i18nSource.includes('"reasoning.none"'), "the unsupported none reasoning level must not be exposed");
+  for (const effort of reasoningEfforts) {
+    const label = `"reasoning.${effort}": "${effort}"`;
+    assert.equal(
+      i18nSource.split(label).length - 1,
+      2,
+      `reasoning effort ${effort} must use the same value label in both locales`,
+    );
+  }
   assert.ok(appSource.includes("const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)"), "diagnostics popover should be closed by default");
   assert.ok(appSource.includes("settings-diagnostics-menu"), "settings header should contain a diagnostics trigger");
   assert.ok(appSource.includes("aria-expanded={diagnosticsOpen}"), "diagnostics trigger should expose its expanded state");

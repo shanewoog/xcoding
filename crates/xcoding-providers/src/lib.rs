@@ -288,7 +288,7 @@ impl ProviderError {
                 if self.is_transient_channel_rejection() {
                     return true;
                 }
-                // Context overflow (400 + overflow body) needs history trimming, not a plain resend.
+                // Context overflow (400/413 + overflow body) needs history trimming, not a plain resend.
                 if self.is_context_overflow() {
                     return false;
                 }
@@ -316,10 +316,13 @@ impl ProviderError {
     pub fn is_context_overflow(&self) -> bool {
         match self {
             Self::HttpStatus { status, body, .. } => {
-                *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body)
+                matches!(
+                    *status,
+                    StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+                ) && body_indicates_context_overflow(body)
             }
             // Responses API reports some request rejections as a successful SSE
-            // connection followed by `response.failed`, rather than HTTP 400.
+            // connection followed by `response.failed`, rather than an HTTP error.
             Self::InvalidResponse(message) => body_indicates_context_overflow(message),
             _ => false,
         }
@@ -580,9 +583,14 @@ fn format_http_status_message(status: &StatusCode, body: &str) -> String {
             truncated
         );
     }
-    if *status == StatusCode::BAD_REQUEST && body_indicates_context_overflow(body) {
+    if matches!(
+        *status,
+        StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+    ) && body_indicates_context_overflow(body)
+    {
         return format!(
-            "Context window exceeded (HTTP 400): conversation history is too long for this model. History will be trimmed before retrying. Provider response: {}",
+            "Context window exceeded (HTTP {}): conversation history is too long for this model. History will be trimmed before retrying. Provider response: {}",
+            status.as_u16(),
             truncated
         );
     }
@@ -3596,6 +3604,23 @@ mod tests {
     }
 
     #[test]
+    fn payload_too_large_context_length_exceeded_is_context_overflow() {
+        let overflow = ProviderError::HttpStatus {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            body: r#"{"error":{"message":"The request exceeds this model route context limit. Reduce the request or select a model with a larger verified context window.","type":"invalid_request_error","code":"context_length_exceeded"}}"#.to_owned(),
+            retry_after_secs: None,
+        };
+
+        assert!(overflow.is_context_overflow());
+        assert!(!overflow.is_retryable());
+
+        let message = overflow.to_string();
+        assert!(message.contains("Context window exceeded (HTTP 413)"));
+        assert!(!message.contains("OPENAI_API_KEY"));
+        assert!(!message.contains("XCODING_OPENAI_BASE_URL"));
+    }
+
+    #[test]
     fn ordinary_bad_request_is_not_context_overflow() {
         assert!(
             !ProviderError::HttpStatus {
@@ -3605,7 +3630,7 @@ mod tests {
             }
             .is_context_overflow()
         );
-        // Same body, wrong status: only 400 carries the overflow contract.
+        // Same body, wrong status: only 400/413 carry the overflow contract.
         assert!(
             !ProviderError::HttpStatus {
                 status: StatusCode::SERVICE_UNAVAILABLE,

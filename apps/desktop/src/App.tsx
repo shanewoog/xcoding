@@ -147,7 +147,7 @@ const DEFAULT_VISION_TIMEOUT_SECS = 30;
 const MIN_VISION_TIMEOUT_SECS = 5;
 const MAX_VISION_TIMEOUT_SECS = 300;
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
-const REASONING_EFFORTS = ["none", "low", "medium", "high"] as const;
+const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 function normalizeReasoningEffort(value: string | undefined | null): ReasoningEffort {
@@ -2368,7 +2368,6 @@ export function App() {
       setContextCompactionSummary(latestCompaction?.summary ?? "");
       const liveStream = streamedTextBySessionRef.current.get(sessionId) ?? "";
       setStreamedText(liveStream);
-      setPlan(latestPlan(detail.events));
       let activityEvents = detail.events;
       if (detail.session.status === "running" || detail.session.status === "need_user") {
         let previousRunEnd = -1;
@@ -2381,6 +2380,7 @@ export function App() {
         }
         activityEvents = detail.events.slice(previousRunEnd + 1);
       }
+      setPlan(latestPlan(activityEvents));
       setActivity(buildActivity(activityEvents, locale));
       setInlineActivityBySession((current) => ({ ...current, [sessionId]: buildInlineActivity(detail.events, locale) }));
       setPendingAction(pending);
@@ -3365,6 +3365,7 @@ export function App() {
             markSessionRunning(sid, true);
             setSessionRunStatus(sid, { startedAt: Date.now(), phase: "thinking" });
             if (touchesActive(sid)) {
+              if (!options?.steer) setPlan([]);
               commitStreamedAssistant(sid);
               setActivity([]);
               setPendingAction(null);

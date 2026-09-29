@@ -739,7 +739,7 @@ pub struct UserConfig {
     /// Model id used by sessions. Empty until the user picks one; there is no fallback default.
     #[serde(default)]
     pub model: String,
-    /// Reasoning effort for compatible models: none | low | medium | high.
+    /// Reasoning effort for compatible models: minimal | low | medium | high | xhigh | max | ultra.
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
     /// Retries after the initial failed request for one provider before trying a backup provider.

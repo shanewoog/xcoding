@@ -122,6 +122,19 @@ async function main() {
     appSource.includes('step.status === "done"'),
     "a step the model already marked done should render as done",
   );
+  const continuationStart = appSource.match(
+    /if \(touchesActive\(sid\)\) \{[\s\S]*?const localContent = encodeLocalUserContent/,
+  )?.[0] ?? "";
+  assert.ok(continuationStart, "continued turns should reset transient run state before appending the message");
+  assert.ok(
+    continuationStart.includes("if (!options?.steer) setPlan([]);"),
+    "a continued session must clear the previous turn's plan unless the message steers the active run",
+  );
+  assert.ok(
+    continuationStart.indexOf("if (!options?.steer) setPlan([]);") <
+      continuationStart.indexOf("setActivity([]);"),
+    "the stale plan must be cleared before current-turn activity renders",
+  );
   assert.ok(cssSource.includes("position: sticky"), "run status should stay visible while the conversation scrolls");
 
   // A new task is collapsed by default, but incoming stream updates must not
@@ -158,8 +171,22 @@ async function main() {
   );
   assert.match(
     appSource,
-    /setSessionRunStatus\(sid, \{ startedAt: Date\.now\(\), phase: "thinking" \}\);\s+if \(touchesActive\(sid\)\) \{\s+commitStreamedAssistant\(sid\);\s+setActivity\(\[\]\);/,
+    /setSessionRunStatus\(sid, \{ startedAt: Date\.now\(\), phase: "thinking" \}\);\s+if \(touchesActive\(sid\)\) \{\s+(?:if \(!options\?\.steer\) setPlan\(\[\]\);\s+)?commitStreamedAssistant\(sid\);\s+setActivity\(\[\]\);/,
     "continuing a session must clear stale activity from the previous cancelled run",
+  );
+  const hydrateSessionSource = appSource.match(/const hydrateSession = useCallback[\s\S]*?\r?\n  \}, \[locale\]\);/)?.[0] ?? "";
+  assert.ok(hydrateSessionSource, "hydrateSession should be available for session hydration checks");
+  assert.ok(
+    hydrateSessionSource.includes('if (detail.session.status === "running" || detail.session.status === "need_user")') &&
+      hydrateSessionSource.includes("activityEvents = detail.events.slice(previousRunEnd + 1)") &&
+      hydrateSessionSource.includes("setPlan(latestPlan(activityEvents));"),
+    "running or waiting turns must hydrate the plan only from the current run's events",
+  );
+  assert.ok(
+    !hydrateSessionSource.includes("setPlan(latestPlan(detail.events));") &&
+      hydrateSessionSource.indexOf("setPlan(latestPlan(activityEvents));") >
+        hydrateSessionSource.indexOf("activityEvents = detail.events.slice(previousRunEnd + 1)"),
+    "hydration must not restore a prior turn's plan before the current run boundary is calculated",
   );
   assert.ok(
     appSource.includes('type === "session_cancelled" || type === "task_completed" || type === "error"') &&
@@ -199,7 +226,7 @@ async function main() {
   assert.ok(appSource.includes('entry.fileExisted ? "activity.fileEditFailed" : "activity.fileCreateFailed"'), "failed inline file labels should distinguish edits from creates");
   assert.ok(appSource.includes('label: inlineActivityLabel(existing, event.success ? "done" : "failed", locale)'), "session replay should show failed file labels");
   assert.ok(appSource.includes('label: inlineActivityLabel(next, state, locale)'), "live activity updates should show failed file labels");
-  const inlineActivityListSource = appSource.match(/function InlineActivityList[\s\S]*?\n}\n\ntype SettingsTab/)?.[0] ?? "";
+  const inlineActivityListSource = appSource.match(/function InlineActivityList[\s\S]*?\r?\n}\r?\n\r?\ntype SettingsTab/)?.[0] ?? "";
   assert.ok(inlineActivityListSource, "App.tsx should define InlineActivityList");
   assert.ok(
     inlineActivityListSource.includes("<details className={`inline-activity-group ${groupState}`}>") &&
