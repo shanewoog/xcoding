@@ -2380,7 +2380,7 @@ export function App() {
         }
         activityEvents = detail.events.slice(previousRunEnd + 1);
       }
-      setPlan(latestPlan(activityEvents));
+      setPlan(detail.session.status === "cancelled" ? [] : latestPlan(activityEvents));
       setActivity(buildActivity(activityEvents, locale));
       setInlineActivityBySession((current) => ({ ...current, [sessionId]: buildInlineActivity(detail.events, locale) }));
       setPendingAction(pending);
@@ -2663,6 +2663,7 @@ export function App() {
           setPendingAction(null);
           setApprovalSummary(null);
           setRunStatusExpanded(false);
+          setPlan([]);
         } else {
           clearStream();
         }
@@ -3790,19 +3791,25 @@ export function App() {
       return remaining;
     });
     setRunningSessionIds((current) => current.includes(sessionId) ? current : [...current, sessionId]);
-    const previousInFlight = chatInFlightBySessionRef.current.get(sessionId) ?? null;
     try {
       const partialAssistant = streamedTextBySessionRef.current.get(sessionId) ?? streamedText;
       commitStreamedAssistant(sessionId);
-      await invoke<CancelSessionResult>("cancel_session", {
+      const result = await invoke<CancelSessionResult>("cancel_session", {
         params: {
           session_id: sessionId,
           partial_assistant: partialAssistant.trim() ? partialAssistant : undefined,
         },
       });
-      if (previousInFlight) {
-        try { await previousInFlight; } catch { /* cancelled/failed prior turn */ }
-      }
+      setSessions((current) => current.map((session) =>
+        session.id === sessionId ? result.session : session,
+      ));
+      setRunningSessionIds((current) => current.filter((id) => id !== sessionId));
+      setRunStatusBySession((current) => {
+        if (!(sessionId in current)) return current;
+        const { [sessionId]: _removed, ...rest } = current;
+        return rest;
+      });
+      if (activeSessionIdRef.current === sessionId) setPlan([]);
       await refreshSessions();
       if (activeSessionIdRef.current === sessionId) await hydrateSession(sessionId);
     } catch (cause) {

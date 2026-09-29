@@ -179,12 +179,12 @@ async function main() {
   assert.ok(
     hydrateSessionSource.includes('if (detail.session.status === "running" || detail.session.status === "need_user")') &&
       hydrateSessionSource.includes("activityEvents = detail.events.slice(previousRunEnd + 1)") &&
-      hydrateSessionSource.includes("setPlan(latestPlan(activityEvents));"),
-    "running or waiting turns must hydrate the plan only from the current run's events",
+      hydrateSessionSource.includes('setPlan(detail.session.status === "cancelled" ? [] : latestPlan(activityEvents));'),
+    "running or waiting turns must hydrate the plan only from the current run's events, and cancelled turns must clear it",
   );
   assert.ok(
     !hydrateSessionSource.includes("setPlan(latestPlan(detail.events));") &&
-      hydrateSessionSource.indexOf("setPlan(latestPlan(activityEvents));") >
+      hydrateSessionSource.indexOf("latestPlan(activityEvents)") >
         hydrateSessionSource.indexOf("activityEvents = detail.events.slice(previousRunEnd + 1)"),
     "hydration must not restore a prior turn's plan before the current run boundary is calculated",
   );
