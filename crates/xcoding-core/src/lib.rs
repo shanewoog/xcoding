@@ -404,6 +404,12 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    pub fn purge_model_call_logs(&self, retention_days: u32) -> Result<usize, CoreError> {
+        self.store
+            .purge_model_call_logs(retention_days)
+            .map_err(CoreError::from)
+    }
+
     pub fn delete_session(&self, session_id: uuid::Uuid) -> Result<(), CoreError> {
         let deleted = self
             .store

@@ -260,6 +260,8 @@ export interface UserConfig {
   stream_idle_timeout_secs?: number;
   /** Reserved for future non-streaming provider calls; streaming chat does not use this yet. */
   non_stream_timeout_secs?: number;
+  /** Number of days to retain model call audit logs. */
+  model_call_log_retention_days?: number;
   /** Successful half-open turns required before a provider circuit closes. */
   circuit_recovery_success_threshold?: number;
   /** Seconds a tripped provider circuit remains open before a half-open probe. */

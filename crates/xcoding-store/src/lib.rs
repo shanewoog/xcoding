@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
@@ -1229,6 +1229,43 @@ impl SessionStore {
                 })
                 .collect(),
         })
+    }
+
+    pub fn purge_model_call_logs(&self, retention_days: u32) -> Result<usize, StoreError> {
+        let retention_days = retention_days.max(1);
+        let cutoff = Utc::now() - Duration::days(i64::from(retention_days));
+        let transaction = self.connection.unchecked_transaction()?;
+        let expired_ids = {
+            let mut statement = transaction.prepare(
+                "SELECT id, event, created_at FROM session_events ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut expired_ids = Vec::new();
+            for row in rows {
+                let (id, event_json, created_at) = row?;
+                let event: SessionEvent = serde_json::from_str(&event_json)?;
+                if !matches!(event, SessionEvent::ModelCall { .. }) {
+                    continue;
+                }
+                let created_at = DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc);
+                if created_at < cutoff {
+                    expired_ids.push(id);
+                }
+            }
+            expired_ids
+        };
+
+        for id in &expired_ids {
+            transaction.execute("DELETE FROM session_events WHERE id = ?1", params![id])?;
+        }
+        transaction.commit()?;
+        Ok(expired_ids.len())
     }
 
     pub fn set_session_status(
@@ -2636,6 +2673,73 @@ mod tests {
                 .is_empty()
         );
         assert!(!store.delete_session(session.id).expect("second delete"));
+    }
+
+    #[test]
+    fn purges_only_expired_model_call_logs() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/purge".to_owned(),
+                mode: Mode::Ask,
+                provider: "provider-a".to_owned(),
+                model: "model-x".to_owned(),
+                title: None,
+            })
+            .expect("session saves");
+        let expired_at = (Utc::now() - Duration::days(2)).to_rfc3339();
+        let recent_at = (Utc::now() - Duration::hours(12)).to_rfc3339();
+
+        insert_model_call_event(
+            &store,
+            session.id,
+            "provider-a",
+            "provider-a",
+            "Provider A",
+            "key-a",
+            Some("...key-a"),
+            "model-expired",
+            1,
+            true,
+            &expired_at,
+        );
+        insert_model_call_event(
+            &store,
+            session.id,
+            "provider-a",
+            "provider-a",
+            "Provider A",
+            "key-a",
+            Some("...key-a"),
+            "model-recent",
+            1,
+            false,
+            &recent_at,
+        );
+        store
+            .connection
+            .execute(
+                "INSERT INTO session_events (id, session_id, event, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    Uuid::new_v4().to_string(),
+                    session.id.to_string(),
+                    serde_json::to_string(&SessionEvent::TextDelta {
+                        session_id: session.id,
+                        delta: "ordinary event".to_owned(),
+                    })
+                    .expect("ordinary event serializes"),
+                    expired_at,
+                ],
+            )
+            .expect("ordinary event saves");
+
+        assert_eq!(store.purge_model_call_logs(1).expect("logs purge"), 1);
+        assert_eq!(store.list_events(session.id).expect("events").len(), 2);
+        let report = store.model_call_report(0).expect("report loads");
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(report.models[0].model, "model-recent");
+        assert_eq!(report.models[0].success_count, 0);
+        assert_eq!(report.models[0].failure_count, 1);
     }
 
     #[test]

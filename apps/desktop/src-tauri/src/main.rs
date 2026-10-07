@@ -447,10 +447,16 @@ fn get_user_config() -> Result<UserConfig, String> {
 }
 
 #[tauri::command]
-fn set_user_config(config: UserConfig) -> Result<UserConfig, String> {
+fn set_user_config(app: AppHandle, config: UserConfig) -> Result<UserConfig, String> {
     let next = normalize_user_config(config);
     save_user_config(&next)?;
     apply_user_config_to_env(&next);
+    if let Err(error) = open_core(&app).and_then(|core| {
+        core.purge_model_call_logs(next.model_call_log_retention_days)
+            .map_err(|error| error.to_string())
+    }) {
+        boot_log(&format!("purge_model_call_logs failed (non-fatal): {error}"));
+    }
     Ok(next)
 }
 
@@ -604,8 +610,12 @@ fn model_call_report(
     app: AppHandle,
     timezone_offset_minutes: i32,
 ) -> Result<ModelCallReport, String> {
-    open_core(&app)?
-        .model_call_report(timezone_offset_minutes)
+    let retention_days = load_user_config().model_call_log_retention_days;
+    let core = open_core(&app)?;
+    if let Err(error) = core.purge_model_call_logs(retention_days) {
+        boot_log(&format!("purge_model_call_logs failed (non-fatal): {error}"));
+    }
+    core.model_call_report(timezone_offset_minutes)
         .map_err(|error| error.to_string())
 }
 
@@ -865,14 +875,20 @@ fn main() {
             match database_path()
                 .and_then(|path| CoreService::open(path).map_err(|e| e.to_string()))
             {
-                Ok(core) => match core.reconcile_interrupted_sessions() {
-                    Ok(n) if n > 0 => boot_log(&format!(
-                        "reconciled {n} interrupted session(s) to cancelled"
-                    )),
-                    Ok(_) => {}
-                    Err(error) => boot_log(&format!(
-                        "reconcile_interrupted_sessions failed (non-fatal): {error}"
-                    )),
+                Ok(core) => {
+                    match core.reconcile_interrupted_sessions() {
+                        Ok(n) if n > 0 => boot_log(&format!(
+                            "reconciled {n} interrupted session(s) to cancelled"
+                        )),
+                        Ok(_) => {}
+                        Err(error) => boot_log(&format!(
+                            "reconcile_interrupted_sessions failed (non-fatal): {error}"
+                        )),
+                    }
+                    let retention_days = load_user_config().model_call_log_retention_days;
+                    if let Err(error) = core.purge_model_call_logs(retention_days) {
+                        boot_log(&format!("purge_model_call_logs failed (non-fatal): {error}"));
+                    }
                 },
                 Err(error) => boot_log(&format!(
                     "open for reconciliation failed (non-fatal): {error}"

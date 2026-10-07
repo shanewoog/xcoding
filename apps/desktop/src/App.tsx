@@ -125,6 +125,7 @@ const DEFAULT_STREAM_IDLE_TIMEOUT_SECS = 180;
 const MIN_STREAM_IDLE_TIMEOUT_SECS = 60;
 const MAX_STREAM_IDLE_TIMEOUT_SECS = 600;
 const DEFAULT_NON_STREAM_TIMEOUT_SECS = 600;
+const DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS = 30;
 const MIN_NON_STREAM_TIMEOUT_SECS = 60;
 const MAX_NON_STREAM_TIMEOUT_SECS = 1200;
 const DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD = 2;
@@ -1398,6 +1399,7 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
 }
 
 type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults" | "reports";
+type ModelReportTab = "providers" | "keys" | "models";
 
 // Prefer the tool call that is still running, so the hint names what is happening now rather than
 // the last thing that finished. Falls back to the most recent entry once nothing is in flight.
@@ -1487,6 +1489,7 @@ export function App() {
   const [streamFirstEventTimeoutSecs, setStreamFirstEventTimeoutSecs] = useState(DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS);
   const [streamIdleTimeoutSecs, setStreamIdleTimeoutSecs] = useState(DEFAULT_STREAM_IDLE_TIMEOUT_SECS);
   const [nonStreamTimeoutSecs, setNonStreamTimeoutSecs] = useState(DEFAULT_NON_STREAM_TIMEOUT_SECS);
+  const [modelCallLogRetentionDays, setModelCallLogRetentionDays] = useState(DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS);
   const [circuitRecoverySuccessThreshold, setCircuitRecoverySuccessThreshold] = useState(DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD);
   const [circuitRecoveryWaitSecs, setCircuitRecoveryWaitSecs] = useState(DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS);
   const [circuitErrorRateThresholdPercent, setCircuitErrorRateThresholdPercent] = useState(DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT);
@@ -1603,6 +1606,7 @@ export function App() {
   const [modelCallReport, setModelCallReport] = useState<ModelCallReport | null>(null);
   const [modelCallReportLoading, setModelCallReportLoading] = useState(false);
   const [modelCallReportError, setModelCallReportError] = useState<string | null>(null);
+  const [modelReportTab, setModelReportTab] = useState<ModelReportTab>("providers");
   const [pluginEditorOpen, setPluginEditorOpen] = useState(false);
   const [mcpName, setMcpName] = useState("");
   const [mcpCommand, setMcpCommand] = useState("");
@@ -1941,6 +1945,7 @@ export function App() {
         setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(config.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
         setStreamIdleTimeoutSecs(normalizeBoundedInteger(config.stream_idle_timeout_secs, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS));
         setNonStreamTimeoutSecs(normalizeBoundedInteger(config.non_stream_timeout_secs, DEFAULT_NON_STREAM_TIMEOUT_SECS, MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS));
+        setModelCallLogRetentionDays(normalizeBoundedInteger(config.model_call_log_retention_days, DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS, 1, Number.MAX_SAFE_INTEGER));
         setCircuitRecoverySuccessThreshold(normalizeBoundedInteger(config.circuit_recovery_success_threshold, DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD));
         setCircuitRecoveryWaitSecs(normalizeBoundedInteger(config.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
         setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(config.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
@@ -4132,6 +4137,7 @@ export function App() {
           stream_first_event_timeout_secs: normalizeBoundedInteger(streamFirstEventTimeoutSecs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS),
           stream_idle_timeout_secs: normalizeBoundedInteger(streamIdleTimeoutSecs, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS),
           non_stream_timeout_secs: normalizeBoundedInteger(nonStreamTimeoutSecs, DEFAULT_NON_STREAM_TIMEOUT_SECS, MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS),
+          model_call_log_retention_days: normalizeBoundedInteger(modelCallLogRetentionDays, DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS, 1, Number.MAX_SAFE_INTEGER),
           circuit_recovery_success_threshold: normalizeBoundedInteger(circuitRecoverySuccessThreshold, DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD),
           circuit_recovery_wait_secs: normalizeBoundedInteger(circuitRecoveryWaitSecs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS),
           circuit_error_rate_threshold_percent: normalizeBoundedInteger(circuitErrorRateThresholdPercent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT),
@@ -4171,6 +4177,7 @@ export function App() {
       setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(savedUser.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
       setStreamIdleTimeoutSecs(normalizeBoundedInteger(savedUser.stream_idle_timeout_secs, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS));
       setNonStreamTimeoutSecs(normalizeBoundedInteger(savedUser.non_stream_timeout_secs, DEFAULT_NON_STREAM_TIMEOUT_SECS, MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS));
+      setModelCallLogRetentionDays(normalizeBoundedInteger(savedUser.model_call_log_retention_days, DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS, 1, Number.MAX_SAFE_INTEGER));
       setCircuitRecoverySuccessThreshold(normalizeBoundedInteger(savedUser.circuit_recovery_success_threshold, DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD));
       setCircuitRecoveryWaitSecs(normalizeBoundedInteger(savedUser.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
       setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(savedUser.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
@@ -4448,6 +4455,34 @@ export function App() {
         const el = document.getElementById(`settings-tab-${tab}`);
         if (el instanceof HTMLElement) el.focus();
       });
+    };
+    const modelReportTabs: { id: ModelReportTab; labelKey: MessageKey }[] = [
+      { id: "providers", labelKey: "settings.reports.providers" },
+      { id: "keys", labelKey: "settings.reports.keys" },
+      { id: "models", labelKey: "settings.reports.models" },
+    ];
+    const focusModelReportTab = (tab: ModelReportTab) => {
+      requestAnimationFrame(() => {
+        const el = document.getElementById(`settings-report-tab-${tab}`);
+        if (el instanceof HTMLElement) el.focus();
+      });
+    };
+    const handleModelReportTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+      let nextIndex: number | null = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (index + 1) % modelReportTabs.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (index - 1 + modelReportTabs.length) % modelReportTabs.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = modelReportTabs.length - 1;
+      }
+      if (nextIndex === null) return;
+      event.preventDefault();
+      const next = modelReportTabs[nextIndex].id;
+      setModelReportTab(next);
+      focusModelReportTab(next);
     };
     const handleSettingsTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
       let nextIndex: number | null = null;
@@ -5633,6 +5668,17 @@ export function App() {
               disabled={anySessionRunning || isSavingConfig}
             />
             <p className="mode-help">{t(locale, "field.workspaceHint")}</p>
+            <label className="field-label" htmlFor="model-call-log-retention-days">{t(locale, "field.modelCallLogRetentionDays")}</label>
+            <input
+              id="model-call-log-retention-days"
+              type="number"
+              min={1}
+              step={1}
+              value={modelCallLogRetentionDays}
+              onChange={(event) => setModelCallLogRetentionDays(normalizeBoundedInteger(Number(event.target.value), DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS, 1, Number.MAX_SAFE_INTEGER))}
+              disabled={anySessionRunning || isSavingConfig}
+            />
+            <p className="mode-help">{t(locale, "field.modelCallLogRetentionDaysHint")}</p>
             <label className="field-label" htmlFor="default-mode">{t(locale, "field.mode")}</label>
             <select
               id="default-mode"
@@ -5704,8 +5750,31 @@ export function App() {
               </p>
             ) : null}
             {modelCallReport ? (
-              <div className="settings-reports">
-                <section className="settings-report-section">
+              <>
+                <div className="settings-report-tabs" role="tablist" aria-label={t(locale, "settings.reports.title")}>
+                  {modelReportTabs.map((tab, index) => {
+                    const active = modelReportTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        id={`settings-report-tab-${tab.id}`}
+                        className={`settings-report-tab${active ? " active" : ""}`}
+                        aria-selected={active}
+                        aria-controls={`settings-report-panel-${tab.id}`}
+                        tabIndex={active ? 0 : -1}
+                        onClick={() => setModelReportTab(tab.id)}
+                        onKeyDown={(event) => handleModelReportTabKeyDown(event, index)}
+                      >
+                        {t(locale, tab.labelKey)}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="settings-reports">
+                {modelReportTab === "providers" ? (
+                  <section className="settings-report-section" role="tabpanel" id="settings-report-panel-providers" aria-labelledby="settings-report-tab-providers">
                   <h3>{t(locale, "settings.reports.providers")}</h3>
                   {modelCallReport.providers.length === 0 ? (
                     <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
@@ -5739,9 +5808,11 @@ export function App() {
                     </div>
                   )}
                 </section>
+                ) : null}
 
-                <section className="settings-report-section">
-                  <h3>{t(locale, "settings.reports.keys")}</h3>
+                {modelReportTab === "keys" ? (
+                  <section className="settings-report-section" role="tabpanel" id="settings-report-panel-keys" aria-labelledby="settings-report-tab-keys">
+                    <h3>{t(locale, "settings.reports.keys")}</h3>
                   {modelCallReport.keys.length === 0 ? (
                     <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
                   ) : (
@@ -5779,9 +5850,11 @@ export function App() {
                     </div>
                   )}
                 </section>
+                ) : null}
 
-                <section className="settings-report-section">
-                  <h3>{t(locale, "settings.reports.models")}</h3>
+                {modelReportTab === "models" ? (
+                  <section className="settings-report-section" role="tabpanel" id="settings-report-panel-models" aria-labelledby="settings-report-tab-models">
+                    <h3>{t(locale, "settings.reports.models")}</h3>
                   {modelCallReport.models.length === 0 ? (
                     <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
                   ) : (
@@ -5809,7 +5882,9 @@ export function App() {
                     </div>
                   )}
                 </section>
-              </div>
+                ) : null}
+                </div>
+              </>
             ) : !modelCallReportLoading && !modelCallReportError ? (
               <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
             ) : null}

@@ -23,6 +23,7 @@ pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 180;
 pub const MIN_STREAM_IDLE_TIMEOUT_SECS: u64 = 60;
 pub const MAX_STREAM_IDLE_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_NON_STREAM_TIMEOUT_SECS: u64 = 600;
+pub const DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS: u32 = 30;
 pub const MIN_NON_STREAM_TIMEOUT_SECS: u64 = 60;
 pub const MAX_NON_STREAM_TIMEOUT_SECS: u64 = 1_200;
 pub const DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD: u32 = 2;
@@ -799,6 +800,9 @@ pub struct UserConfig {
     /// Reserved for future non-streaming provider calls; streaming chat does not use this yet.
     #[serde(default = "default_non_stream_timeout_secs")]
     pub non_stream_timeout_secs: u64,
+    /// Number of days to retain model call audit logs.
+    #[serde(default = "default_model_call_log_retention_days")]
+    pub model_call_log_retention_days: u32,
     /// Successful half-open turns required before a provider circuit closes.
     #[serde(default = "default_circuit_recovery_success_threshold")]
     pub circuit_recovery_success_threshold: u32,
@@ -892,6 +896,7 @@ impl Default for UserConfig {
             stream_first_event_timeout_secs: default_stream_first_event_timeout_secs(),
             stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
             non_stream_timeout_secs: default_non_stream_timeout_secs(),
+            model_call_log_retention_days: default_model_call_log_retention_days(),
             circuit_recovery_success_threshold: default_circuit_recovery_success_threshold(),
             circuit_recovery_wait_secs: default_circuit_recovery_wait_secs(),
             circuit_error_rate_threshold_percent: default_circuit_error_rate_threshold_percent(),
@@ -1314,6 +1319,10 @@ fn default_non_stream_timeout_secs() -> u64 {
     DEFAULT_NON_STREAM_TIMEOUT_SECS
 }
 
+fn default_model_call_log_retention_days() -> u32 {
+    DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS
+}
+
 fn default_circuit_recovery_success_threshold() -> u32 {
     DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD
 }
@@ -1579,6 +1588,26 @@ mod tests {
         let decoded: UserConfig =
             serde_json::from_value(json).expect("configured config round-trips");
         assert_eq!(decoded.model_context_windows["gpt-5.5"], 272_000);
+    }
+
+    #[test]
+    fn defaults_and_round_trips_model_call_log_retention_days() {
+        let legacy: UserConfig = serde_json::from_value(json!({})).expect("legacy config parses");
+        assert_eq!(legacy.model_call_log_retention_days, 30);
+        assert_eq!(
+            UserConfig::default().model_call_log_retention_days,
+            DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS
+        );
+
+        let configured = UserConfig {
+            model_call_log_retention_days: 90,
+            ..UserConfig::default()
+        };
+        let encoded = serde_json::to_value(&configured).expect("configured config serializes");
+        assert_eq!(encoded["model_call_log_retention_days"], 90);
+        let decoded: UserConfig =
+            serde_json::from_value(encoded).expect("configured config round-trips");
+        assert_eq!(decoded.model_call_log_retention_days, 90);
     }
 
     #[test]

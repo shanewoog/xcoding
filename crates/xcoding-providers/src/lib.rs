@@ -769,6 +769,7 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
     config.non_stream_timeout_secs = config
         .non_stream_timeout_secs
         .clamp(MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS);
+    config.model_call_log_retention_days = config.model_call_log_retention_days.max(1);
     config.circuit_recovery_success_threshold = config.circuit_recovery_success_threshold.clamp(
         MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
         MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
