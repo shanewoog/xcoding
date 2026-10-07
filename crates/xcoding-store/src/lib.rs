@@ -1190,6 +1190,7 @@ impl SessionStore {
         Ok(ModelCallReport {
             providers: providers
                 .into_iter()
+                .rev()
                 .map(|((date, provider_id), (provider_name, success_count, failure_count))| {
                     ProviderCallReport {
                         date,
@@ -1202,6 +1203,7 @@ impl SessionStore {
                 .collect(),
             keys: keys
                 .into_iter()
+                .rev()
                 .map(
                     |((date, provider_id, key_id), (provider_name, key_hint, success_count, failure_count))| {
                         KeyCallReport {
@@ -1218,6 +1220,7 @@ impl SessionStore {
                 .collect(),
             models: models
                 .into_iter()
+                .rev()
                 .map(|((date, model), (success_count, failure_count))| ModelCallReportEntry {
                     date,
                     model,
@@ -2768,6 +2771,19 @@ mod tests {
         let report = store
             .model_call_report(8 * 60)
             .expect("model call report loads");
+
+        assert!(report
+            .providers
+            .windows(2)
+            .all(|rows| rows[0].date >= rows[1].date));
+        assert!(report
+            .keys
+            .windows(2)
+            .all(|rows| rows[0].date >= rows[1].date));
+        assert!(report
+            .models
+            .windows(2)
+            .all(|rows| rows[0].date >= rows[1].date));
 
         assert_eq!(report.providers.len(), 4);
         let provider_a_day_one = report
