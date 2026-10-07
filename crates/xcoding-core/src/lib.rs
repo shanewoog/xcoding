@@ -15,9 +15,9 @@ use xcoding_protocol::{
     ContextWindow, CreateSessionParams, CreateSessionResult, FileChangeKind, FileChangeSummary,
     GetConfigParams, GetConfigResult, GetSessionDetailParams, GetSessionDetailResult,
     JsonRpcRequest, JsonRpcResponse, ListSessionsParams, ListSessionsResult, LocalMemory, Message,
-    MessageRole, PendingAction, PendingActionStatus, PersistedSessionEvent, PingResult,
-    ReplaySessionParams, ReplaySessionResult, ReplayStep, RestorePoint, RpcError, Session,
-    SessionDetail, SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, TaskSummary,
+    MessageRole, ModelCallReport, PendingAction, PendingActionStatus, PersistedSessionEvent,
+    PingResult, ReplaySessionParams, ReplaySessionResult, ReplayStep, RestorePoint, RpcError,
+    Session, SessionDetail, SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, TaskSummary,
     ToolCall, ToolName, WorkspaceConfig,
 };
 pub use xcoding_store::{RedactionReport, StoredVisionDescription};
@@ -664,6 +664,13 @@ impl CoreService {
             events: detail.events.clone(),
             steps: build_replay_steps(&detail.events),
         })
+    }
+
+    pub fn model_call_report(
+        &self,
+        timezone_offset_minutes: i32,
+    ) -> Result<ModelCallReport, CoreError> {
+        Ok(self.store.model_call_report(timezone_offset_minutes)?)
     }
 
     pub fn restore_point(

@@ -3564,6 +3564,7 @@ impl<'a> AgentService<'a> {
                 provider: session.provider.clone(),
                 provider_id: candidate.id.clone(),
                 provider_name: candidate.name.clone(),
+                key_id: candidate.key_id.clone(),
                 // Masked tail only. The credential itself never reaches an event.
                 key_hint: Some(provider_key_hint(candidate.api_key.as_deref())),
                 model: session.model.clone(),

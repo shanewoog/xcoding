@@ -36,6 +36,7 @@ import type {
   ProviderModel,
   ModelRoute,
   ModelRouteStatus,
+  ModelCallReport,
   UserConfig,
   VisionDelegateConfig,
   WorkspaceConfig,
@@ -1396,7 +1397,7 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
   );
 }
 
-type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults";
+type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults" | "reports";
 
 // Prefer the tool call that is still running, so the hint names what is happening now rather than
 // the last thing that finished. Falls back to the most recent entry once nothing is in flight.
@@ -1599,6 +1600,9 @@ export function App() {
   const [pluginSearch, setPluginSearch] = useState("");
   const [pluginLoading, setPluginLoading] = useState(false);
   const [pluginNotice, setPluginNotice] = useState<string | null>(null);
+  const [modelCallReport, setModelCallReport] = useState<ModelCallReport | null>(null);
+  const [modelCallReportLoading, setModelCallReportLoading] = useState(false);
+  const [modelCallReportError, setModelCallReportError] = useState<string | null>(null);
   const [pluginEditorOpen, setPluginEditorOpen] = useState(false);
   const [mcpName, setMcpName] = useState("");
   const [mcpCommand, setMcpCommand] = useState("");
@@ -2200,6 +2204,26 @@ export function App() {
     }
   }, [workspaceRoot]);
 
+  const loadModelCallReport = useCallback(async () => {
+    if (!isTauriRuntime) {
+      setModelCallReportError(t(locale, "error.tauriOnly"));
+      return;
+    }
+    setModelCallReportLoading(true);
+    setModelCallReportError(null);
+    try {
+      const timezoneOffsetMinutes = -new Date().getTimezoneOffset();
+      const report = await invoke<ModelCallReport>("model_call_report", {
+        timezoneOffsetMinutes,
+      });
+      setModelCallReport(report);
+    } catch (cause) {
+      setModelCallReportError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setModelCallReportLoading(false);
+    }
+  }, [locale]);
+
   const toggleLocalPlugin = useCallback(async (item: LocalPluginItem) => {
     if (!isTauriRuntime) return;
     setPluginNotice(null);
@@ -2351,6 +2375,12 @@ export function App() {
       void loadLocalPlugins();
     }
   }, [view, settingsTab, loadLocalPlugins]);
+
+  useEffect(() => {
+    if (view === "settings" && settingsTab === "reports") {
+      void loadModelCallReport();
+    }
+  }, [view, settingsTab, loadModelCallReport]);
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
@@ -4411,6 +4441,7 @@ export function App() {
       { id: "personalization", labelKey: "settings.tab.personalization" },
       { id: "plugins", labelKey: "settings.tab.plugins" },
       { id: "defaults", labelKey: "settings.tab.defaults" },
+      { id: "reports", labelKey: "settings.tab.reports" },
     ];
     const focusSettingsTab = (tab: SettingsTab) => {
       requestAnimationFrame(() => {
@@ -5640,6 +5671,147 @@ export function App() {
             <p className="mode-help">{commandDenylistHelpText(locale)}</p>
             {!workspaceRoot.trim() ? (
               <p className="mode-help">{t(locale, "settings.workspacePolicyHint")}</p>
+            ) : null}
+          </section>
+
+          <section
+            className="settings-card settings-reports-card"
+            role="tabpanel"
+            id="settings-panel-reports"
+            aria-labelledby="settings-tab-reports"
+            hidden={settingsTab !== "reports"}
+          >
+            <div className="settings-report-header">
+              <div>
+                <p className="panel-title">{t(locale, "settings.reports.title")}</p>
+                <p className="mode-help">{t(locale, "settings.reports.subtitle")}</p>
+              </div>
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={() => void loadModelCallReport()}
+                disabled={modelCallReportLoading}
+              >
+                {t(locale, "settings.reports.refresh")}
+              </button>
+            </div>
+            {modelCallReportLoading ? (
+              <p className="mode-help">{t(locale, "settings.reports.loading")}</p>
+            ) : null}
+            {modelCallReportError ? (
+              <p className="error-message">
+                {t(locale, "settings.reports.error")} {modelCallReportError}
+              </p>
+            ) : null}
+            {modelCallReport ? (
+              <div className="settings-reports">
+                <section className="settings-report-section">
+                  <h3>{t(locale, "settings.reports.providers")}</h3>
+                  {modelCallReport.providers.length === 0 ? (
+                    <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
+                  ) : (
+                    <div className="settings-report-table-wrap">
+                      <table className="settings-report-table">
+                        <thead>
+                          <tr>
+                            <th scope="col">{t(locale, "settings.reports.date")}</th>
+                            <th scope="col">{t(locale, "settings.reports.provider")}</th>
+                            <th scope="col" className="settings-report-count">{t(locale, "settings.reports.success")}</th>
+                            <th scope="col" className="settings-report-count">{t(locale, "settings.reports.failure")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modelCallReport.providers.map((row) => (
+                            <tr key={`${row.date}-${row.provider_id}`}>
+                              <td>{row.date}</td>
+                              <td>
+                                <div>{row.provider_name || row.provider_id}</div>
+                                {row.provider_name && row.provider_name !== row.provider_id ? (
+                                  <small className="settings-report-secondary">{row.provider_id}</small>
+                                ) : null}
+                              </td>
+                              <td className="settings-report-count settings-report-success">{row.success_count}</td>
+                              <td className="settings-report-count settings-report-failure">{row.failure_count}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+
+                <section className="settings-report-section">
+                  <h3>{t(locale, "settings.reports.keys")}</h3>
+                  {modelCallReport.keys.length === 0 ? (
+                    <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
+                  ) : (
+                    <div className="settings-report-table-wrap">
+                      <table className="settings-report-table">
+                        <thead>
+                          <tr>
+                            <th scope="col">{t(locale, "settings.reports.date")}</th>
+                            <th scope="col">{t(locale, "settings.reports.provider")}</th>
+                            <th scope="col">{t(locale, "settings.reports.key")}</th>
+                            <th scope="col" className="settings-report-count">{t(locale, "settings.reports.success")}</th>
+                            <th scope="col" className="settings-report-count">{t(locale, "settings.reports.failure")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modelCallReport.keys.map((row) => (
+                            <tr key={`${row.date}-${row.provider_id}-${row.key_id}`}>
+                              <td>{row.date}</td>
+                              <td>
+                                <div>{row.provider_name || row.provider_id}</div>
+                                {row.provider_name && row.provider_name !== row.provider_id ? (
+                                  <small className="settings-report-secondary">{row.provider_id}</small>
+                                ) : null}
+                              </td>
+                              <td>
+                                <div>{row.key_id}</div>
+                                {row.key_hint ? <small className="settings-report-secondary">{row.key_hint}</small> : null}
+                              </td>
+                              <td className="settings-report-count settings-report-success">{row.success_count}</td>
+                              <td className="settings-report-count settings-report-failure">{row.failure_count}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+
+                <section className="settings-report-section">
+                  <h3>{t(locale, "settings.reports.models")}</h3>
+                  {modelCallReport.models.length === 0 ? (
+                    <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
+                  ) : (
+                    <div className="settings-report-table-wrap">
+                      <table className="settings-report-table">
+                        <thead>
+                          <tr>
+                            <th scope="col">{t(locale, "settings.reports.date")}</th>
+                            <th scope="col">{t(locale, "settings.reports.model")}</th>
+                            <th scope="col" className="settings-report-count">{t(locale, "settings.reports.success")}</th>
+                            <th scope="col" className="settings-report-count">{t(locale, "settings.reports.failure")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {modelCallReport.models.map((row) => (
+                            <tr key={`${row.date}-${row.model}`}>
+                              <td>{row.date}</td>
+                              <td>{row.model}</td>
+                              <td className="settings-report-count settings-report-success">{row.success_count}</td>
+                              <td className="settings-report-count settings-report-failure">{row.failure_count}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+              </div>
+            ) : !modelCallReportLoading && !modelCallReportError ? (
+              <p className="settings-report-empty">{t(locale, "settings.reports.empty")}</p>
             ) : null}
           </section>
         </div>

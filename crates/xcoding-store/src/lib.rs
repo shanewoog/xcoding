@@ -1,16 +1,18 @@
 //! SQLite persistence for XCoding sessions and messages.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_protocol::{
-    ContextCompaction, ContextWindow, CreateSessionParams, LocalMemory, MAX_CONTEXT_TOOL_LIMIT,
-    MAX_LOCAL_MEMORY_CHARS, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole, PendingAction,
-    PendingActionStatus, PersistedSessionEvent, RestorePoint, Session, SessionEvent, SessionStatus,
-    ToolCall, WorkspaceConfig,
+    ContextCompaction, ContextWindow, CreateSessionParams, KeyCallReport, LocalMemory,
+    MAX_CONTEXT_TOOL_LIMIT, MAX_LOCAL_MEMORY_CHARS, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole,
+    ModelCallReport, ModelCallReportEntry, PendingAction,
+    PendingActionStatus, PersistedSessionEvent, ProviderCallReport, RestorePoint, Session,
+    SessionEvent, SessionStatus, ToolCall, WorkspaceConfig,
 };
 
 #[derive(Debug, Error)]
@@ -1090,6 +1092,142 @@ impl SessionStore {
             .map_err(StoreError::from)
     }
 
+    pub fn model_call_report(
+        &self,
+        timezone_offset_minutes: i32,
+    ) -> Result<ModelCallReport, StoreError> {
+        let offset_seconds = timezone_offset_minutes.checked_mul(60).ok_or_else(|| {
+            StoreError::InvalidInput("timezone offset is out of range".to_owned())
+        })?;
+        let timezone = FixedOffset::east_opt(offset_seconds).ok_or_else(|| {
+            StoreError::InvalidInput("timezone offset is out of range".to_owned())
+        })?;
+
+        // Each persisted ModelCall represents one actual provider HTTP request, so
+        // retries naturally remain separate report entries.
+        let mut providers: BTreeMap<(String, String), (String, u64, u64)> = BTreeMap::new();
+        let mut keys: BTreeMap<(String, String, String), (String, Option<String>, u64, u64)> =
+            BTreeMap::new();
+        let mut models: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+
+        let mut statement = self.connection.prepare(
+            "SELECT event, created_at FROM session_events
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        for row in rows {
+            let (event_json, created_at) = row?;
+            let event: SessionEvent = serde_json::from_str(&event_json)?;
+            let SessionEvent::ModelCall {
+                provider,
+                provider_id,
+                provider_name,
+                key_id,
+                key_hint,
+                model,
+                success,
+                ..
+            } = event
+            else {
+                continue;
+            };
+
+            let created_at = DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc);
+            let date = created_at.with_timezone(&timezone).date_naive().to_string();
+            let provider = provider.trim().to_owned();
+            let provider_id = if provider_id.trim().is_empty() {
+                provider.clone()
+            } else {
+                provider_id.trim().to_owned()
+            };
+            let provider_name = if provider_name.trim().is_empty() {
+                provider.clone()
+            } else {
+                provider_name.trim().to_owned()
+            };
+
+            let provider_counts = providers
+                .entry((date.clone(), provider_id.clone()))
+                .or_insert_with(|| (provider_name.clone(), 0, 0));
+            if success {
+                provider_counts.1 = provider_counts.1.saturating_add(1);
+            } else {
+                provider_counts.2 = provider_counts.2.saturating_add(1);
+            }
+
+            let model_counts = models
+                .entry((date.clone(), model.clone()))
+                .or_insert((0, 0));
+            if success {
+                model_counts.0 = model_counts.0.saturating_add(1);
+            } else {
+                model_counts.1 = model_counts.1.saturating_add(1);
+            }
+
+            let key_id = key_id.trim();
+            if !key_id.is_empty() {
+                let key_hint = key_hint.and_then(|hint| {
+                    if hint.trim().is_empty() {
+                        None
+                    } else {
+                        Some(hint)
+                    }
+                });
+                let key_counts = keys
+                    .entry((date, provider_id, key_id.to_owned()))
+                    .or_insert_with(|| (provider_name, key_hint.clone(), 0, 0));
+                if success {
+                    key_counts.2 = key_counts.2.saturating_add(1);
+                } else {
+                    key_counts.3 = key_counts.3.saturating_add(1);
+                }
+            }
+        }
+
+        Ok(ModelCallReport {
+            providers: providers
+                .into_iter()
+                .map(|((date, provider_id), (provider_name, success_count, failure_count))| {
+                    ProviderCallReport {
+                        date,
+                        provider_id,
+                        provider_name,
+                        success_count,
+                        failure_count,
+                    }
+                })
+                .collect(),
+            keys: keys
+                .into_iter()
+                .map(
+                    |((date, provider_id, key_id), (provider_name, key_hint, success_count, failure_count))| {
+                        KeyCallReport {
+                            date,
+                            provider_id,
+                            provider_name,
+                            key_id,
+                            key_hint,
+                            success_count,
+                            failure_count,
+                        }
+                    },
+                )
+                .collect(),
+            models: models
+                .into_iter()
+                .map(|((date, model), (success_count, failure_count))| ModelCallReportEntry {
+                    date,
+                    model,
+                    success_count,
+                    failure_count,
+                })
+                .collect(),
+        })
+    }
+
     pub fn set_session_status(
         &self,
         id: Uuid,
@@ -1660,6 +1798,55 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
 mod tests {
     use super::*;
     use xcoding_protocol::{Mode, ToolName};
+
+    fn insert_model_call_event(
+        store: &SessionStore,
+        session_id: Uuid,
+        provider: &str,
+        provider_id: &str,
+        provider_name: &str,
+        key_id: &str,
+        key_hint: Option<&str>,
+        model: &str,
+        attempt: u32,
+        success: bool,
+        created_at: &str,
+    ) {
+        let event = SessionEvent::ModelCall {
+            session_id,
+            provider: provider.to_owned(),
+            provider_id: provider_id.to_owned(),
+            provider_name: provider_name.to_owned(),
+            key_id: key_id.to_owned(),
+            key_hint: key_hint.map(str::to_owned),
+            model: model.to_owned(),
+            effective_model: model.to_owned(),
+            endpoint: "https://example.test/v1/chat/completions".to_owned(),
+            purpose: "chat".to_owned(),
+            round: 1,
+            attempt,
+            max_attempts: 3,
+            success,
+            output_chars: 0,
+            tool_calls: 0,
+            error: (!success).then(|| "request failed".to_owned()),
+            model_reported: None,
+            ttft_ms: None,
+            total_ms: None,
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO session_events (id, session_id, event, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    Uuid::new_v4().to_string(),
+                    session_id.to_string(),
+                    serde_json::to_string(&event).expect("model call serializes"),
+                    created_at,
+                ],
+            )
+            .expect("model call event saves");
+    }
 
     #[test]
     fn persists_workspace_configurations() {
@@ -2446,6 +2633,207 @@ mod tests {
                 .is_empty()
         );
         assert!(!store.delete_session(session.id).expect("second delete"));
+    }
+
+    #[test]
+    fn reports_model_calls_by_provider_key_and_model_with_local_dates() {
+        let store = SessionStore::in_memory().expect("in-memory database starts");
+        let session = store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/report".to_owned(),
+                mode: Mode::Ask,
+                provider: "provider-a".to_owned(),
+                model: "model-x".to_owned(),
+                title: None,
+            })
+            .expect("session saves");
+
+        // The first two calls represent one request and its retry. They remain
+        // separate provider, key, and model counts because each event is an
+        // actual HTTP attempt. Both timestamps are 2026-10-06 UTC, which is
+        // 2026-10-07 in the requested UTC+08:00 report timezone.
+        insert_model_call_event(
+            &store,
+            session.id,
+            "provider-a",
+            "provider-a",
+            "Provider A",
+            "key-a",
+            Some("...key-a"),
+            "model-x",
+            1,
+            true,
+            "2026-10-06T23:30:00Z",
+        );
+        insert_model_call_event(
+            &store,
+            session.id,
+            "provider-a",
+            "provider-a",
+            "Provider A",
+            "key-a",
+            Some("...key-a"),
+            "model-x",
+            2,
+            false,
+            "2026-10-06T23:31:00Z",
+        );
+        insert_model_call_event(
+            &store,
+            session.id,
+            "provider-a",
+            "provider-a",
+            "Provider A",
+            "key-b",
+            Some("...key-b"),
+            "model-x",
+            1,
+            true,
+            "2026-10-06T23:32:00Z",
+        );
+        insert_model_call_event(
+            &store,
+            session.id,
+            "provider-b",
+            "provider-b",
+            "Provider B",
+            "key-c",
+            Some("...key-c"),
+            "model-y",
+            1,
+            false,
+            "2026-10-06T23:33:00Z",
+        );
+        // 2026-10-07 UTC becomes 2026-10-08 in UTC+08:00.
+        insert_model_call_event(
+            &store,
+            session.id,
+            "provider-a",
+            "provider-a",
+            "Provider A",
+            "key-a",
+            Some("...key-a"),
+            "model-z",
+            1,
+            true,
+            "2026-10-07T23:30:00Z",
+        );
+
+        // Simulate an event written before provider and key identity fields
+        // were added. It must fall back to the legacy provider value and must
+        // not guess a key bucket.
+        let legacy_event = SessionEvent::ModelCall {
+            session_id: session.id,
+            provider: "legacy-provider".to_owned(),
+            provider_id: "legacy-id-that-will-be-removed".to_owned(),
+            provider_name: "Legacy Provider".to_owned(),
+            key_id: "legacy-key-that-will-be-removed".to_owned(),
+            key_hint: Some("...legacy".to_owned()),
+            model: "legacy-model".to_owned(),
+            effective_model: "legacy-model".to_owned(),
+            endpoint: "https://example.test/v1/chat/completions".to_owned(),
+            purpose: "chat".to_owned(),
+            round: 1,
+            attempt: 1,
+            max_attempts: 1,
+            success: true,
+            output_chars: 0,
+            tool_calls: 0,
+            error: None,
+            model_reported: None,
+            ttft_ms: None,
+            total_ms: None,
+        };
+        let mut legacy_json =
+            serde_json::to_value(legacy_event).expect("legacy model call serializes");
+        let legacy_object = legacy_json
+            .as_object_mut()
+            .expect("legacy model call is an object");
+        legacy_object.remove("provider_id");
+        legacy_object.remove("provider_name");
+        legacy_object.remove("key_id");
+        store
+            .connection
+            .execute(
+                "INSERT INTO session_events (id, session_id, event, created_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    Uuid::new_v4().to_string(),
+                    session.id.to_string(),
+                    serde_json::to_string(&legacy_json).expect("legacy event JSON serializes"),
+                    "2026-10-06T23:34:00Z",
+                ],
+            )
+            .expect("legacy model call event saves");
+
+        let report = store
+            .model_call_report(8 * 60)
+            .expect("model call report loads");
+
+        assert_eq!(report.providers.len(), 4);
+        let provider_a_day_one = report
+            .providers
+            .iter()
+            .find(|row| row.date == "2026-10-07" && row.provider_id == "provider-a")
+            .expect("provider A day one report row");
+        assert_eq!(provider_a_day_one.provider_name, "Provider A");
+        assert_eq!(provider_a_day_one.success_count, 2);
+        assert_eq!(provider_a_day_one.failure_count, 1);
+        let provider_a_day_two = report
+            .providers
+            .iter()
+            .find(|row| row.date == "2026-10-08" && row.provider_id == "provider-a")
+            .expect("provider A day two report row");
+        assert_eq!(provider_a_day_two.success_count, 1);
+        assert_eq!(provider_a_day_two.failure_count, 0);
+        let provider_b = report
+            .providers
+            .iter()
+            .find(|row| row.provider_id == "provider-b")
+            .expect("provider B report row");
+        assert_eq!(provider_b.success_count, 0);
+        assert_eq!(provider_b.failure_count, 1);
+        let legacy_provider = report
+            .providers
+            .iter()
+            .find(|row| row.provider_id == "legacy-provider")
+            .expect("legacy provider report row");
+        assert_eq!(legacy_provider.provider_name, "legacy-provider");
+        assert_eq!(legacy_provider.success_count, 1);
+        assert_eq!(legacy_provider.failure_count, 0);
+
+        assert_eq!(report.keys.len(), 4);
+        let key_a_day_one = report
+            .keys
+            .iter()
+            .find(|row| row.date == "2026-10-07" && row.key_id == "key-a")
+            .expect("key A day one report row");
+        assert_eq!(key_a_day_one.success_count, 1);
+        assert_eq!(key_a_day_one.failure_count, 1);
+        assert_eq!(key_a_day_one.key_hint.as_deref(), Some("...key-a"));
+        let key_b = report
+            .keys
+            .iter()
+            .find(|row| row.key_id == "key-b")
+            .expect("key B report row");
+        assert_eq!(key_b.success_count, 1);
+        assert_eq!(key_b.failure_count, 0);
+        assert!(report.keys.iter().all(|row| !row.key_id.starts_with("legacy")));
+
+        assert_eq!(report.models.len(), 4);
+        let model_x = report
+            .models
+            .iter()
+            .find(|row| row.date == "2026-10-07" && row.model == "model-x")
+            .expect("model X report row");
+        assert_eq!(model_x.success_count, 2);
+        assert_eq!(model_x.failure_count, 1);
+        let model_z = report
+            .models
+            .iter()
+            .find(|row| row.date == "2026-10-08" && row.model == "model-z")
+            .expect("model Z report row");
+        assert_eq!(model_z.success_count, 1);
+        assert_eq!(model_z.failure_count, 0);
     }
 
     #[test]

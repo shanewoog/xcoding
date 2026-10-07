@@ -29,8 +29,8 @@ use xcoding_mcp::{
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
     CreateProjectResult, ImportProjectParams, ImportProjectResult, ListModelsResult, PingResult,
-    ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus, ProviderWireApi,
-    ReplaySessionResult, ResolveActionParams,
+    ModelCallReport, ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus,
+    ProviderWireApi, ReplaySessionResult, ResolveActionParams,
     ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session,
     SessionDetail, SetConfigParams, UserConfig, WorkspaceConfig,
 };
@@ -600,6 +600,16 @@ fn session_replay(app: AppHandle, session_id: String) -> Result<ReplaySessionRes
 }
 
 #[tauri::command]
+fn model_call_report(
+    app: AppHandle,
+    timezone_offset_minutes: i32,
+) -> Result<ModelCallReport, String> {
+    open_core(&app)?
+        .model_call_report(timezone_offset_minutes)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn rollback_restore_point(
     app: AppHandle,
     params: RollbackRestorePointParams,
@@ -913,6 +923,7 @@ fn main() {
             redact_historical_secrets,
             session_detail,
             session_replay,
+            model_call_report,
             chat,
             resolve_action,
             rollback_restore_point,

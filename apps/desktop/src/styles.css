@@ -2051,6 +2051,68 @@ input.workspace-missing {
 .settings-card .panel-title + .field-label {
   margin-top: 0.15rem;
 }
+.settings-reports-card {
+  gap: 1rem;
+}
+.settings-report-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+.settings-report-header .mode-help {
+  margin: 0.2rem 0 0;
+}
+.settings-reports {
+  display: grid;
+  gap: 1rem;
+}
+.settings-report-section {
+  display: grid;
+  gap: 0.55rem;
+}
+.settings-report-section h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+.settings-report-table-wrap {
+  overflow-x: auto;
+}
+.settings-report-table {
+  border-collapse: collapse;
+  min-width: 34rem;
+  width: 100%;
+}
+.settings-report-table th,
+.settings-report-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+.settings-report-table th {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.settings-report-count {
+  font-variant-numeric: tabular-nums;
+  text-align: right !important;
+}
+.settings-report-success {
+  color: var(--ok);
+}
+.settings-report-failure {
+  color: var(--danger-text);
+}
+.settings-report-secondary {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+.settings-report-empty {
+  color: var(--text-muted);
+  margin: 0;
+}
 .plugins-settings-card {
   gap: 0.9rem;
 }

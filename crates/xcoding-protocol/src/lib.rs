@@ -423,6 +423,42 @@ pub struct SessionDetail {
     pub events: Vec<PersistedSessionEvent>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProviderCallReport {
+    pub date: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub success_count: u64,
+    pub failure_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct KeyCallReport {
+    pub date: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_hint: Option<String>,
+    pub success_count: u64,
+    pub failure_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelCallReportEntry {
+    pub date: String,
+    pub model: String,
+    pub success_count: u64,
+    pub failure_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelCallReport {
+    pub providers: Vec<ProviderCallReport>,
+    pub keys: Vec<KeyCallReport>,
+    pub models: Vec<ModelCallReportEntry>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStepStatus {
@@ -1161,6 +1197,9 @@ pub enum SessionEvent {
         /// Display name of the provider that served this request.
         #[serde(default)]
         provider_name: String,
+        /// Stable configured credential id; never the credential value.
+        #[serde(default)]
+        key_id: String,
         /// Masked tail of the credential used, never the credential itself.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_hint: Option<String>,

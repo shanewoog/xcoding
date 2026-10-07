@@ -1,5 +1,36 @@
 export const JSON_RPC_VERSION = "2.0" as const;
 
+export interface ProviderCallReport {
+  date: string;
+  provider_id: string;
+  provider_name: string;
+  success_count: number;
+  failure_count: number;
+}
+
+export interface KeyCallReport {
+  date: string;
+  provider_id: string;
+  provider_name: string;
+  key_id: string;
+  key_hint?: string;
+  success_count: number;
+  failure_count: number;
+}
+
+export interface ModelCallReportEntry {
+  date: string;
+  model: string;
+  success_count: number;
+  failure_count: number;
+}
+
+export interface ModelCallReport {
+  providers: ProviderCallReport[];
+  keys: KeyCallReport[];
+  models: ModelCallReportEntry[];
+}
+
 export type Mode = "ask" | "auto-edit" | "full-auto";
 export type SessionStatus =
   | "created"
@@ -590,6 +621,8 @@ export type SessionEvent =
       provider_id?: string;
       /** Display name of the provider that served the request. */
       provider_name?: string;
+      /** Stable configured credential id; never the credential value. */
+      key_id?: string;
       /** Masked credential tail, never the credential itself. */
       key_hint?: string;
       model: string;
