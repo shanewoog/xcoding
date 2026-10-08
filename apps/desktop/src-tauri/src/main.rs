@@ -945,6 +945,7 @@ fn main() {
             rollback_restore_point,
             cancel_session,
             workspace_tools::git_environment,
+            workspace_tools::git_history,
             workspace_tools::list_workspace_entries,
             workspace_tools::read_workspace_file,
             workspace_tools::workspace_changes,

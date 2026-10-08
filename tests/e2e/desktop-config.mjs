@@ -552,6 +552,7 @@ async function main() {
   const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
   assert.ok(apiSource.includes("includeBranches"), "git_environment should support includeBranches");
   const workspaceToolsSource = await readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/src/workspace_tools.rs"), "utf8");
+
   assert.ok(workspaceToolsSource.includes("CREATE_NO_WINDOW"), "Git probes must not show a Windows console at startup");
   assert.ok(workspaceToolsSource.includes("shell.creation_flags(CREATE_NO_WINDOW)"), "embedded terminal commands must not create a Windows console");
   assert.ok(workspaceToolsSource.includes("GIT_TERMINAL_PROMPT"), "Git probes must not wait for interactive prompts");
