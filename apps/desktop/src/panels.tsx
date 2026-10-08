@@ -32,6 +32,7 @@ import {
   browserSetZoom,
   browserShow,
   fetchGitEnvironment,
+  fetchGitHistory,
   fetchGitNexusStatus,
   fetchWorkspaceChanges,
   fetchWorkspaceFileDiff,
@@ -46,6 +47,8 @@ import {
   readWorkspaceFile,
   type DirEntryInfo,
   type GitEnvironment,
+  type GitCommitEntry,
+  type GitHistory,
   type GitNexusCommandResult,
   type GitNexusStatus,
   type GitNexusSymbol,
@@ -383,6 +386,22 @@ export function EmptyQuickActions({ locale, onOpen }: EmptyQuickActionsProps) {
   );
 }
 
+function gitCommitRefs(commit: GitCommitEntry): string[] {
+  return commit.refs.map((ref) => ref.replace(/^HEAD -> /, ""));
+}
+
+function gitCommitDate(value: string, locale: Locale): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(locale, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
 export function EnvironmentPopover({
   locale,
   open,
@@ -397,6 +416,7 @@ export function EnvironmentPopover({
   const [error, setError] = useState<string | null>(null);
   const [changesOpen, setChangesOpen] = useState(false);
   const [branchesOpen, setBranchesOpen] = useState(false);
+  const [history, setHistory] = useState<GitHistory | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -407,8 +427,12 @@ export function EnvironmentPopover({
     setLoading(true);
     setError(null);
     try {
-      const next = await fetchGitEnvironment(workspaceRoot.trim(), true);
+      const [next, nextHistory] = await Promise.all([
+        fetchGitEnvironment(workspaceRoot.trim(), true),
+        fetchGitHistory(workspaceRoot.trim(), 200),
+      ]);
       setEnv(next);
+      setHistory(nextHistory);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -534,6 +558,40 @@ export function EnvironmentPopover({
         <span className="env-chevron">↗</span>
       </button>
 
+      <div className="env-section-title">
+        <span>{t(locale, "env.history")}</span>
+      </div>
+      {!history || (history.commits || []).length === 0 ? (
+        <p className="env-muted">{t(locale, "env.noHistory")}</p>
+      ) : (
+        <div className="env-history" role="list" aria-label={t(locale, "env.history")}>
+          {history.commits.slice(0, 200).map((commit) => (
+            <button
+              key={commit.hash}
+              type="button"
+              className="env-history-item"
+              role="listitem"
+              onClick={() => onOpenTerminal(`git show ${commit.hash}`)}
+              title={`${commit.hash}\n${commit.subject}`}
+            >
+              <span className="env-history-dot" aria-hidden="true">●</span>
+              <span className="env-history-main">
+                <span className="env-history-top">
+                  <span className="env-history-hash">{commit.short_hash}</span>
+                  <span className="env-history-subject">{commit.subject}</span>
+                </span>
+                <span className="env-history-meta">
+                  <span>{commit.author_name}</span>
+                  <span>{gitCommitDate(commit.committed_date, locale)}</span>
+                  {gitCommitRefs(commit).map((ref) => (
+                    <span key={ref} className="env-history-ref">{ref}</span>
+                  ))}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="env-section-title">
         <span>{t(locale, "env.sources")}</span>
       </div>

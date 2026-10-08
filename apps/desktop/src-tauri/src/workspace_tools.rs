@@ -73,6 +73,27 @@ pub struct WorkspaceFileDiff {
     pub truncated: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GitCommitEntry {
+    pub hash: String,
+    pub short_hash: String,
+    pub parents: Vec<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_date: String,
+    pub committed_date: String,
+    pub subject: String,
+    pub refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitHistory {
+    pub commits: Vec<GitCommitEntry>,
+    pub total: usize,
+    pub branch: Option<String>,
+    pub upstream: Option<String>,
+}
+
 fn normalize_root(workspace_root: &str) -> Result<PathBuf, String> {
     let root = PathBuf::from(workspace_root.trim());
     if workspace_root.trim().is_empty() {
@@ -259,6 +280,93 @@ pub async fn git_environment(
     match tokio::time::timeout(Duration::from_secs(4), worker).await {
         Ok(result) => result.map_err(|error| format!("git worker failed: {error}"))?,
         Err(_) => Err("git environment lookup timed out".to_owned()),
+    }
+}
+
+fn parse_git_history_output(output: &str, branch: Option<String>, upstream: Option<String>) -> GitHistory {
+    let mut commits = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(8, '\x1f');
+        let hash = parts.next().unwrap_or_default().to_owned();
+        let short_hash = parts.next().unwrap_or_default().to_owned();
+        let parents = parts
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let author_name = parts.next().unwrap_or_default().to_owned();
+        let author_email = parts.next().unwrap_or_default().to_owned();
+        let author_date = parts.next().unwrap_or_default().to_owned();
+        let committed_date = parts.next().unwrap_or_default().to_owned();
+        let subject_and_refs = parts.next().unwrap_or_default();
+        let mut subject_parts = subject_and_refs.splitn(2, '\x1e');
+        let subject = subject_parts.next().unwrap_or_default().to_owned();
+        let refs = subject_parts
+            .next()
+            .unwrap_or_default()
+            .split(", ")
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !hash.is_empty() {
+            commits.push(GitCommitEntry {
+                hash,
+                short_hash,
+                parents,
+                author_name,
+                author_email,
+                author_date,
+                committed_date,
+                subject,
+                refs,
+            });
+        }
+    }
+    let total = commits.len();
+    GitHistory { commits, total, branch, upstream }
+}
+
+fn git_history_sync(workspace_root: String, limit: usize) -> Result<GitHistory, String> {
+    let root = normalize_root(&workspace_root)?;
+    let limit = limit.clamp(1, 200);
+    let env = git_environment_sync(workspace_root, false)?;
+    let mut commits = Vec::new();
+    let mut total = 0usize;
+    if env.is_repo {
+        let format = "%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%s%x1e%D";
+        let output = run_git(&root, &["log", "--all", "--date=iso-strict", &format!("--max-count={limit}"), &format!("--pretty=format:{format}")])?;
+        let history = parse_git_history_output(&output, env.branch.clone(), env.upstream.clone());
+        commits = history.commits;
+        total = history.total;
+        let count_output = run_git(&root, &["rev-list", "--all", "--count"]);
+        if let Ok(count) = count_output {
+            total = count.parse().unwrap_or(total);
+        }
+    }
+    Ok(GitHistory {
+        commits,
+        total,
+        branch: env.branch,
+        upstream: env.upstream,
+    })
+}
+
+#[tauri::command]
+pub async fn git_history(
+    workspace_root: String,
+    limit: Option<usize>,
+) -> Result<GitHistory, String> {
+    let limit = limit.unwrap_or(200);
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        git_history_sync(workspace_root, limit)
+    });
+    match tokio::time::timeout(Duration::from_secs(6), worker).await {
+        Ok(result) => result.map_err(|error| format!("git worker failed: {error}"))?,
+        Err(_) => Err("git history lookup timed out".to_owned()),
     }
 }
 
@@ -988,6 +1096,30 @@ mod tests {
         );
 
         fs::remove_dir_all(base).expect("remove temporary workspace");
+    }
+
+    #[test]
+    fn parses_git_history_rows_and_ref_lists() {
+        let output = "abc123\x1fabc123\x1fparent1 parent2\x1fAlice\x1fa@example.com\x1f2026-10-08T04:47:30+08:00\x1f2026-10-08T04:47:30+08:00\x1ffix: test\x1eHEAD -> main, origin/main";
+        let history = parse_git_history_output(output, Some("main".to_owned()), Some("origin/main".to_owned()));
+        assert_eq!(history.commits.len(), 1);
+        let commit = &history.commits[0];
+        assert_eq!(commit.short_hash, "abc123");
+        assert_eq!(commit.parents, vec!["parent1".to_owned(), "parent2".to_owned()]);
+        assert_eq!(commit.author_name, "Alice");
+        assert_eq!(commit.subject, "fix: test");
+        assert_eq!(commit.refs, vec!["HEAD -> main".to_owned(), "origin/main".to_owned()]);
+        assert_eq!(history.branch.as_deref(), Some("main"));
+        assert_eq!(history.upstream.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn parses_git_history_rows_without_refs() {
+        let output = "abc123\x1fabc123\x1f\x1fAlice\x1fa@example.com\x1f2026-10-08T04:47:30+08:00\x1f2026-10-08T04:47:30+08:00\x1fplain subject\x1e";
+        let history = parse_git_history_output(output, None, None);
+        assert_eq!(history.commits.len(), 1);
+        assert!(history.commits[0].parents.is_empty());
+        assert!(history.commits[0].refs.is_empty());
     }
 
     fn temporary_root(label: &str) -> PathBuf {

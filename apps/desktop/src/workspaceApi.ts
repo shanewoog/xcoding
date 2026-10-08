@@ -13,6 +13,25 @@ export type GitEnvironment = {
   root: string;
 };
 
+export type GitCommitEntry = {
+  hash: string;
+  short_hash: string;
+  parents: string[];
+  author_name: string;
+  author_email: string;
+  author_date: string;
+  committed_date: string;
+  subject: string;
+  refs: string[];
+};
+
+export type GitHistory = {
+  commits: GitCommitEntry[];
+  total: number;
+  branch: string | null;
+  upstream: string | null;
+};
+
 export type DirEntryInfo = {
   name: string;
   path: string;
@@ -107,6 +126,16 @@ export async function fetchGitEnvironment(
   return invoke<GitEnvironment>("git_environment", {
     workspaceRoot,
     includeBranches,
+  });
+}
+
+export async function fetchGitHistory(
+  workspaceRoot: string,
+  limit = 200,
+): Promise<GitHistory> {
+  return invoke<GitHistory>("git_history", {
+    workspaceRoot,
+    limit,
   });
 }
 
