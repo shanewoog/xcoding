@@ -2522,7 +2522,7 @@ export function App() {
       setModelCallLogs(
         detail.events.filter(
           (item): item is ModelCallLog => item.event.type === "model_call",
-        ),
+        ).slice(-50),
       );
     } catch (cause) {
       setModelCallLogsError(cause instanceof Error ? cause.message : String(cause));

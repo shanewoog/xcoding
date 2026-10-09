@@ -172,6 +172,13 @@ async fn records_wire_requests_and_responses_without_changing_them() {
         );
         let wire_body: serde_json::Value =
             serde_json::from_str(wire_request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        if wire_api != ProviderWireApi::AnthropicMessages {
+            assert_eq!(wire_body["include"], json!(["reasoning.encrypted_content"]));
+            assert!(uuid::Uuid::parse_str(wire_body["prompt_cache_key"].as_str().unwrap()).is_ok());
+        } else {
+            assert!(wire_body.get("include").is_none());
+            assert!(wire_body.get("prompt_cache_key").is_none());
+        }
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&detail.request_body).unwrap(),
             wire_body
@@ -181,6 +188,42 @@ async fn records_wire_requests_and_responses_without_changing_them() {
                 .unwrap()
                 .contains("test-secret-key")
         );
+    }
+    let session_id = uuid::Uuid::new_v4();
+    let other_session_id = uuid::Uuid::new_v4();
+    for (wire_api, response) in [
+        (ProviderWireApi::ChatCompletions, chat),
+        (ProviderWireApi::Responses, responses),
+    ] {
+        for request_session_id in [session_id, session_id, other_session_id] {
+            let (endpoint, worker) = mock_response("200 OK", response);
+            let provider =
+                OpenAiCompatibleProvider::with_wire_api("test-secret-key", endpoint, wire_api)
+                    .with_session_id(request_session_id);
+            let mut stream = provider
+                .stream_chat(
+                    "session-model",
+                    vec![ChatMessage::user("next turn")],
+                    &[],
+                    None,
+                )
+                .await
+                .unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+            let wire_request = worker.join().unwrap();
+            let wire_body: serde_json::Value =
+                serde_json::from_str(wire_request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(wire_body["prompt_cache_key"], request_session_id.to_string());
+            assert_eq!(wire_body["include"], json!(["reasoning.encrypted_content"]));
+            let page = query_request_logs(&RequestLogQuery::default()).unwrap();
+            let detail = request_log_detail(&page.items[0].id).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&detail.request_body).unwrap(),
+                wire_body
+            );
+        }
     }
     for (status, response) in [
         ("429 Too Many Requests", "error test-secret-key"),

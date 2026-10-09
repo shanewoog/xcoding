@@ -71,3 +71,16 @@
   border-radius: 6px;
   font-size: 0.8rem;
 }
+
+.request-log-content-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.request-log-content-header h3 {
+  margin: 0;
+}

@@ -28,6 +28,35 @@ const statusKeys: Record<LogStatus, MessageKey> = {
   error: "requestLogs.error", interrupted: "requestLogs.interrupted",
 };
 
+function RequestLogContent({ locale, title, content, emptyText = "—" }: {
+  locale: Locale;
+  title: string;
+  content: string;
+  emptyText?: string;
+}) {
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function copyContent() {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
+  }
+
+  return <div className="request-log-content">
+    <div className="request-log-content-header">
+      <h3>{title}</h3>
+      <button type="button" className="quiet-button" disabled={!content} aria-label={`${t(locale, "action.copy")} ${title}`} onClick={copyContent}>
+        {t(locale, copyStatus === "copied" ? "requestLogs.copied" : "action.copy")}
+      </button>
+    </div>
+    {copyStatus === "failed" ? <p role="alert" className="models-error">{t(locale, "requestLogs.copyFailed")}</p> : null}
+    <pre>{content || emptyText}</pre>
+  </div>;
+}
+
 export function RequestLogs({ locale, enabled, onEnabledChange, disabled }: {
   locale: Locale;
   enabled: boolean;
@@ -147,7 +176,7 @@ export function RequestLogs({ locale, enabled, onEnabledChange, disabled }: {
     </div>
     {detailLoading ? <p role="status">{t(locale, "requestLogs.loading")}</p> : null}
     {detailError ? <p role="alert" className="models-error">{detailError}</p> : null}
-    {detail ? <section className="request-log-detail" aria-label={t(locale, "requestLogs.details")}>
+    {detail ? <section key={detail.id} className="request-log-detail" aria-label={t(locale, "requestLogs.details")}>
       <div className="request-log-actions">
         <strong>{detail.model} · {t(locale, statusKeys[detail.status])}</strong>
         <button type="button" className="quiet-button" onClick={() => { ++detailVersion.current; setDetail(null); }}>{t(locale, "requestLogs.close")}</button>
@@ -156,10 +185,9 @@ export function RequestLogs({ locale, enabled, onEnabledChange, disabled }: {
       <p>{t(locale, "requestLogs.http")}: {detail.http_status ?? "—"} · {detail.duration_ms} ms · {detail.response_content_type}</p>
       {detail.error ? <pre className="models-error">{detail.error}</pre> : null}
       {detail.truncated ? <p role="status">{t(locale, "requestLogs.truncated")}</p> : null}
-      <h3>{t(locale, "requestLogs.requestHeaders")}</h3>
-      <pre>{detail.request_headers?.length ? detail.request_headers.map((header) => header.name + ": " + header.value).join("\n") : t(locale, "requestLogs.headersUnavailable")}</pre>
-      <h3>{t(locale, "requestLogs.requestBody")}</h3><pre>{detail.request_body || "—"}</pre>
-      <h3>{t(locale, "requestLogs.responseBody")}</h3><pre>{detail.response_body || "—"}</pre>
+      <RequestLogContent locale={locale} title={t(locale, "requestLogs.requestHeaders")} content={detail.request_headers?.map((header) => header.name + ": " + header.value).join("\n") ?? ""} emptyText={t(locale, "requestLogs.headersUnavailable")} />
+      <RequestLogContent locale={locale} title={t(locale, "requestLogs.requestBody")} content={detail.request_body} />
+      <RequestLogContent locale={locale} title={t(locale, "requestLogs.responseBody")} content={detail.response_body} />
     </section> : null}
   </>;
 }

@@ -1357,15 +1357,19 @@ fn routed_provider_candidates(
         .collect()
 }
 
-fn open_provider(candidate: &ProviderCandidate) -> Result<OpenAiCompatibleProvider, AgentError> {
-    match candidate.api_key.as_deref() {
-        Some(api_key) => Ok(OpenAiCompatibleProvider::with_wire_api(
+fn open_provider(
+    candidate: &ProviderCandidate,
+    session_id: Uuid,
+) -> Result<OpenAiCompatibleProvider, AgentError> {
+    let provider = match candidate.api_key.as_deref() {
+        Some(api_key) => OpenAiCompatibleProvider::with_wire_api(
             api_key,
             &candidate.base_url,
             candidate.wire_api,
-        )),
-        None => Ok(OpenAiCompatibleProvider::from_environment()?),
-    }
+        ),
+        None => OpenAiCompatibleProvider::from_environment()?,
+    };
+    Ok(provider.with_session_id(session_id))
 }
 
 /// Providers that contributed more than one credential to this candidate list.
@@ -2026,7 +2030,7 @@ impl<'a> AgentService<'a> {
                 "no configured provider has credentials".to_owned(),
             )
         })?;
-        let provider = open_provider(&primary_candidate)?;
+        let provider = open_provider(&primary_candidate, session.id)?;
         let max_provider_retries = user_config.max_provider_retries;
         let max_provider_attempts = max_provider_retries + 1;
         let max_tool_rounds = user_config.max_tool_rounds.max(1) as usize;
@@ -2120,7 +2124,7 @@ impl<'a> AgentService<'a> {
         // Vision delegate is resolved regardless of model capability;
         // the per-route cache determines at runtime whether the provider
         // accepts images natively or needs delegation.
-        let vision_delegate = resolve_vision_delegate(&user_config, &session.model);
+        let vision_delegate = resolve_vision_delegate(&user_config, &session.model, session.id);
         let mut vision_route_cache = VisionRouteCache::new();
         let mut vision_descriptions_applied = false;
         // Build messages from stored history with original images intact.
@@ -2290,7 +2294,7 @@ impl<'a> AgentService<'a> {
                         continue;
                     }
 
-                    let provider = match open_provider(candidate) {
+                    let provider = match open_provider(candidate, session.id) {
                         Ok(provider) => provider,
                         Err(error) => {
                             let endpoint = format!(
@@ -2831,7 +2835,7 @@ impl<'a> AgentService<'a> {
                 {
                     let turn_messages = self.core.messages(session.id).unwrap_or_default();
                     let successful_candidate = &candidates[completed_candidate_index];
-                    let successful_provider = open_provider(successful_candidate)?;
+                    let successful_provider = open_provider(successful_candidate, session.id)?;
                     self.record_local_memories(
                         &session,
                         &successful_provider,
@@ -5913,7 +5917,11 @@ fn response_refuses_vision(content: &str, tool_calls: &[ProviderToolCall]) -> bo
 /// Builds the delegate for this run, or `None` when delegation does not apply:
 /// disabled, incompletely configured, session model already vision-capable, or
 /// the configured provider has no usable credentials.
-fn resolve_vision_delegate(config: &UserConfig, _session_model: &str) -> Option<VisionDelegate> {
+fn resolve_vision_delegate(
+    config: &UserConfig,
+    _session_model: &str,
+    session_id: Uuid,
+) -> Option<VisionDelegate> {
     let delegate = config.vision_delegate.as_ref()?;
     if !delegate.enabled {
         return None;
@@ -5938,7 +5946,7 @@ fn resolve_vision_delegate(config: &UserConfig, _session_model: &str) -> Option<
         api_key: provider_api_key(config, provider_config),
         model_override: None,
     };
-    let provider = open_provider(&candidate).ok()?;
+    let provider = open_provider(&candidate, session_id).ok()?;
     Some(VisionDelegate {
         endpoint: provider.chat_url(),
         provider,
@@ -8983,26 +8991,28 @@ private material
 
     #[test]
     fn delegate_resolves_for_any_model_when_configured() {
+        let session_id = Uuid::new_v4();
         let config = vision_config("gpt-4o");
         // Vision capability is now determined at runtime, so the delegate
         // resolves for any session model when configured.
         let delegate =
-            resolve_vision_delegate(&config, "deepseek-chat").expect("delegate resolves");
+            resolve_vision_delegate(&config, "deepseek-chat", session_id).expect("delegate resolves");
         assert_eq!(delegate.model, "gpt-4o");
         assert_eq!(delegate.timeout, Duration::from_secs(30));
         // Vision-capable models also get a delegate (used as fallback).
-        assert!(resolve_vision_delegate(&config, "gpt-4o").is_some());
+        assert!(resolve_vision_delegate(&config, "gpt-4o", session_id).is_some());
     }
 
     #[test]
     fn delegate_is_skipped_when_disabled_or_incomplete() {
+        let session_id = Uuid::new_v4();
         let mut disabled = vision_config("gpt-4o");
         disabled.vision_delegate.as_mut().expect("config").enabled = false;
-        assert!(resolve_vision_delegate(&disabled, "deepseek-chat").is_none());
+        assert!(resolve_vision_delegate(&disabled, "deepseek-chat", session_id).is_none());
 
         let mut no_model = vision_config("   ");
         no_model.vision_delegate.as_mut().expect("config").model = "  ".to_owned();
-        assert!(resolve_vision_delegate(&no_model, "deepseek-chat").is_none());
+        assert!(resolve_vision_delegate(&no_model, "deepseek-chat", session_id).is_none());
 
         // A provider id that matches nothing must not silently fall back.
         let mut unknown_provider = vision_config("gpt-4o");
@@ -9011,10 +9021,12 @@ private material
             .as_mut()
             .expect("config")
             .provider_id = "missing".to_owned();
-        assert!(resolve_vision_delegate(&unknown_provider, "deepseek-chat").is_none());
+        assert!(resolve_vision_delegate(&unknown_provider, "deepseek-chat", session_id).is_none());
 
         // No delegate configured at all keeps the historical direct path.
-        assert!(resolve_vision_delegate(&UserConfig::default(), "deepseek-chat").is_none());
+        assert!(
+            resolve_vision_delegate(&UserConfig::default(), "deepseek-chat", session_id).is_none()
+        );
     }
 
     #[test]

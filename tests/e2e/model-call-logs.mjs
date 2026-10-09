@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -17,6 +19,32 @@ async function main() {
   assert.ok(appSource.includes("composer-model-log-button"), "composer should expose a model-call log entry");
   assert.ok(appSource.includes('item.event.type === "model_call"'), "log view should filter model_call events");
   assert.ok(appSource.includes("session_detail"), "log view should read persisted session details");
+  const parsedApp = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let logSelection;
+  function findLogSelection(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(parsedApp) === "setModelCallLogs") {
+      const argument = node.arguments[0]?.getText(parsedApp);
+      if (argument?.startsWith("detail.events")) logSelection = argument;
+    }
+    ts.forEachChild(node, findLogSelection);
+  }
+  findLogSelection(parsedApp);
+  assert.ok(logSelection, "log loading should select model calls before updating state");
+  const selectionScript = ts.transpileModule(`const selected = ${logSelection}; selected;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  for (const count of [0, 12, 50, 51, 125]) {
+    const events = Array.from({ length: count }, (_, index) => [
+      { id: `call-${index}`, event: { type: "model_call" } },
+      { id: `text-${index}`, event: { type: "text_delta" } },
+    ]).flat();
+    const expected = events.filter((item) => item.event.type === "model_call").slice(-50);
+    const selected = runInNewContext(selectionScript, { detail: { events } });
+    assert.deepEqual(Array.from(selected, (item) => item.id), expected.map((item) => item.id));
+    assert.ok(selected.length <= 50, "the view must retain only the newest 50 calls");
+    assert.equal(events.length, count * 2, "view truncation must not modify session history");
+  }
+  assert.ok(appSource.includes("modelCallLogs.slice().reverse().map"), "newest calls should render first");
   assert.ok(
     appSource.includes("const pendingConversationScrollToBottomRef = useRef(false)"),
     "model log navigation should track a pending jump to the latest conversation content",

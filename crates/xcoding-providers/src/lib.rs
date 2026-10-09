@@ -714,6 +714,7 @@ pub struct OpenAiCompatibleProvider {
     api_key: String,
     base_url: String,
     wire_api: ProviderWireApi,
+    prompt_cache_key: String,
     client: Client,
 }
 
@@ -1235,8 +1236,14 @@ impl OpenAiCompatibleProvider {
             api_key: api_key.into(),
             base_url: api_root_url(&base_url.into()),
             wire_api,
+            prompt_cache_key: uuid::Uuid::new_v4().to_string(),
             client: build_http_client(),
         }
+    }
+
+    pub fn with_session_id(mut self, session_id: uuid::Uuid) -> Self {
+        self.prompt_cache_key = session_id.to_string();
+        self
     }
 
     /// Return the exact endpoint used for model response requests.
@@ -1306,7 +1313,13 @@ impl OpenAiCompatibleProvider {
         tools: &[ToolDefinition],
         reasoning_effort: Option<&str>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        let body = chat_completions_request_body(model, messages, tools, reasoning_effort);
+        let body = chat_completions_request_body(
+            model,
+            messages,
+            tools,
+            reasoning_effort,
+            &self.prompt_cache_key,
+        );
 
         // The agent owns retry scheduling so it can report each reconnect attempt to
         // the UI. This provider opens one SSE response per call.
@@ -1476,7 +1489,13 @@ impl OpenAiCompatibleProvider {
         tools: &[ToolDefinition],
         reasoning_effort: Option<&str>,
     ) -> Result<ProviderEventStream, ProviderError> {
-        let body = responses_request_body(model, messages, tools, reasoning_effort);
+        let body = responses_request_body(
+            model,
+            messages,
+            tools,
+            reasoning_effort,
+            &self.prompt_cache_key,
+        );
         let (response, request_log) = self.open_chat_completion(&body).await?;
         let response_status = response.status();
         let stream_log = request_log.clone();
@@ -1690,12 +1709,15 @@ fn chat_completions_request_body(
     messages: Vec<ChatMessage>,
     tools: &[ToolDefinition],
     reasoning_effort: Option<&str>,
+    prompt_cache_key: &str,
 ) -> Value {
     let messages = sanitize_tool_call_arguments(messages);
     let mut body = json!({
         "model": model,
         "messages": messages,
         "stream": true,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": prompt_cache_key,
         // Endpoints that honor this send a final usage-only chunk, which lets
         // the agent calibrate its token estimate against real counts.
         // Endpoints that ignore it simply never send the chunk.
@@ -1766,6 +1788,7 @@ fn responses_request_body(
     messages: Vec<ChatMessage>,
     tools: &[ToolDefinition],
     reasoning_effort: Option<&str>,
+    prompt_cache_key: &str,
 ) -> Value {
     let messages = sanitize_tool_call_arguments(messages);
     let mut instructions = Vec::new();
@@ -1806,7 +1829,9 @@ fn responses_request_body(
         "instructions": instructions.join("\n\n"),
         "input": input,
         "stream": true,
-        "store": false
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": prompt_cache_key
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(
@@ -2913,14 +2938,18 @@ mod tests {
 
     #[test]
     fn chat_completions_request_body_asks_for_streamed_usage() {
+        let session_id = uuid::Uuid::new_v4().to_string();
         let body = chat_completions_request_body(
             "gpt-test",
             vec![ChatMessage::user("Say hello.")],
             &[],
             None,
+            &session_id,
         );
 
         assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["prompt_cache_key"], session_id);
     }
 
     #[test]
@@ -3029,7 +3058,35 @@ mod tests {
     }
 
     #[test]
+    fn responses_cache_key_defaults_to_a_unique_provider_uuid() {
+        let provider = OpenAiCompatibleProvider::with_wire_api(
+            "test-key",
+            "http://127.0.0.1",
+            ProviderWireApi::Responses,
+        );
+        let other_provider = OpenAiCompatibleProvider::with_wire_api(
+            "test-key",
+            "http://127.0.0.1",
+            ProviderWireApi::Responses,
+        );
+        assert!(uuid::Uuid::parse_str(&provider.prompt_cache_key).is_ok());
+        assert_ne!(provider.prompt_cache_key, other_provider.prompt_cache_key);
+        for prompt in ["first turn", "retry", "next turn"] {
+            let body = responses_request_body(
+                "gpt-test",
+                vec![ChatMessage::user(prompt)],
+                &[],
+                None,
+                &provider.prompt_cache_key,
+            );
+            assert_eq!(body["prompt_cache_key"], provider.prompt_cache_key);
+            assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        }
+    }
+
+    #[test]
     fn builds_standard_responses_request_body() {
+        let session_id = uuid::Uuid::new_v4().to_string();
         let tool_call = ProviderToolCall {
             id: "call_1".to_owned(),
             kind: "function".to_owned(),
@@ -3060,12 +3117,15 @@ mod tests {
                 }),
             }],
             Some("high"),
+            &session_id,
         );
 
         assert_eq!(body["model"], "gpt-test");
         assert_eq!(body["instructions"], "Follow the repository instructions.");
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["prompt_cache_key"], session_id);
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["input"][0]["type"], "message");
         assert_eq!(body["input"][0]["role"], "user");
@@ -3094,6 +3154,7 @@ mod tests {
     // mid-stream must be neutralized before the body is sent.
     #[test]
     fn chat_completions_request_body_replaces_invalid_tool_arguments() {
+        let session_id = uuid::Uuid::new_v4().to_string();
         let body = chat_completions_request_body(
             "gpt-test",
             vec![ChatMessage::assistant_tool_calls(vec![ProviderToolCall {
@@ -3107,6 +3168,7 @@ mod tests {
             }])],
             &[],
             None,
+            &session_id,
         );
 
         assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_cut_off");
@@ -3122,6 +3184,7 @@ mod tests {
 
     #[test]
     fn responses_request_body_replaces_invalid_tool_arguments() {
+        let session_id = uuid::Uuid::new_v4().to_string();
         let body = responses_request_body(
             "gpt-test",
             vec![ChatMessage::assistant_tool_calls(vec![ProviderToolCall {
@@ -3135,16 +3198,22 @@ mod tests {
             }])],
             &[],
             None,
+            &session_id,
         );
 
         assert_eq!(body["input"][0]["type"], "function_call");
         assert_eq!(body["input"][0]["call_id"], "call_cut_off");
         assert_eq!(body["input"][0]["name"], "apply_patch");
         assert_eq!(body["input"][0]["arguments"], "{}");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["prompt_cache_key"], session_id);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("reasoning").is_none());
     }
 
     #[test]
     fn chat_completions_request_body_enables_parallel_tool_calls() {
+        let session_id = uuid::Uuid::new_v4().to_string();
         let body = chat_completions_request_body(
             "gpt-test",
             vec![ChatMessage::user("List the workspace files.")],
@@ -3158,11 +3227,14 @@ mod tests {
                 }),
             }],
             Some("high"),
+            &session_id,
         );
 
         assert_eq!(body["model"], "gpt-test");
         assert_eq!(body["stream"], true);
         assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["prompt_cache_key"], session_id);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "list_dir");
         assert_eq!(body["tool_choice"], "auto");
@@ -3171,17 +3243,21 @@ mod tests {
 
     #[test]
     fn chat_completions_request_body_omits_tool_fields_without_tools() {
+        let session_id = uuid::Uuid::new_v4().to_string();
         let body = chat_completions_request_body(
             "gpt-test",
             vec![ChatMessage::user("Say hello.")],
             &[],
             None,
+            &session_id,
         );
 
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
         assert!(body.get("reasoning_effort").is_none());
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["prompt_cache_key"], session_id);
     }
 
     #[test]
