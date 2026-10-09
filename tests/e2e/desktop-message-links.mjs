@@ -68,6 +68,38 @@ async function main() {
     "the bare URL pattern must reject a URL with glued CJK text",
   );
 
+  // Regression: a trailing hyphen is punctuation in this presentation context,
+  // even though hyphens remain valid URL characters when they occur inside a
+  // URL. Keep the hyphen outside the link while preserving hyphenated paths.
+  const splitLinkPunctuationMatch = appSource.match(/function splitLinkPunctuation[\s\S]*?\n\}/);
+  assert.ok(splitLinkPunctuationMatch, "assistant links must split trailing punctuation from URLs");
+  const splitLinkPunctuation = new Function(
+    `${splitLinkPunctuationMatch[0].replace(
+      "function splitLinkPunctuation(value: string): { url: string; suffix: string }",
+      "function splitLinkPunctuation(value)",
+    )}; return splitLinkPunctuation;`,
+  )();
+  assert.deepEqual(
+    splitLinkPunctuation("http://127.0.0.1:5176-"),
+    { url: "http://127.0.0.1:5176", suffix: "-" },
+    "a URL followed by a hyphen must keep the hyphen outside the link",
+  );
+  assert.deepEqual(
+    splitLinkPunctuation("http://127.0.0.1:5176/path-abc"),
+    { url: "http://127.0.0.1:5176/path-abc", suffix: "" },
+    "hyphens inside a URL must remain part of the URL",
+  );
+  assert.deepEqual(
+    splitLinkPunctuation("http://127.0.0.1:5176—"),
+    { url: "http://127.0.0.1:5176", suffix: "—" },
+    "a trailing Unicode dash must remain outside the URL",
+  );
+  assert.deepEqual(
+    splitLinkPunctuation("http://127.0.0.1:5176."),
+    { url: "http://127.0.0.1:5176", suffix: "." },
+    "ordinary trailing punctuation must remain outside the URL",
+  );
+
   assert.ok(panelsSource.includes("export type BrowserNavigationRequest"), "right tool panel must accept browser navigation requests");
   assert.ok(panelsSource.includes("forceEmbedded?: boolean"), "browser navigation must support an embedded override");
   assert.ok(panelsSource.includes("openUrl(navigation.url, { forceEmbedded: true })"), "assistant links must always open in the built-in browser");

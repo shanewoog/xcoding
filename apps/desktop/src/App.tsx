@@ -563,6 +563,22 @@ type ComposerTextFile = {
   language: string;
 };
 
+type ComposerDraft = {
+  prompt: string;
+  images: ComposerImage[];
+  textFiles: ComposerTextFile[];
+};
+
+const EMPTY_COMPOSER_DRAFT: ComposerDraft = {
+  prompt: "",
+  images: [],
+  textFiles: [],
+};
+
+function createEmptyComposerDraft(): ComposerDraft {
+  return { prompt: "", images: [], textFiles: [] };
+}
+
 type QueuedFollowUp = {
   id: string;
   sessionId: string;
@@ -1148,7 +1164,7 @@ function currentRunPlanStep(plan: PlanStep[], activity: ActivityItem[]): number 
 }
 
 function splitLinkPunctuation(value: string): { url: string; suffix: string } {
-  const suffix = value.match(/(?:\*\*|[.,!?;:'"\u2018\u2019\u201C\u201D，。！？；：])+$/)?.[0] || "";
+  const suffix = value.match(/(?:\*\*|[-\u2010-\u2015\u2212]|[.,!?;:'"\u2018\u2019\u201C\u201D，。！？；：])+$/)?.[0] || "";
   return { url: suffix ? value.slice(0, -suffix.length) : value, suffix };
 }
 
@@ -1473,9 +1489,9 @@ export function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   const [hiddenProjectPaths, setHiddenProjectPaths] = useState<string[]>([]);
   const [projectMenu, setProjectMenu] = useState<{ root: string; x: number; y: number } | null>(null);
-  const [prompt, setPrompt] = useState("");
-  const [composerImages, setComposerImages] = useState<ComposerImage[]>([]);
-  const [composerTextFiles, setComposerTextFiles] = useState<ComposerTextFile[]>([]);
+  const [composerDraftBySession, setComposerDraftBySession] = useState<Record<string, ComposerDraft>>(() => ({
+    [DRAFT_SESSION_KEY]: createEmptyComposerDraft(),
+  }));
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState("");
@@ -1678,6 +1694,49 @@ export function App() {
   const activeSessionStateKey = sessionStateKey(activeSessionId);
   const browserNavigation = browserNavigationBySession[activeSessionStateKey] ?? null;
   const browserState = browserStateBySession[activeSessionStateKey] ?? null;
+  const activeComposerDraft = composerDraftBySession[activeSessionStateKey] ?? EMPTY_COMPOSER_DRAFT;
+  const prompt = activeComposerDraft.prompt;
+  const composerImages = activeComposerDraft.images;
+  const composerTextFiles = activeComposerDraft.textFiles;
+
+  function updateComposerDraft(
+    sessionKey: string,
+    update: (draft: ComposerDraft) => ComposerDraft,
+  ): void {
+    setComposerDraftBySession((current) => ({
+      ...current,
+      [sessionKey]: update(current[sessionKey] ?? createEmptyComposerDraft()),
+    }));
+  }
+
+  function clearComposerDraft(sessionKey: string): void {
+    updateComposerDraft(sessionKey, createEmptyComposerDraft);
+  }
+
+  function setPrompt(value: string | ((current: string) => string)): void {
+    updateComposerDraft(activeSessionStateKey, (draft) => ({
+      ...draft,
+      prompt: typeof value === "function" ? value(draft.prompt) : value,
+    }));
+  }
+
+  function setComposerImages(
+    value: ComposerImage[] | ((current: ComposerImage[]) => ComposerImage[]),
+  ): void {
+    updateComposerDraft(activeSessionStateKey, (draft) => ({
+      ...draft,
+      images: typeof value === "function" ? value(draft.images) : value,
+    }));
+  }
+
+  function setComposerTextFiles(
+    value: ComposerTextFile[] | ((current: ComposerTextFile[]) => ComposerTextFile[]),
+  ): void {
+    updateComposerDraft(activeSessionStateKey, (draft) => ({
+      ...draft,
+      textFiles: typeof value === "function" ? value(draft.textFiles) : value,
+    }));
+  }
   const completedRunElapsed = useMemo(
     () => completedRunElapsedByMessageId(messages),
     [messages],
@@ -2850,9 +2909,16 @@ export function App() {
   }
 
   function selectSession(session: Session): void {
+    const nextSessionKey = sessionStateKey(session.id);
+    activeSessionIdRef.current = session.id;
     setSessionMenu(null);
     setView("workbench");
     setActiveSessionId(session.id);
+    setComposerDraftBySession((current) =>
+      current[nextSessionKey]
+        ? current
+        : { ...current, [nextSessionKey]: createEmptyComposerDraft() },
+    );
     setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, session.id));
     // Keep draftRunning for background new-task creation; activeSessionRunning ignores it when a session is selected.
     const live = streamedTextBySessionRef.current.get(session.id) ?? streamedTextBySession[session.id] ?? "";
@@ -2936,9 +3002,12 @@ export function App() {
     // Leave other sessions running in the background; only clear the composer view.
     // Bump the epoch first: turns started before this reset must not adopt the fresh composer.
     composerEpochRef.current += 1;
+    activeSessionIdRef.current = null;
     setActiveSessionId(null);
-    setComposerImages([]);
-    setComposerTextFiles([]);
+    setComposerDraftBySession((current) => ({
+      ...current,
+      [DRAFT_SESSION_KEY]: createEmptyComposerDraft(),
+    }));
     setMessages([]);
     setCompactedMessageCount(0);
     setContextCompactionSummary("");
@@ -3113,6 +3182,7 @@ export function App() {
       setRightPanelTabBySession((current) => dropSessionKey(current, sessionId));
       setBrowserNavigationBySession((current) => dropSessionKey(current, sessionId));
       setBrowserStateBySession((current) => dropSessionKey(current, sessionId));
+      setComposerDraftBySession((current) => dropSessionKey(current, sessionId));
       // Release the task's native webview so deleted tasks stop holding one.
       void browserClose(sessionStateKey(sessionId)).catch(() => undefined);
       if (activeSessionId === sessionId) {
@@ -3653,20 +3723,30 @@ export function App() {
 
   // Restores composer content when a send never reached the model, so an
   // interrupted steer cannot silently swallow the user's message.
-  function restoreComposerDraft(message: string, images: ChatImageAttachment[], textFiles: ComposerTextFile[] = []): void {
-    setPrompt((current) => (current.trim() ? current : message));
-    setComposerImages((current) =>
-      current.length > 0
-        ? current
-        : images.map((image, index) => ({
-            id: `restore-${Date.now()}-${index}`,
-            mime_type: image.mime_type,
-            data_base64: image.data_base64,
-            name: image.name,
-          previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
-        })),
-    );
-    setComposerTextFiles((current) => (current.length > 0 ? current : textFiles));
+  function restoreComposerDraft(
+    message: string,
+    images: ChatImageAttachment[],
+    textFiles: ComposerTextFile[] = [],
+    sessionKey: string = activeSessionStateKey,
+  ): void {
+    setComposerDraftBySession((current) => {
+      const draft = current[sessionKey] ?? createEmptyComposerDraft();
+      const restored: ComposerDraft = {
+        prompt: draft.prompt.trim() ? draft.prompt : message,
+        images:
+          draft.images.length > 0
+            ? draft.images
+            : images.map((image, index) => ({
+                id: `restore-${Date.now()}-${index}`,
+                mime_type: image.mime_type,
+                data_base64: image.data_base64,
+                name: image.name,
+                previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
+              })),
+        textFiles: draft.textFiles.length > 0 ? draft.textFiles : textFiles,
+      };
+      return { ...current, [sessionKey]: restored };
+    });
   }
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -3675,6 +3755,7 @@ export function App() {
   }
 
   async function submitComposer(): Promise<void> {
+    const composerSessionKey = activeSessionStateKey;
     const message = prompt.trim();
     const images = composerImages.map(({ mime_type, data_base64, name }) => ({
       mime_type,
@@ -3694,29 +3775,25 @@ export function App() {
         return;
       }
       if (composerSendMode === "steer") {
-        setPrompt("");
-        setComposerImages([]);
-        setComposerTextFiles([]);
+        clearComposerDraft(composerSessionKey);
         const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images, textFiles });
-        if (!sent) restoreComposerDraft(message, images, textFiles);
+        if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);
         setComposerSendMode("queue");
         return;
       }
       enqueueFollowUp(activeSessionId, message, images, textFiles);
-      setPrompt("");
-      setComposerImages([]);
-      setComposerTextFiles([]);
+      clearComposerDraft(composerSessionKey);
       setError(null);
       return;
     }
 
-    setPrompt("");
-    setComposerImages([]);
-    setComposerTextFiles([]);
-    await sendChatMessage(message, { images, textFiles });
+    clearComposerDraft(composerSessionKey);
+    const sent = await sendChatMessage(message, { images, textFiles });
+    if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);
   }
 
   async function steerCurrentRun(): Promise<void> {
+    const composerSessionKey = activeSessionStateKey;
     const message = prompt.trim();
     const images = composerImages.map(({ mime_type, data_base64, name }) => ({
       mime_type,
@@ -3732,11 +3809,9 @@ export function App() {
       setError(t(locale, "composer.needActiveSession"));
       return;
     }
-    setPrompt("");
-    setComposerImages([]);
-    setComposerTextFiles([]);
+    clearComposerDraft(composerSessionKey);
     const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images, textFiles });
-    if (!sent) restoreComposerDraft(message, images, textFiles);
+    if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);
   }
 
   async function resolveAction(approved: boolean): Promise<void> {

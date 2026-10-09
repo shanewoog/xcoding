@@ -225,6 +225,7 @@ $releaseGitPaths = @(
   "tests/e2e/desktop-activity.mjs",
   "tests/e2e/desktop-cancel.mjs",
   "tests/e2e/desktop-message-links.mjs",
+  "tests/e2e/desktop-composer-isolation.mjs",
   "tests/e2e/model-call-logs.mjs",
   "tests/e2e/read-only-agent.mjs",
   "tests/e2e/git-tools-agent.mjs",
