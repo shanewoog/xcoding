@@ -1901,6 +1901,12 @@ export function App() {
   }, [followUpQueue]);
 
   useEffect(() => {
+    if (!contextUsageOpen) return;
+    const timer = window.setTimeout(() => setContextUsageOpen(false), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [contextUsageOpen]);
+
+  useEffect(() => {
     saveLocale(locale);
     document.documentElement.lang = locale === "zh-CN" ? "zh-CN" : "en";
   }, [locale]);

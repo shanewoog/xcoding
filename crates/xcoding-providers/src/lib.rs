@@ -304,8 +304,10 @@ impl ProviderError {
                 )
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
+            Self::InvalidResponse(message) => {
+                message == "rate_limit_exceeded" || message.starts_with("rate_limit_exceeded:")
+            }
             Self::MissingApiKey
-            | Self::InvalidResponse(_)
             | Self::Utf8(_)
             | Self::StreamJson(_)
             | Self::InvalidToolCall(_) => false,
@@ -3321,6 +3323,40 @@ mod tests {
                 assert!(ProviderError::InvalidResponse(message).is_context_overflow());
             }
             _ => panic!("expected failed event"),
+        }
+    }
+
+    #[test]
+    fn responses_rate_limit_exceeded_is_retryable() {
+        let event = parse_responses_event(
+            r#"{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Your requests to gpt-6-astra for gpt-6-astra in eastus2 have exceeded token rate limit."}}}"#,
+        )
+        .expect("rate limit event parses");
+        let ResponsesParsedEvent::Failed(message) = event else {
+            panic!("expected failed event");
+        };
+        let error = ProviderError::InvalidResponse(message);
+        assert!(error.is_retryable());
+        assert!(!error.is_context_overflow());
+    }
+
+    #[test]
+    fn invalid_response_only_retries_explicit_rate_limit_codes() {
+        for message in [
+            "rate_limit_exceeded",
+            "rate_limit_exceeded: Too many requests",
+        ] {
+            assert!(ProviderError::InvalidResponse(message.to_owned()).is_retryable());
+        }
+        for message in [
+            "upstream_error: request failed",
+            "invalid_api_key: Invalid API key",
+            "insufficient_quota: Check your plan and billing details",
+            "invalid_request_error: rate_limit_exceeded is not a valid parameter",
+            "rate_limit_exceeded_unknown: request failed",
+            "context_length_exceeded: Your input exceeds the context window",
+        ] {
+            assert!(!ProviderError::InvalidResponse(message.to_owned()).is_retryable());
         }
     }
 

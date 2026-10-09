@@ -12,6 +12,7 @@ const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcodin
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
 async function main() {
+  await assertResponsesRateLimitThenSucceed();
   await assertEmptyResponseFailsClearly();
   await assertRetryThenFail();
   await assertRetryThenSucceed();
@@ -210,6 +211,76 @@ async function assertRetryThenFail() {
     await rpc.close();
     await mock.close();
     await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
+async function assertResponsesRateLimitThenSucceed() {
+  const requests = [];
+  const rateLimitMessage = "Your requests to gpt-6-astra for gpt-6-astra in eastus2 have exceeded token rate limit.";
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push({ url: request.url, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write('data: {"type":"response.created","response":{"status":"in_progress"}}\n\n');
+    if (requests.length < 3) {
+      response.end(
+        "data: " + JSON.stringify({
+          type: "response.failed",
+          response: { error: { code: "rate_limit_exceeded", message: rateLimitMessage } },
+        }) + "\n\n",
+      );
+    } else {
+      response.write('data: {"type":"response.output_text.delta","delta":"hello after rate limit"}\n\n');
+      response.end('data: {"type":"response.completed","response":{"status":"completed"}}\n\n');
+    }
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const baseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-responses-rate-limit-"));
+  const configDirectory = resolve(homeDirectory, ".xcoding");
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(resolve(configDirectory, "config.json"), JSON.stringify({
+    max_provider_retries: 5,
+    base_url: baseUrl,
+    providers: [{ id: "default", name: "openai", base_url: baseUrl, wire_api: "responses", api_key: "e2e-test-key" }],
+    active_provider_id: "default",
+  }), "utf8");
+  const { OPENAI_API_KEY, XCODING_OPENAI_BASE_URL, ...environment } = process.env;
+  const rpc = startRpcClient({
+    databasePath: resolve(homeDirectory, "xcoding.db"),
+    environment: {
+      ...environment,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
+    },
+  });
+
+  try {
+    const result = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Say hello",
+      model: "gpt-6-astra",
+    });
+    assert.equal(result.session.status, "done");
+    assert.equal(result.message?.content, "hello after rate limit");
+    assert.equal(requests.length, 3, "rate limits must retry within the same turn");
+    assert.ok(requests.every((request) => request.url === "/v1/responses"));
+    assert.equal(requests[0].body.model, "gpt-6-astra");
+    assert.deepEqual(requests[1].body, requests[0].body);
+    assert.deepEqual(requests[2].body, requests[0].body);
+    const retryEvents = rpc.events.filter((event) => event.type === "retrying");
+    assert.deepEqual(retryEvents.map((event) => event.attempt), [1, 2]);
+    assert.ok(retryEvents.every((event) =>
+      event.session_id === result.session.id &&
+      event.message.includes("rate_limit_exceeded: " + rateLimitMessage)));
+    assert.equal(rpc.events.filter((event) => event.type === "error").length, 0);
+    const calls = await persistedModelCallEvents(rpc, result.session.id);
+    assert.deepEqual(calls.map((event) => event.success), [false, false, true]);
+  } finally {
+    await rpc.close();
+    await new Promise((resolveClose) => server.close(resolveClose));
     await rm(homeDirectory, { recursive: true, force: true });
   }
 }

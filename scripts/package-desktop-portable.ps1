@@ -183,6 +183,7 @@ $releaseGitPaths = @(
   "Cargo.toml",
   "Cargo.lock",
   "tests/e2e/desktop-config.mjs",
+  "tests/e2e/desktop-context-usage.mjs",
   "tests/e2e/running-cancel-agent.mjs",
   "tests/acceptance/run.mjs",
   "crates/xcoding-agent/src/lib.rs",
