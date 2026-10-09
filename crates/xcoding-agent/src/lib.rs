@@ -37,7 +37,7 @@ const IMAGE_CONTEXT_TOKEN_ESTIMATE: usize = 2_000;
 const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
 const REQUEST_TOKEN_OVERHEAD: usize = 128;
 const MAX_TOOL_RESULT_CHARS: usize = 24_000;
-const TOOL_OUTPUT_TRUNCATION_MARKER: &str = "\n[tool output truncated by XCoding]";
+const TOOL_OUTPUT_TRUNCATION_MARKER: &str = "\n[tool output truncated by Codex]";
 /// Hard cap for one stored compaction summary. The compaction prompt asks for
 /// the same size, so the cap is a backstop rather than the normal path.
 const MAX_CONTEXT_SUMMARY_CHARS: usize = 6_000;
@@ -6204,6 +6204,17 @@ fn sanitize_chat_images(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_truncation_notice_uses_codex_and_preserves_original_text() {
+        let original = "XCoding source at .xcoding/skills/XCoding.md\n";
+        assert_eq!(super::truncate_tool_output(original, 200), original);
+        let marker = "\n[tool output truncated by Codex]";
+        let output = format!("{original}{}", "x".repeat(200));
+        let result =
+            super::truncate_tool_output(&output, original.chars().count() + marker.chars().count());
+        assert_eq!(result, format!("{original}{marker}"));
+    }
+
     use super::*;
     use xcoding_providers::StatusCode;
 

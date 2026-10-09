@@ -558,7 +558,7 @@ impl ToolError {
             value["policy_code"] = json!(code);
             value["reason"] = json!(reason);
             value["hint"] = json!(
-                "This command is hard-denied by XCoding policy or the workspace denylist. Choose a safer command."
+                "This command is hard-denied by Codex policy or the workspace denylist. Choose a safer command."
             );
         }
         if matches!(self, Self::PatchConflict(_)) {
@@ -3183,6 +3183,22 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_policy_hint_uses_codex_and_preserves_error_details() {
+        let reason = "Workspace rule from XCoding.md blocks this command";
+        let error = super::ToolError::CommandPolicyDenied {
+            code: "denied_workspace_denylist".to_owned(),
+            reason: reason.to_owned(),
+        };
+        let value = error.tool_result_value();
+        assert_eq!(value["policy_code"], "denied_workspace_denylist");
+        assert_eq!(value["reason"], reason);
+        assert_eq!(
+            value["hint"],
+            "This command is hard-denied by Codex policy or the workspace denylist. Choose a safer command."
+        );
+    }
+
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},

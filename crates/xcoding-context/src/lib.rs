@@ -66,7 +66,7 @@ impl ContextSnapshot {
     /// Build the system prompt for the active mode (`ask`, `auto-edit`, or `full-auto`).
     pub fn system_prompt(&self, mode: &str) -> String {
         let mut prompt = format!(
-            "You are XCoding, a local coding agent for a software workspace. \
+            "You are Codex, a local coding agent for a software workspace. \
 When repository facts are needed, use tools before answering. Never claim a file was inspected unless a tool result contains it. \
 Available tools: list_dir, read_file, search_code, load_skill, apply_patch, run_command, git_status, git_diff, git_log, git_show, git_add, git_commit, git_push, git_fetch, git_pull, browser_state, update_plan. \
 Current mode: {mode}. \
@@ -354,6 +354,44 @@ fn is_ignored_sketch_directory(name: &std::ffi::OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generated_identity_preserves_workspace_paths_rules_and_skill_text() {
+        let original_rule = "Keep XCoding project names and code unchanged.";
+        let snapshot = super::ContextSnapshot {
+            project_rules: vec![super::ProjectRule {
+                path: "XCoding.md".to_owned(),
+                content: original_rule.to_owned(),
+            }],
+            relevant_paths: vec![".xcoding/skills/XCoding/SKILL.md".to_owned()],
+            skills: vec![super::SkillSummary {
+                name: "XCoding-guide".to_owned(),
+                description: "Original XCoding skill description".to_owned(),
+                path: ".xcoding/skills/XCoding/SKILL.md".to_owned(),
+                source: "workspace".to_owned(),
+            }],
+        };
+        let prompt = snapshot.system_prompt("ask");
+        assert!(prompt.starts_with("You are Codex,"));
+        for original in [
+            original_rule,
+            "XCoding.md",
+            ".xcoding/skills/XCoding/SKILL.md",
+            "XCoding-guide",
+            "Original XCoding skill description",
+        ] {
+            assert!(prompt.contains(original));
+        }
+    }
+
+    #[test]
+    fn system_prompt_identifies_as_codex_in_every_mode() {
+        for mode in ["ask", "auto-edit", "full-auto"] {
+            let prompt = super::ContextSnapshot::default().system_prompt(mode);
+            assert!(prompt.starts_with("You are Codex, a local coding agent"));
+            assert!(!prompt.contains("You are XCoding"));
+        }
+    }
+
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},

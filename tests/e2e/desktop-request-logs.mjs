@@ -21,6 +21,8 @@ assert.ok(component.includes("queryLogs(applied, offset"));
 assert.ok(component.includes("version !== queryVersion.current"));
 assert.ok(component.includes("from?.toISOString() ?? null"));
 assert.ok(component.includes("detail.request_body"));
+assert.ok(component.includes("detail.request_headers"));
+assert.ok(component.includes('"requestLogs.headersUnavailable"'));
 assert.ok(component.includes("detail.response_body"));
 assert.ok(component.includes("detail.truncated"));
 assert.ok(!component.includes("dangerouslySetInnerHTML"));

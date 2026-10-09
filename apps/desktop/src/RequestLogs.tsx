@@ -15,6 +15,7 @@ interface LogSummary {
 }
 interface LogDetail extends LogSummary {
   request_body: string;
+  request_headers?: { name: string; value: string }[] | null;
   response_body: string;
   response_content_type: string | null;
   error: string | null;
@@ -155,6 +156,8 @@ export function RequestLogs({ locale, enabled, onEnabledChange, disabled }: {
       <p>{t(locale, "requestLogs.http")}: {detail.http_status ?? "—"} · {detail.duration_ms} ms · {detail.response_content_type}</p>
       {detail.error ? <pre className="models-error">{detail.error}</pre> : null}
       {detail.truncated ? <p role="status">{t(locale, "requestLogs.truncated")}</p> : null}
+      <h3>{t(locale, "requestLogs.requestHeaders")}</h3>
+      <pre>{detail.request_headers?.length ? detail.request_headers.map((header) => header.name + ": " + header.value).join("\n") : t(locale, "requestLogs.headersUnavailable")}</pre>
       <h3>{t(locale, "requestLogs.requestBody")}</h3><pre>{detail.request_body || "—"}</pre>
       <h3>{t(locale, "requestLogs.responseBody")}</h3><pre>{detail.response_body || "—"}</pre>
     </section> : null}

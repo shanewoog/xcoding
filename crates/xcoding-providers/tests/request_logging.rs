@@ -82,6 +82,7 @@ async fn records_wire_requests_and_responses_without_changing_them() {
     assert!(!legacy.record_model_requests);
     let mut config = UserConfig {
         http_proxy_mode: HttpProxyMode::Off,
+        http_user_agent: Some("codex-header-test/1.0".into()),
         ..UserConfig::default()
     };
     save_user_config(&config).unwrap();
@@ -134,6 +135,41 @@ async fn records_wire_requests_and_responses_without_changing_them() {
         assert_eq!(detail.http_status, Some(200));
         assert!(detail.endpoint.ends_with(suffix));
         assert_eq!(detail.response_body, response);
+        let detail_json = serde_json::to_value(&detail).unwrap();
+        let logged_headers = detail_json["request_headers"]
+            .as_array()
+            .expect("request Headers are recorded");
+        let wire_headers: Vec<_> = wire_request
+            .split_once("\r\n\r\n")
+            .unwrap()
+            .0
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let (name, value) = line.split_once(':').unwrap();
+                (name.to_ascii_lowercase(), value.trim().to_owned())
+            })
+            .collect();
+        assert_eq!(logged_headers.len(), wire_headers.len());
+        for (name, value) in &wire_headers {
+            let expected = if name == "authorization" || name == "x-api-key" {
+                "[REDACTED]"
+            } else {
+                value.as_str()
+            };
+            assert!(
+                logged_headers
+                    .iter()
+                    .any(|header| header["name"] == *name && header["value"] == expected),
+                "missing header {name}"
+            );
+        }
+        assert!(
+            logged_headers
+                .iter()
+                .any(|header| header["name"] == "user-agent"
+                    && header["value"] == "codex-header-test/1.0")
+        );
         let wire_body: serde_json::Value =
             serde_json::from_str(wire_request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(

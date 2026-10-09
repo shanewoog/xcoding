@@ -17,6 +17,12 @@ const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const PAGE_SIZE: usize = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestLogHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestLogDetail {
     pub id: String,
     pub created_at: String,
@@ -26,6 +32,8 @@ pub struct RequestLogDetail {
     pub http_status: Option<u16>,
     pub duration_ms: u64,
     pub request_body: String,
+    #[serde(default)]
+    pub request_headers: Option<Vec<RequestLogHeader>>,
     pub response_body: String,
     pub response_content_type: Option<String>,
     pub error: Option<String>,
@@ -371,6 +379,7 @@ impl RequestLog {
                 http_status: None,
                 duration_ms: 0,
                 request_body,
+                request_headers: None,
                 response_body: String::new(),
                 response_content_type: None,
                 error: None,
@@ -389,6 +398,64 @@ impl RequestLog {
         self.0
             .as_ref()
             .map(|state| state.lock().unwrap().detail.id.clone())
+    }
+
+    pub(crate) fn request(&self, request: &reqwest::Request) {
+        let Some(state) = &self.0 else {
+            return;
+        };
+        let Ok(mut state) = state.lock() else {
+            return;
+        };
+        let mut headers = request.headers().clone();
+        headers
+            .entry("accept")
+            .or_insert(reqwest::header::HeaderValue::from_static("*/*"));
+        if let Some(host) = request.url().host_str() {
+            let authority = match request.url().port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            };
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(&authority) {
+                headers.entry("host").or_insert(value);
+            }
+        }
+        if let Some(body) = request.body().and_then(reqwest::Body::as_bytes) {
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(&body.len().to_string()) {
+                headers.entry("content-length").or_insert(value);
+            }
+        }
+        let mut captured: Vec<_> = headers
+            .iter()
+            .map(|(name, value)| {
+                let sensitive = value.is_sensitive()
+                    || [
+                        "authorization",
+                        "proxy-authorization",
+                        "cookie",
+                        "set-cookie",
+                        "x-api-key",
+                        "api-key",
+                        "api_key",
+                        "x-auth-token",
+                        "x-access-token",
+                    ]
+                    .contains(&name.as_str());
+                RequestLogHeader {
+                    name: name.as_str().to_owned(),
+                    value: if sensitive {
+                        "[REDACTED]".into()
+                    } else {
+                        redact(&String::from_utf8_lossy(value.as_bytes()), &state.api_key)
+                    },
+                }
+            })
+            .collect();
+        captured.sort_by(|left, right| left.name.cmp(&right.name));
+        state.detail.request_headers = Some(captured);
+        if state.persist().is_err() {
+            eprintln!("Failed to persist model request headers");
+        }
     }
 
     pub(crate) fn response(&self, response: &reqwest::Response) {
@@ -517,6 +584,108 @@ mod tests {
         assert!(detail.response_body.contains("你好 [REDACTED]"));
         assert!(!serde_json::to_string(&detail).unwrap().contains("secret"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stores_headers_before_sending_and_redacts_sensitive_values() {
+        let path = test_path();
+        let body = json!({"model":"test"});
+        let log = RequestLog::start_at(
+            &path,
+            true,
+            30,
+            "http://[::1]:9080/v1",
+            &body,
+            "active-secret",
+        );
+        let id = log.id().unwrap();
+        let mut secret_header = reqwest::header::HeaderValue::from_static("separate-secret");
+        secret_header.set_sensitive(true);
+        let request = reqwest::Client::new()
+            .post("http://[::1]:9080/v1")
+            .header("authorization", "Bearer active-secret")
+            .header("cookie", "session=cookie-secret")
+            .header("proxy-authorization", "Basic proxy-secret")
+            .header("x-private", secret_header)
+            .header("x-custom", "key=active-secret")
+            .header("x-tag", "first")
+            .header("x-tag", "second")
+            .json(&body)
+            .build()
+            .unwrap();
+        log.request(&request);
+        let detail = detail_at(&path, 30, &id).unwrap();
+        assert_eq!(detail.status, "pending");
+        let headers = detail.request_headers.as_ref().unwrap();
+        for name in [
+            "authorization",
+            "cookie",
+            "proxy-authorization",
+            "x-private",
+        ] {
+            assert!(
+                headers
+                    .iter()
+                    .any(|header| header.name == name && header.value == "[REDACTED]")
+            );
+        }
+        assert!(
+            headers
+                .iter()
+                .any(|header| header.name == "host" && header.value == "[::1]:9080")
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|header| header.name == "x-custom" && header.value == "key=[REDACTED]")
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|header| header.name == "x-tag")
+                .count(),
+            2
+        );
+        let encoded = serde_json::to_string(&detail).unwrap();
+        for secret in [
+            "active-secret",
+            "cookie-secret",
+            "proxy-secret",
+            "separate-secret",
+        ] {
+            assert!(!encoded.contains(secret));
+        }
+        let mut legacy = serde_json::to_value(&detail).unwrap();
+        legacy.as_object_mut().unwrap().remove("request_headers");
+        assert!(
+            serde_json::from_value::<RequestLogDetail>(legacy)
+                .unwrap()
+                .request_headers
+                .is_none()
+        );
+        drop(log);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn disabled_recording_does_not_store_headers() {
+        let path = test_path();
+        let log = RequestLog::start_at(
+            &path,
+            false,
+            30,
+            "https://example.com",
+            &json!({"model":"test"}),
+            "secret",
+        );
+        let request = reqwest::Client::new()
+            .post("https://example.com")
+            .header("authorization", "Bearer secret")
+            .build()
+            .unwrap();
+        log.request(&request);
+        drop(log);
+        assert!(!path.exists());
     }
 
     #[test]

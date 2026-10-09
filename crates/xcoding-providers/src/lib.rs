@@ -1428,7 +1428,10 @@ impl OpenAiCompatibleProvider {
             ));
         }
         let start = Instant::now();
-        let request = self.client.post(&url).json(body);
+        let mut request = self.client.post(&url).json(body);
+        if let Ok(user_agent) = reqwest::header::HeaderValue::from_str(&http_user_agent()) {
+            request = request.header(reqwest::header::USER_AGENT, user_agent);
+        }
         let request = match self.wire_api {
             ProviderWireApi::AnthropicMessages => request
                 .header("x-api-key", &self.api_key)
@@ -1437,7 +1440,12 @@ impl OpenAiCompatibleProvider {
                 request.bearer_auth(&self.api_key)
             }
         };
-        let response = request.send().await.map_err(|e| {
+        let request = request.build().map_err(|error| {
+            request_log.finish(Some(&error.to_string()));
+            ProviderError::from(error)
+        })?;
+        request_log.request(&request);
+        let response = self.client.execute(request).await.map_err(|e| {
             request_log.finish(Some(&e.to_string()));
             log_to_file(&format!("[XCoding HTTP] request failed after {:?}: {}", start.elapsed(), e));
             ProviderError::from(e)

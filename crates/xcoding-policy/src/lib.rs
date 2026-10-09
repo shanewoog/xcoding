@@ -210,7 +210,7 @@ pub fn assess_command_with_lists(
     if shell_wraps_destructive_delete(&exe, &args_lower) {
         return denied(
             CommandPolicyCode::DeniedShellDestructiveDelete,
-            "shell-wrapped delete commands are blocked by XCoding policy; use a direct file operation instead",
+            "shell-wrapped delete commands are blocked by Codex policy; use a direct file operation instead",
         );
     }
 
@@ -237,21 +237,21 @@ pub fn assess_command_with_lists(
     ) {
         return denied(
             CommandPolicyCode::DeniedExecutable,
-            format!("command `{exe}` is blocked by XCoding policy"),
+            format!("command `{exe}` is blocked by Codex policy"),
         );
     }
 
     if exe == "dd" && args_lower.iter().any(|arg| is_raw_disk_dd_arg(arg)) {
         return denied(
             CommandPolicyCode::DeniedDestructiveDisk,
-            "raw disk dd device targets are blocked by XCoding policy",
+            "raw disk dd device targets are blocked by Codex policy",
         );
     }
 
     if exe == "rm" && has_flag(&args_lower, "-rf") && targets_dangerous_delete_path(&args_lower) {
         return denied(
             CommandPolicyCode::DeniedRecursiveRootDelete,
-            "recursive delete of filesystem roots or home directories is blocked by XCoding policy",
+            "recursive delete of filesystem roots or home directories is blocked by Codex policy",
         );
     }
 
@@ -268,13 +268,13 @@ pub fn assess_command_with_lists(
         if has_flag(&args_lower, "/s") && targets_filesystem_root(&args_lower) {
             return denied(
                 CommandPolicyCode::DeniedRecursiveRootDelete,
-                "recursive delete of filesystem roots is blocked by XCoding policy",
+                "recursive delete of filesystem roots is blocked by Codex policy",
             );
         }
         if targets_absolute_path(&args_lower) {
             return denied(
                 CommandPolicyCode::DeniedAbsoluteDelete,
-                "absolute-path file deletion is blocked by XCoding policy; use a workspace-relative path",
+                "absolute-path file deletion is blocked by Codex policy; use a workspace-relative path",
             );
         }
     }
@@ -285,7 +285,7 @@ pub fn assess_command_with_lists(
     {
         return denied(
             CommandPolicyCode::DeniedRecursiveRootDelete,
-            format!("recursive `{exe}` of filesystem roots is blocked by XCoding policy"),
+            format!("recursive `{exe}` of filesystem roots is blocked by Codex policy"),
         );
     }
 
@@ -293,7 +293,7 @@ pub fn assess_command_with_lists(
         if lower_joined.contains("hklm") || lower_joined.contains("hkey_local_machine") {
             return denied(
                 CommandPolicyCode::DeniedRegistryHklm,
-                "registry deletes under HKLM are blocked by XCoding policy",
+                "registry deletes under HKLM are blocked by Codex policy",
             );
         }
     }
@@ -302,7 +302,7 @@ pub fn assess_command_with_lists(
         if git_forced_worktree_delete(&args_lower) {
             return denied(
                 CommandPolicyCode::DeniedGitForcedWorktreeDelete,
-                "forced git worktree or submodule deletion is blocked by XCoding policy",
+                "forced git worktree or submodule deletion is blocked by Codex policy",
             );
         }
         if git_file_delete_target_traverses_parent(&args_lower) {
@@ -314,7 +314,7 @@ pub fn assess_command_with_lists(
         if args_lower.iter().any(|arg| arg == "clean") {
             return denied(
                 CommandPolicyCode::DeniedGitClean,
-                "git clean can delete untracked workspace files and is blocked by XCoding policy",
+                "git clean can delete untracked workspace files and is blocked by Codex policy",
             );
         }
         if args_lower.iter().any(|arg| arg == "push")
@@ -322,25 +322,25 @@ pub fn assess_command_with_lists(
         {
             return denied(
                 CommandPolicyCode::DeniedGitMirrorPush,
-                "git push --mirror is blocked by XCoding policy",
+                "git push --mirror is blocked by Codex policy",
             );
         }
         if git_push_deletes_remote_ref(&args_lower) {
             return denied(
                 CommandPolicyCode::DeniedGitRemoteDelete,
-                "deleting a remote git ref is blocked by XCoding policy",
+                "deleting a remote git ref is blocked by Codex policy",
             );
         }
         if git_history_rewrite_is_irreversible(&args_lower) {
             return denied(
                 CommandPolicyCode::DeniedGitHistoryRewrite,
-                "irreversible git history cleanup or rewrite is blocked by XCoding policy",
+                "irreversible git history cleanup or rewrite is blocked by Codex policy",
             );
         }
         if git_deletes_reference(&args_lower) {
             return denied(
                 CommandPolicyCode::DeniedGitReferenceDelete,
-                "deleting git references is blocked by XCoding policy",
+                "deleting git references is blocked by Codex policy",
             );
         }
     }
@@ -1114,6 +1114,90 @@ fn git_file_delete_target_traverses_parent(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_policy_reasons_use_codex_without_changing_decisions() {
+        let cases = [
+            (
+                "cmd",
+                vec!["/c", "rmdir /s /q cache"],
+                CommandPolicyCode::DeniedShellDestructiveDelete,
+            ),
+            ("format", vec!["D:"], CommandPolicyCode::DeniedExecutable),
+            ("dd", vec!["of=/dev/sda"], CommandPolicyCode::DeniedDestructiveDisk),
+            (
+                "rm",
+                vec!["-rf", "/"],
+                CommandPolicyCode::DeniedRecursiveRootDelete,
+            ),
+            (
+                "rmdir",
+                vec!["/s", "D:\\"],
+                CommandPolicyCode::DeniedRecursiveRootDelete,
+            ),
+            (
+                "del",
+                vec!["D:\\XCoding\\file.txt"],
+                CommandPolicyCode::DeniedAbsoluteDelete,
+            ),
+            (
+                "chmod",
+                vec!["-R", "/"],
+                CommandPolicyCode::DeniedRecursiveRootDelete,
+            ),
+            (
+                "reg",
+                vec!["delete", "HKLM\\Software\\Example"],
+                CommandPolicyCode::DeniedRegistryHklm,
+            ),
+            (
+                "git",
+                vec!["worktree", "remove", "--force", "../other"],
+                CommandPolicyCode::DeniedGitForcedWorktreeDelete,
+            ),
+            ("git", vec!["clean", "-fd"], CommandPolicyCode::DeniedGitClean),
+            (
+                "git",
+                vec!["push", "--mirror"],
+                CommandPolicyCode::DeniedGitMirrorPush,
+            ),
+            (
+                "git",
+                vec!["push", "origin", "--delete", "main"],
+                CommandPolicyCode::DeniedGitRemoteDelete,
+            ),
+            (
+                "git",
+                vec!["gc", "--prune=now"],
+                CommandPolicyCode::DeniedGitHistoryRewrite,
+            ),
+            (
+                "git",
+                vec!["update-ref", "-d", "refs/heads/main"],
+                CommandPolicyCode::DeniedGitReferenceDelete,
+            ),
+        ];
+        for (executable, arguments, code) in cases {
+            let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let assessment = assess_command(executable, &arguments);
+            assert_eq!(
+                assessment.decision,
+                PermissionDecision::Deny,
+                "{executable} {arguments:?}"
+            );
+            assert_eq!(assessment.code, code, "{executable} {arguments:?}");
+            assert!(
+                assessment.reason.contains("Codex policy"),
+                "{}",
+                assessment.reason
+            );
+            assert!(
+                !assessment.reason.contains("XCoding"),
+                "{}",
+                assessment.reason
+            );
+        }
+    }
 
     #[test]
     fn workspace_file_writes_are_allowed_in_both_modes() {
