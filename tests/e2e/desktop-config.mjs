@@ -627,6 +627,20 @@ async function main() {
     "proxy labels must exist in both en and zh-CN catalogs",
   );
 
+  // Provider HTTP User-Agent default setting.
+  assert.ok(protocolSource.includes("http_user_agent?: string"), "TypeScript protocol missing HTTP User-Agent config");
+  assert.ok(appSource.includes("const [httpUserAgent, setHttpUserAgent]"), "App missing HTTP User-Agent state");
+  assert.ok(appSource.includes('id="http-user-agent"'), "defaults settings should render HTTP User-Agent input");
+  assert.ok(appSource.includes("http_user_agent: httpUserAgent.trim() || undefined"), "empty User-Agent must be saved as unset");
+  assert.ok(appSource.includes('setHttpUserAgent((config.http_user_agent ?? "").trim())'), "App must hydrate HTTP User-Agent");
+  assert.ok(appSource.includes('setHttpUserAgent((savedUser.http_user_agent ?? "").trim())'), "App must refresh HTTP User-Agent after save");
+  for (const needle of [
+    '"field.httpUserAgent"',
+    '"field.httpUserAgentHint"',
+  ]) {
+    assert.equal((i18nSource.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length, 2, needle + " must exist in both en and zh-CN catalogs");
+  }
+
   for (const needle of [
     ".mode-help",
     ".doctor-panel",

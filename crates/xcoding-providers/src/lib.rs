@@ -1,5 +1,7 @@
 //! Cloud-model adapters for OpenAI-compatible streaming chat completions.
 
+pub mod request_logs;
+
 use std::io::Write;
 use std::path::Path;
 use std::{
@@ -400,14 +402,23 @@ pub fn provider_retry_delay(retry_number: u32) -> Duration {
 /// Many restricted gateways only allow Codex-looking clients.
 pub const DEFAULT_HTTP_USER_AGENT: &str = "codex_cli_rs/0.50.0";
 
-/// Resolve the provider HTTP User-Agent.
-/// Override with `XCODING_HTTP_USER_AGENT` when a gateway expects a different Codex flavor.
-pub fn http_user_agent() -> String {
-    env::var("XCODING_HTTP_USER_AGENT")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+/// Resolve the provider HTTP User-Agent from settings, environment, then the built-in default.
+pub fn resolve_http_user_agent(configured: Option<&str>, env_override: Option<&str>) -> String {
+    [configured, env_override]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
         .unwrap_or_else(|| DEFAULT_HTTP_USER_AGENT.to_owned())
+}
+
+/// Resolve the provider HTTP User-Agent.
+/// A saved setting takes precedence over `XCODING_HTTP_USER_AGENT`.
+pub fn http_user_agent() -> String {
+    let config = load_user_config();
+    let env_override = env::var("XCODING_HTTP_USER_AGENT").ok();
+    resolve_http_user_agent(config.http_user_agent.as_deref(), env_override.as_deref())
 }
 
 /// Hosts that never go through a custom proxy, so a local model server stays reachable.
@@ -833,6 +844,14 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
             config.http_proxy_url = None;
         } else {
             *url = trimmed;
+        }
+    }
+    if let Some(user_agent) = config.http_user_agent.as_mut() {
+        let trimmed = user_agent.trim().to_owned();
+        if trimmed.is_empty() {
+            config.http_user_agent = None;
+        } else {
+            *user_agent = trimmed;
         }
     }
     // Custom mode without a URL would proxy nothing; keep system behaviour instead.
@@ -1291,8 +1310,9 @@ impl OpenAiCompatibleProvider {
 
         // The agent owns retry scheduling so it can report each reconnect attempt to
         // the UI. This provider opens one SSE response per call.
-        let response = self.open_chat_completion(&body).await?;
+        let (response, request_log) = self.open_chat_completion(&body).await?;
         let response_status = response.status();
+        let stream_log = request_log.clone();
 
         let stream = try_stream! {
             let mut bytes = response.bytes_stream();
@@ -1308,6 +1328,7 @@ impl OpenAiCompatibleProvider {
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                stream_log.append(&chunk);
                 if first_chunk {
                     first_chunk = false;
                     log_to_file(&format!("[XCoding HTTP] first stream chunk after {:?} size={}bytes", stream_start.elapsed(), chunk.len()));
@@ -1377,11 +1398,15 @@ impl OpenAiCompatibleProvider {
             ))?;
         };
 
-        Ok(Box::pin(stream))
+        Ok(request_log.wrap(Box::pin(stream)))
     }
 
-    async fn open_chat_completion(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
+    async fn open_chat_completion(
+        &self,
+        body: &Value,
+    ) -> Result<(reqwest::Response, request_logs::RequestLog), ProviderError> {
         let url = self.chat_url();
+        let request_log = request_logs::RequestLog::start(&url, body, &self.api_key);
         let body_size = serde_json::to_string(body).map(|s| s.len()).unwrap_or(0);
         let proxy = resolve_http_proxy();
         log_to_file(&format!("[XCoding HTTP] POST {} body={}bytes proxy={:?}", url, body_size, proxy));
@@ -1413,16 +1438,19 @@ impl OpenAiCompatibleProvider {
             }
         };
         let response = request.send().await.map_err(|e| {
+            request_log.finish(Some(&e.to_string()));
             log_to_file(&format!("[XCoding HTTP] request failed after {:?}: {}", start.elapsed(), e));
             ProviderError::from(e)
         })?;
+        request_log.response(&response);
         log_to_file(&format!("[XCoding HTTP] response status={} elapsed={:?}", response.status(), start.elapsed()));
 
         if !response.status().is_success() {
             let status = response.status();
             let retry_after_secs = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            log_to_file(&format!("[XCoding HTTP] error response body (first 2000chars): {}", &body[..body.len().min(2000)]));
+            request_log.append(body.as_bytes());
+            request_log.finish(Some(&format!("HTTP {status}")));
             return Err(ProviderError::HttpStatus {
                 status,
                 body,
@@ -1430,7 +1458,7 @@ impl OpenAiCompatibleProvider {
             });
         }
 
-        Ok(response)
+        Ok((response, request_log))
     }
 
     async fn stream_responses(
@@ -1441,8 +1469,9 @@ impl OpenAiCompatibleProvider {
         reasoning_effort: Option<&str>,
     ) -> Result<ProviderEventStream, ProviderError> {
         let body = responses_request_body(model, messages, tools, reasoning_effort);
-        let response = self.open_chat_completion(&body).await?;
+        let (response, request_log) = self.open_chat_completion(&body).await?;
         let response_status = response.status();
+        let stream_log = request_log.clone();
 
         let stream = try_stream! {
             let mut bytes = response.bytes_stream();
@@ -1456,6 +1485,7 @@ impl OpenAiCompatibleProvider {
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                stream_log.append(&chunk);
                 if first_chunk {
                     first_chunk = false;
                     log_to_file(&format!("[XCoding HTTP] first stream chunk after {:?} size={}bytes", stream_start.elapsed(), chunk.len()));
@@ -1528,7 +1558,7 @@ impl OpenAiCompatibleProvider {
             }
         };
 
-        Ok(Box::pin(stream))
+        Ok(request_log.wrap(Box::pin(stream)))
     }
 
     async fn stream_anthropic_messages(
@@ -1538,8 +1568,9 @@ impl OpenAiCompatibleProvider {
         tools: &[ToolDefinition],
     ) -> Result<ProviderEventStream, ProviderError> {
         let body = anthropic_messages_request_body(model, messages, tools);
-        let response = self.open_chat_completion(&body).await?;
+        let (response, request_log) = self.open_chat_completion(&body).await?;
         let response_status = response.status();
+        let stream_log = request_log.clone();
 
         let stream = try_stream! {
             let mut bytes = response.bytes_stream();
@@ -1557,6 +1588,7 @@ impl OpenAiCompatibleProvider {
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|error| ProviderError::StreamDisconnected(error.to_string()))?;
+                stream_log.append(&chunk);
                 if first_chunk {
                     first_chunk = false;
                     log_to_file(&format!("[XCoding HTTP] first stream chunk after {:?} size={}bytes", stream_start.elapsed(), chunk.len()));
@@ -1641,7 +1673,7 @@ impl OpenAiCompatibleProvider {
             }
         };
 
-        Ok(Box::pin(stream))
+        Ok(request_log.wrap(Box::pin(stream)))
     }
 }
 
@@ -2609,19 +2641,16 @@ mod tests {
     }
 
     #[test]
-    fn http_user_agent_uses_env_override() {
-        let key = "XCODING_HTTP_USER_AGENT";
-        let previous = env::var(key).ok();
-        unsafe {
-            env::set_var(key, "codex-cli/9.9.9");
-        }
-        assert_eq!(http_user_agent(), "codex-cli/9.9.9");
-        unsafe {
-            match previous {
-                Some(value) => env::set_var(key, value),
-                None => env::remove_var(key),
-            }
-        }
+    fn resolve_http_user_agent_prefers_setting_then_env_then_default() {
+        assert_eq!(
+            resolve_http_user_agent(Some(" setting/1.0 "), Some("env/2.0")),
+            "setting/1.0"
+        );
+        assert_eq!(resolve_http_user_agent(None, Some(" env/2.0 ")), "env/2.0");
+        assert_eq!(
+            resolve_http_user_agent(Some("  "), Some("")),
+            DEFAULT_HTTP_USER_AGENT
+        );
     }
 
     #[test]
@@ -2675,6 +2704,21 @@ mod tests {
                 "socks5://127.0.0.1:10808".to_owned()
             ))
         );
+    }
+
+    #[test]
+    fn normalize_user_config_trims_http_user_agent() {
+        let config = normalize_user_config(UserConfig {
+            http_user_agent: Some("  codex-cli/1.2.3  ".to_owned()),
+            ..UserConfig::default()
+        });
+        assert_eq!(config.http_user_agent.as_deref(), Some("codex-cli/1.2.3"));
+
+        let config = normalize_user_config(UserConfig {
+            http_user_agent: Some("   ".to_owned()),
+            ..UserConfig::default()
+        });
+        assert_eq!(config.http_user_agent, None);
     }
 
     #[test]

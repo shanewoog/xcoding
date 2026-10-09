@@ -262,6 +262,7 @@ export interface UserConfig {
   non_stream_timeout_secs?: number;
   /** Number of days to retain model call audit logs. */
   model_call_log_retention_days?: number;
+  record_model_requests?: boolean;
   /** Successful half-open turns required before a provider circuit closes. */
   circuit_recovery_success_threshold?: number;
   /** Seconds a tripped provider circuit remains open before a half-open probe. */
@@ -301,6 +302,8 @@ export interface UserConfig {
   http_proxy_mode?: HttpProxyMode;
   /** Proxy URL used when http_proxy_mode is custom, e.g. http://127.0.0.1:10808. */
   http_proxy_url?: string;
+  /** User-Agent sent on provider HTTP requests. Empty uses the built-in default. */
+  http_user_agent?: string;
 }
 
 export interface ProjectDir {

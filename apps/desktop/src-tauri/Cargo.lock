@@ -5425,7 +5425,7 @@ dependencies = [
 
 [[package]]
 name = "xcoding-desktop"
-version = "1.0.72"
+version = "1.0.73"
 dependencies = [
  "dotenvy",
  "pinyin",
@@ -5480,10 +5480,12 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "reqwest 0.12.28",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "uuid",
  "xcoding-protocol",
 ]
 

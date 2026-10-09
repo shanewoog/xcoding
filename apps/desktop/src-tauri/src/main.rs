@@ -5,6 +5,7 @@ mod browser;
 mod gitnexus;
 mod passwords;
 mod projects;
+mod request_logs;
 mod terminal;
 mod workspace_tools;
 
@@ -940,6 +941,8 @@ fn main() {
             session_detail,
             session_replay,
             model_call_report,
+            request_logs::query_model_request_logs,
+            request_logs::model_request_log_detail,
             chat,
             resolve_action,
             rollback_restore_point,

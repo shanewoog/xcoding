@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { RequestLogs } from "./RequestLogs";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
@@ -1414,7 +1415,7 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
   );
 }
 
-type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults" | "reports";
+type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults" | "reports" | "requestLogs";
 type ModelReportTab = "providers" | "keys" | "models";
 
 // Prefer the tool call that is still running, so the hint names what is happening now rather than
@@ -1500,12 +1501,14 @@ export function App() {
   const [providerFallbackEnabled, setProviderFallbackEnabled] = useState(false);
   const [httpProxyMode, setHttpProxyMode] = useState<HttpProxyMode>("system");
   const [httpProxyUrl, setHttpProxyUrl] = useState("");
+  const [httpUserAgent, setHttpUserAgent] = useState("");
   const [maxToolRounds, setMaxToolRounds] = useState(DEFAULT_MAX_TOOL_ROUNDS);
   const [circuitFailureThreshold, setCircuitFailureThreshold] = useState(DEFAULT_CIRCUIT_FAILURE_THRESHOLD);
   const [streamFirstEventTimeoutSecs, setStreamFirstEventTimeoutSecs] = useState(DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS);
   const [streamIdleTimeoutSecs, setStreamIdleTimeoutSecs] = useState(DEFAULT_STREAM_IDLE_TIMEOUT_SECS);
   const [nonStreamTimeoutSecs, setNonStreamTimeoutSecs] = useState(DEFAULT_NON_STREAM_TIMEOUT_SECS);
   const [modelCallLogRetentionDays, setModelCallLogRetentionDays] = useState(DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS);
+  const [recordModelRequests, setRecordModelRequests] = useState(false);
   const [circuitRecoverySuccessThreshold, setCircuitRecoverySuccessThreshold] = useState(DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD);
   const [circuitRecoveryWaitSecs, setCircuitRecoveryWaitSecs] = useState(DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS);
   const [circuitErrorRateThresholdPercent, setCircuitErrorRateThresholdPercent] = useState(DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT);
@@ -1999,12 +2002,14 @@ export function App() {
         setProviderFallbackEnabled(config.provider_fallback_enabled === true);
         setHttpProxyMode(normalizeHttpProxyMode(config.http_proxy_mode));
         setHttpProxyUrl((config.http_proxy_url ?? "").trim());
+        setHttpUserAgent((config.http_user_agent ?? "").trim());
         setMaxToolRounds(normalizeBoundedInteger(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
         setCircuitFailureThreshold(normalizeBoundedInteger(config.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
         setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(config.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
         setStreamIdleTimeoutSecs(normalizeBoundedInteger(config.stream_idle_timeout_secs, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS));
         setNonStreamTimeoutSecs(normalizeBoundedInteger(config.non_stream_timeout_secs, DEFAULT_NON_STREAM_TIMEOUT_SECS, MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS));
         setModelCallLogRetentionDays(normalizeBoundedInteger(config.model_call_log_retention_days, DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS, 1, Number.MAX_SAFE_INTEGER));
+        setRecordModelRequests(config.record_model_requests ?? false);
         setCircuitRecoverySuccessThreshold(normalizeBoundedInteger(config.circuit_recovery_success_threshold, DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD));
         setCircuitRecoveryWaitSecs(normalizeBoundedInteger(config.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
         setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(config.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
@@ -4213,6 +4218,7 @@ export function App() {
           stream_idle_timeout_secs: normalizeBoundedInteger(streamIdleTimeoutSecs, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS),
           non_stream_timeout_secs: normalizeBoundedInteger(nonStreamTimeoutSecs, DEFAULT_NON_STREAM_TIMEOUT_SECS, MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS),
           model_call_log_retention_days: normalizeBoundedInteger(modelCallLogRetentionDays, DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS, 1, Number.MAX_SAFE_INTEGER),
+          record_model_requests: recordModelRequests,
           circuit_recovery_success_threshold: normalizeBoundedInteger(circuitRecoverySuccessThreshold, DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD),
           circuit_recovery_wait_secs: normalizeBoundedInteger(circuitRecoveryWaitSecs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS),
           circuit_error_rate_threshold_percent: normalizeBoundedInteger(circuitErrorRateThresholdPercent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT),
@@ -4231,6 +4237,7 @@ export function App() {
           model_routes: modelRouteMapFromEntries(modelRouteEntries),
           http_proxy_mode: httpProxyMode,
           http_proxy_url: httpProxyUrl.trim() || undefined,
+          http_user_agent: httpUserAgent.trim() || undefined,
           vision_delegate: visionDelegateConfigFromForm(visionDelegate),
           model_capabilities: modelCapabilities,
           custom_instructions: customInstructions.trim() || undefined,
@@ -4247,12 +4254,14 @@ export function App() {
       setProviderFallbackEnabled(savedUser.provider_fallback_enabled === true);
       setHttpProxyMode(normalizeHttpProxyMode(savedUser.http_proxy_mode));
       setHttpProxyUrl((savedUser.http_proxy_url ?? "").trim());
+      setHttpUserAgent((savedUser.http_user_agent ?? "").trim());
       setMaxToolRounds(normalizeBoundedInteger(savedUser.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS));
       setCircuitFailureThreshold(normalizeBoundedInteger(savedUser.circuit_failure_threshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD));
       setStreamFirstEventTimeoutSecs(normalizeBoundedInteger(savedUser.stream_first_event_timeout_secs, DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS));
       setStreamIdleTimeoutSecs(normalizeBoundedInteger(savedUser.stream_idle_timeout_secs, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS));
       setNonStreamTimeoutSecs(normalizeBoundedInteger(savedUser.non_stream_timeout_secs, DEFAULT_NON_STREAM_TIMEOUT_SECS, MIN_NON_STREAM_TIMEOUT_SECS, MAX_NON_STREAM_TIMEOUT_SECS));
       setModelCallLogRetentionDays(normalizeBoundedInteger(savedUser.model_call_log_retention_days, DEFAULT_MODEL_CALL_LOG_RETENTION_DAYS, 1, Number.MAX_SAFE_INTEGER));
+      setRecordModelRequests(savedUser.record_model_requests ?? false);
       setCircuitRecoverySuccessThreshold(normalizeBoundedInteger(savedUser.circuit_recovery_success_threshold, DEFAULT_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD));
       setCircuitRecoveryWaitSecs(normalizeBoundedInteger(savedUser.circuit_recovery_wait_secs, DEFAULT_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CIRCUIT_RECOVERY_WAIT_SECS));
       setCircuitErrorRateThresholdPercent(normalizeBoundedInteger(savedUser.circuit_error_rate_threshold_percent, DEFAULT_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT));
@@ -4524,6 +4533,7 @@ export function App() {
       { id: "plugins", labelKey: "settings.tab.plugins" },
       { id: "defaults", labelKey: "settings.tab.defaults" },
       { id: "reports", labelKey: "settings.tab.reports" },
+      { id: "requestLogs", labelKey: "settings.tab.requestLogs" },
     ];
     const focusSettingsTab = (tab: SettingsTab) => {
       requestAnimationFrame(() => {
@@ -5743,6 +5753,16 @@ export function App() {
               disabled={anySessionRunning || isSavingConfig}
             />
             <p className="mode-help">{t(locale, "field.workspaceHint")}</p>
+            <label className="field-label" htmlFor="http-user-agent">{t(locale, "field.httpUserAgent")}</label>
+            <input
+              id="http-user-agent"
+              value={httpUserAgent}
+              onChange={(event) => setHttpUserAgent(event.target.value)}
+              placeholder="codex_cli_rs/0.50.0"
+              spellCheck={false}
+              disabled={anySessionRunning || isSavingConfig}
+            />
+            <p className="mode-help">{t(locale, "field.httpUserAgentHint")}</p>
             <label className="field-label" htmlFor="model-call-log-retention-days">{t(locale, "field.modelCallLogRetentionDays")}</label>
             <input
               id="model-call-log-retention-days"
@@ -5794,6 +5814,12 @@ export function App() {
               <p className="mode-help">{t(locale, "settings.workspacePolicyHint")}</p>
             ) : null}
           </section>
+
+          {settingsTab === "requestLogs" ? (
+            <section className="settings-card request-logs-card" role="tabpanel" id="settings-panel-requestLogs" aria-labelledby="settings-tab-requestLogs">
+              <RequestLogs locale={locale} enabled={recordModelRequests} onEnabledChange={setRecordModelRequests} disabled={anySessionRunning || isSavingConfig || !isTauriRuntime} />
+            </section>
+          ) : null}
 
           <section
             className="settings-card settings-reports-card"

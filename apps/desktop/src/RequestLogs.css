@@ -1,0 +1,73 @@
+.settings-card.request-logs-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.request-logs-card > * {
+  flex: 0 0 auto;
+}
+
+.request-log-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.request-log-filters label {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.request-log-filters input,
+.request-log-filters select {
+  width: 100%;
+  min-width: 0;
+}
+
+.request-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.request-log-table-wrap {
+  overflow-x: auto;
+}
+
+.request-log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  text-align: left;
+}
+
+.request-log-table th,
+.request-log-table td {
+  padding: 0.55rem;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+  min-width: 80px;
+  max-width: 240px;
+}
+
+.request-log-detail {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.request-log-detail pre {
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}

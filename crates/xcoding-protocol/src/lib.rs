@@ -803,6 +803,8 @@ pub struct UserConfig {
     /// Number of days to retain model call audit logs.
     #[serde(default = "default_model_call_log_retention_days")]
     pub model_call_log_retention_days: u32,
+    #[serde(default)]
+    pub record_model_requests: bool,
     /// Successful half-open turns required before a provider circuit closes.
     #[serde(default = "default_circuit_recovery_success_threshold")]
     pub circuit_recovery_success_threshold: u32,
@@ -865,6 +867,9 @@ pub struct UserConfig {
     /// Proxy URL used when `http_proxy_mode` is `custom`, e.g. `http://127.0.0.1:10808`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_proxy_url: Option<String>,
+    /// User-Agent sent on provider HTTP requests. Empty uses the built-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_user_agent: Option<String>,
 }
 
 impl Default for UserConfig {
@@ -897,6 +902,7 @@ impl Default for UserConfig {
             stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
             non_stream_timeout_secs: default_non_stream_timeout_secs(),
             model_call_log_retention_days: default_model_call_log_retention_days(),
+            record_model_requests: false,
             circuit_recovery_success_threshold: default_circuit_recovery_success_threshold(),
             circuit_recovery_wait_secs: default_circuit_recovery_wait_secs(),
             circuit_error_rate_threshold_percent: default_circuit_error_rate_threshold_percent(),
@@ -917,6 +923,7 @@ impl Default for UserConfig {
             model_routes: BTreeMap::new(),
             http_proxy_mode: HttpProxyMode::default(),
             http_proxy_url: None,
+            http_user_agent: None,
         }
     }
 }
@@ -1608,6 +1615,28 @@ mod tests {
         let decoded: UserConfig =
             serde_json::from_value(encoded).expect("configured config round-trips");
         assert_eq!(decoded.model_call_log_retention_days, 90);
+    }
+
+    #[test]
+    fn defaults_and_round_trips_http_user_agent() {
+        let legacy: UserConfig = serde_json::from_value(json!({})).expect("legacy config parses");
+        assert_eq!(legacy.http_user_agent, None);
+        assert!(
+            serde_json::to_value(&legacy)
+                .expect("legacy config serializes")
+                .get("http_user_agent")
+                .is_none()
+        );
+
+        let configured = UserConfig {
+            http_user_agent: Some("codex-cli/1.2.3".to_owned()),
+            ..UserConfig::default()
+        };
+        let encoded = serde_json::to_value(&configured).expect("configured config serializes");
+        assert_eq!(encoded["http_user_agent"], "codex-cli/1.2.3");
+        let decoded: UserConfig =
+            serde_json::from_value(encoded).expect("configured config round-trips");
+        assert_eq!(decoded.http_user_agent.as_deref(), Some("codex-cli/1.2.3"));
     }
 
     #[test]

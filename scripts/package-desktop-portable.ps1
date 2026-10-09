@@ -13,21 +13,6 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $Root
 
 
-# --- Cleanup stale node processes (>30min) to free memory for Rust compilation ---
-$staleCutoff = (Get-Date).AddMinutes(-30)
-$killedCount = 0
-foreach ($procName in @("node", "node_repl")) {
-  Get-Process -Name $procName -ErrorAction SilentlyContinue |
-    Where-Object { $_.StartTime -lt $staleCutoff } |
-    ForEach-Object {
-      Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-      $killedCount++
-    }
-}
-if ($killedCount -gt 0) {
-  Write-Host "Cleaned up $killedCount stale node/node_repl processes (>30min old)."
-  Start-Sleep -Seconds 2  # let OS reclaim memory
-}
 function Ensure-PathPrefix([string]$Prefix) {
   if (Test-Path $Prefix) {
     if (-not (($env:Path -split ";") -contains $Prefix)) {
@@ -191,6 +176,7 @@ $releaseGitPaths = @(
   "apps/desktop/src-tauri/Cargo.lock",
   "apps/desktop/src-tauri/tauri.conf.json",
   "apps/desktop/src-tauri/src/main.rs",
+  "apps/desktop/src-tauri/src/request_logs.rs",
   "apps/desktop/src-tauri/src/terminal.rs",
   "crates/xcoding-agent/Cargo.toml",
   "crates/xcoding-agent/examples/desktop_trajectory.rs",
@@ -210,6 +196,8 @@ $releaseGitPaths = @(
   "crates/xcoding-protocol/src/lib.rs",
   "crates/xcoding-providers/Cargo.toml",
   "crates/xcoding-providers/src/lib.rs",
+  "crates/xcoding-providers/src/request_logs.rs",
+  "crates/xcoding-providers/tests/request_logging.rs",
   "packages/protocol/src/index.ts",
   "apps/desktop/src/i18n.ts",
   "tests/e2e/provider-retry.mjs",
@@ -219,6 +207,10 @@ $releaseGitPaths = @(
   "docs/zh/session-safety.md",
   "tests/e2e/full-auto-mode.mjs",
   "apps/desktop/src/App.tsx",
+  "apps/desktop/src/RequestLogs.tsx",
+  "apps/desktop/src/RequestLogs.css",
+  "tests/e2e/desktop-request-logs.mjs",
+  "docs/model-request-logs.md",
   "apps/desktop/src/activity.ts",
   "apps/desktop/src/styles.css",
   "tests/e2e/desktop-layout.mjs",

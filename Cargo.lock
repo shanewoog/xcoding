@@ -1582,10 +1582,12 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
  "xcoding-protocol",
 ]
 
