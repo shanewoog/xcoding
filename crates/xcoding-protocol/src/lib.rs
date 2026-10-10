@@ -776,9 +776,12 @@ pub struct UserConfig {
     /// Model id used by sessions. Empty until the user picks one; there is no fallback default.
     #[serde(default)]
     pub model: String,
-    /// Reasoning effort for compatible models: minimal | low | medium | high | xhigh | max | ultra.
+    /// Selected reasoning effort for compatible models.
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
+    /// User-configurable reasoning effort values shown in the desktop selectors.
+    #[serde(default = "default_reasoning_efforts")]
+    pub reasoning_efforts: Vec<String>,
     /// Retries after the initial failed request for one provider before trying a backup provider.
     #[serde(default = "default_max_provider_retries")]
     pub max_provider_retries: u32,
@@ -894,6 +897,7 @@ impl Default for UserConfig {
             provider: default_provider(),
             model: String::new(),
             reasoning_effort: default_reasoning_effort(),
+            reasoning_efforts: default_reasoning_efforts(),
             max_provider_retries: default_max_provider_retries(),
             provider_fallback_enabled: default_provider_fallback_enabled(),
             max_tool_rounds: default_max_tool_rounds(),
@@ -1298,6 +1302,19 @@ fn default_reasoning_effort() -> String {
     "high".to_owned()
 }
 
+fn default_reasoning_efforts() -> Vec<String> {
+    vec![
+        "none".to_owned(),
+        "minimal".to_owned(),
+        "low".to_owned(),
+        "medium".to_owned(),
+        "high".to_owned(),
+        "xhigh".to_owned(),
+        "max".to_owned(),
+        "ultra".to_owned(),
+    ]
+}
+
 fn default_max_provider_retries() -> u32 {
     DEFAULT_MAX_PROVIDER_RETRIES
 }
@@ -1485,6 +1502,7 @@ mod tests {
         }))
         .expect("user config parses");
         assert_eq!(config.reasoning_effort, "high");
+        assert_eq!(config.reasoning_efforts, default_reasoning_efforts());
         assert_eq!(
             config.stream_idle_timeout_secs,
             DEFAULT_STREAM_IDLE_TIMEOUT_SECS

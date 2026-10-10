@@ -62,11 +62,14 @@ Mode help:
   "provider": "openai",
   "model": "gpt-5.5",
   "reasoning_effort": "high",
+  "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
   "base_url": "https://ai.v58.dev/v1",
   "api_key": "sk-...",
   "last_workspace_root": "D:\\WORK\\BittyData\\XCoding"
 }
 ```
+
+In Settings → Defaults, enter one reasoning effort value per line; empty lines are ignored and duplicate values are removed when saved.
 
 API keys are stored in plain text in the user home directory for v0.1 convenience. Do not commit this file.
 

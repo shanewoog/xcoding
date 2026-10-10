@@ -238,8 +238,10 @@ $releaseGitPaths = @(
   "tests/e2e/fixtures/model-plan-agent",
   "tests/acceptance/README.md",
   "docs/en/protocol.md",
+  "docs/desktop.md",
   "docs/en/roadmap.md",
   "docs/zh/protocol.md",
+  "docs/zh/desktop.md",
   "docs/zh/roadmap.md",
   "scripts/package-desktop-portable.ps1"
 )

@@ -244,8 +244,10 @@ export interface UserConfig {
   /** Technical provider id used by sessions (currently always openai-compatible). */
   provider: string;
   model: string;
-  /** Reasoning effort for compatible models: minimal | low | medium | high | xhigh | max | ultra. */
+  /** Selected reasoning effort for compatible models. */
   reasoning_effort?: string;
+  /** User-configurable reasoning effort values shown in the desktop selectors. */
+  reasoning_efforts?: string[];
   /** Retries after the initial failed request for one provider before XCoding tries a backup provider. */
   max_provider_retries?: number;
   /** Whether XCoding may switch to another configured provider after the active provider fails. */

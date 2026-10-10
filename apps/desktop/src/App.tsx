@@ -150,14 +150,33 @@ const DEFAULT_VISION_TIMEOUT_SECS = 30;
 const MIN_VISION_TIMEOUT_SECS = 5;
 const MAX_VISION_TIMEOUT_SECS = 300;
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
-const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
-type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+const DEFAULT_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+const DEFAULT_REASONING_EFFORT = "high";
+type ReasoningEffort = string;
 
-function normalizeReasoningEffort(value: string | undefined | null): ReasoningEffort {
-  const trimmed = (value || "").trim().toLowerCase();
-  return (REASONING_EFFORTS as readonly string[]).includes(trimmed)
-    ? (trimmed as ReasoningEffort)
-    : "high";
+function normalizeReasoningEfforts(value: readonly string[] | string | undefined | null): string[] {
+  const rawValues = typeof value === "string" ? value.split(/\r?\n/) : value ?? [];
+  const seen = new Set<string>();
+  const normalized = [];
+  for (const rawValue of rawValues) {
+    const trimmed = rawValue.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized.length > 0 ? normalized : [...DEFAULT_REASONING_EFFORTS];
+}
+
+function normalizeReasoningEffort(
+  value: string | undefined | null,
+  options: readonly string[] = DEFAULT_REASONING_EFFORTS,
+): ReasoningEffort {
+  const normalizedOptions = normalizeReasoningEfforts(options);
+  const trimmed = (value || "").trim();
+  return normalizedOptions.find((option) => option.toLowerCase() === trimmed.toLowerCase())
+    ?? normalizedOptions.find((option) => option.toLowerCase() === DEFAULT_REASONING_EFFORT)
+    ?? normalizedOptions[0]
+    ?? DEFAULT_REASONING_EFFORT;
 }
 
 function normalizePersonality(value: string | undefined | null): string {
@@ -1496,7 +1515,9 @@ export function App() {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
+  const [reasoningEffortsText, setReasoningEffortsText] = useState(DEFAULT_REASONING_EFFORTS.join("\n"));
+  const reasoningEfforts = normalizeReasoningEfforts(reasoningEffortsText);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(DEFAULT_REASONING_EFFORT);
   const [maxProviderRetries, setMaxProviderRetries] = useState(DEFAULT_MAX_PROVIDER_RETRIES);
   const [providerFallbackEnabled, setProviderFallbackEnabled] = useState(false);
   const [httpProxyMode, setHttpProxyMode] = useState<HttpProxyMode>("system");
@@ -2003,7 +2024,9 @@ export function App() {
         if (isLocale(config.locale)) setLocale(config.locale);
         setMode(config.mode);
         setModel((config.model || "").trim());
-        setReasoningEffort(normalizeReasoningEffort(config.reasoning_effort));
+        const loadedReasoningEfforts = normalizeReasoningEfforts(config.reasoning_efforts);
+        setReasoningEffortsText(loadedReasoningEfforts.join("\n"));
+        setReasoningEffort(normalizeReasoningEffort(config.reasoning_effort, loadedReasoningEfforts));
         setMaxProviderRetries(normalizeBoundedInteger(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
         setProviderFallbackEnabled(config.provider_fallback_enabled === true);
         setHttpProxyMode(normalizeHttpProxyMode(config.http_proxy_mode));
@@ -3219,7 +3242,9 @@ export function App() {
           } satisfies UserConfig,
         });
         setModel((saved.model || "").trim());
-        setReasoningEffort(normalizeReasoningEffort(saved.reasoning_effort));
+        const savedReasoningEfforts = normalizeReasoningEfforts(saved.reasoning_efforts);
+        setReasoningEffortsText(savedReasoningEfforts.join("\n"));
+        setReasoningEffort(normalizeReasoningEffort(saved.reasoning_effort, savedReasoningEfforts));
         const root = workspaceRoot.trim();
         if (root && trimmedModel) {
           await invoke<WorkspaceConfig>("set_workspace_config", {
@@ -4184,6 +4209,8 @@ export function App() {
       setError(t(locale, "error.needModel"));
       return;
     }
+    const normalizedReasoningEfforts = normalizeReasoningEfforts(reasoningEffortsText);
+    const selectedReasoningEffort = normalizeReasoningEffort(reasoningEffort, normalizedReasoningEfforts);
     if (visionDelegate.enabled && (!visionDelegate.providerId.trim() || !visionDelegate.model.trim())) {
       setError(t(locale, "error.visionDelegateIncomplete"));
       return;
@@ -4215,7 +4242,8 @@ export function App() {
           mode,
           provider: defaultProvider,
           model: model.trim(),
-          reasoning_effort: reasoningEffort,
+          reasoning_effort: selectedReasoningEffort,
+          reasoning_efforts: normalizedReasoningEfforts,
           max_provider_retries: normalizeBoundedInteger(maxProviderRetries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES),
           provider_fallback_enabled: providerFallbackEnabled,
           max_tool_rounds: normalizeBoundedInteger(maxToolRounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS),
@@ -4255,7 +4283,9 @@ export function App() {
       setWorkspaceHome((savedUser.workspace_home || "").trim());
       setMode(savedUser.mode);
       setModel((savedUser.model || "").trim());
-      setReasoningEffort(normalizeReasoningEffort(savedUser.reasoning_effort));
+      const savedReasoningEfforts = normalizeReasoningEfforts(savedUser.reasoning_efforts);
+      setReasoningEffortsText(savedReasoningEfforts.join("\n"));
+      setReasoningEffort(normalizeReasoningEffort(savedUser.reasoning_effort, savedReasoningEfforts));
       setMaxProviderRetries(normalizeBoundedInteger(savedUser.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
       setProviderFallbackEnabled(savedUser.provider_fallback_enabled === true);
       setHttpProxyMode(normalizeHttpProxyMode(savedUser.http_proxy_mode));
@@ -5792,6 +5822,35 @@ export function App() {
               <option value="full-auto">{t(locale, "mode.fullAuto")}</option>
             </select>
             <p className="mode-help">{modeHelpText(mode, locale)}</p>
+            <label className="field-label" htmlFor="default-reasoning-efforts">{t(locale, "field.reasoningOptions")}</label>
+            <textarea
+              id="default-reasoning-efforts"
+              className="command-allowlist-input"
+              value={reasoningEffortsText}
+              onChange={(event) => {
+                const nextText = event.target.value;
+                const nextOptions = normalizeReasoningEfforts(nextText);
+                setReasoningEffortsText(nextText);
+                setReasoningEffort((current) => normalizeReasoningEffort(current, nextOptions));
+              }}
+              disabled={anySessionRunning || isSavingConfig}
+              spellCheck={false}
+              rows={8}
+            />
+            <p className="mode-help">{t(locale, "field.reasoningOptionsHint")}</p>
+            <label className="field-label" htmlFor="default-reasoning">{t(locale, "field.reasoning")}</label>
+            <select
+              id="default-reasoning"
+              value={reasoningEffort}
+              onChange={(event) => setReasoningEffort(normalizeReasoningEffort(event.target.value, reasoningEfforts))}
+              disabled={anySessionRunning || isSavingConfig}
+            >
+              {reasoningEfforts.map((effort) => (
+                <option key={effort} value={effort}>
+                  {effort}
+                </option>
+              ))}
+            </select>
             <label className="field-label" htmlFor="command-allowlist">{t(locale, "field.allowlist")}</label>
             <textarea
               id="command-allowlist"
@@ -6771,7 +6830,7 @@ export function App() {
                 className="composer-select reasoning"
                 value={reasoningEffort}
                 onChange={(event) => {
-                  const next = normalizeReasoningEffort(event.target.value);
+                  const next = normalizeReasoningEffort(event.target.value, reasoningEfforts);
                   setReasoningEffort(next);
                   void persistComposerPrefs(model, next);
                 }}
@@ -6779,9 +6838,9 @@ export function App() {
                 title={t(locale, "field.reasoning")}
                 aria-label={t(locale, "field.reasoning")}
               >
-                {REASONING_EFFORTS.map((effort) => (
+                {reasoningEfforts.map((effort) => (
                   <option key={effort} value={effort}>
-                    {t(locale, `reasoning.${effort}`)}
+                    {effort}
                   </option>
                 ))}
               </select>

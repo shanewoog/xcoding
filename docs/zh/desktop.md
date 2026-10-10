@@ -62,11 +62,14 @@ Desktop 与 CLI 共用同一套受保护的 Agent 服务。默认模式为 `ask`
   "provider": "openai",
   "model": "gpt-5.5",
   "reasoning_effort": "high",
+  "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
   "base_url": "https://ai.v58.dev/v1",
   "api_key": "sk-...",
   "last_workspace_root": "D:\\WORK\\BittyData\\XCoding"
 }
 ```
+
+在设置 → 默认设置中，推理强度列表按一行一个参数填写；保存时会忽略空行并去除重复项。
 
 v0.1 为便于使用，API Key 以明文保存在用户目录。请勿提交该文件。
 
