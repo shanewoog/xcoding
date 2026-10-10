@@ -202,6 +202,7 @@ $releaseGitPaths = @(
   "packages/protocol/src/index.ts",
   "apps/desktop/src/i18n.ts",
   "tests/e2e/provider-retry.mjs",
+  "tests/e2e/prompt-cache-prefix.mjs",
   "docs/en/getting-started.md",
   "docs/en/session-safety.md",
   "docs/zh/getting-started.md",

@@ -82,8 +82,6 @@ const MAX_MEMORIES_PER_TURN: usize = 3;
 /// tokenizers must not turn one odd usage report into a useless budget.
 const MIN_TOKEN_CALIBRATION: f64 = 0.5;
 const MAX_TOKEN_CALIBRATION: f64 = 4.0;
-const TOKEN_BUDGET_OPEN_TAG: &str = "<token_budget>";
-const TOKEN_BUDGET_CLOSE_TAG: &str = "</token_budget>";
 
 #[derive(Debug)]
 struct RecordedToolOutput {
@@ -2492,7 +2490,7 @@ impl<'a> AgentService<'a> {
                                 }
                             }
                         }
-                        refresh_token_budget(&mut attempt_messages, &request_budget);
+                        // Keep system instructions stable across requests; token budgets stay local.
                         let attempt_result = self
                             .stream_provider_attempt(
                                 session,
@@ -4900,10 +4898,6 @@ impl RequestBudget<'_> {
         )
     }
 
-    fn context_window_tokens(&self) -> usize {
-        context_window_for_model(self.model, self.model_context_windows)
-    }
-
     /// Tokens every request carries regardless of how much history survives:
     /// the system prompt message and the tool schemas.
     fn fixed_tokens(&self) -> usize {
@@ -4928,51 +4922,6 @@ impl RequestBudget<'_> {
                 .saturating_add(REQUEST_TOKEN_OVERHEAD),
             self.calibration,
         )
-    }
-}
-
-fn strip_token_budget_blocks(value: &str) -> String {
-    let mut cleaned = value.to_owned();
-    while let Some(start) = cleaned.find(TOKEN_BUDGET_OPEN_TAG) {
-        let Some(relative_end) = cleaned[start..].find(TOKEN_BUDGET_CLOSE_TAG) else {
-            cleaned.truncate(start);
-            break;
-        };
-        let end = start + relative_end + TOKEN_BUDGET_CLOSE_TAG.len();
-        cleaned.replace_range(start..end, "");
-    }
-    cleaned.trim_end().to_owned()
-}
-
-fn refresh_token_budget(messages: &mut Vec<ChatMessage>, request: &RequestBudget<'_>) {
-    for message in messages.iter_mut() {
-        if message.role == "system" {
-            if let Some(xcoding_providers::ChatMessageContent::Text(content)) =
-                message.content.as_mut()
-            {
-                *content = strip_token_budget_blocks(content);
-            }
-        }
-    }
-    let estimated_request_tokens = calibrated_tokens(
-        estimate_chat_request_tokens(messages, request.definitions),
-        request.calibration,
-    );
-    let context_window_tokens = request.context_window_tokens();
-    let remaining_tokens = context_window_tokens.saturating_sub(estimated_request_tokens);
-    let budget = format!(
-        "{TOKEN_BUDGET_OPEN_TAG}\ncontext_window_tokens={context_window_tokens}\nestimated_request_tokens={estimated_request_tokens}\nremaining_tokens={remaining_tokens}\n{TOKEN_BUDGET_CLOSE_TAG}"
-    );
-    if let Some(system) = messages.iter_mut().find(|message| message.role == "system") {
-        let content = match system.content.take() {
-            Some(xcoding_providers::ChatMessageContent::Text(content)) if !content.is_empty() => {
-                format!("{content}\n\n{budget}")
-            }
-            _ => budget,
-        };
-        system.content = Some(xcoding_providers::ChatMessageContent::Text(content));
-    } else {
-        messages.insert(0, ChatMessage::system(budget));
     }
 }
 
