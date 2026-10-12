@@ -45,6 +45,10 @@ pub const MIN_CIRCUIT_MIN_REQUEST_COUNT: u32 = 1;
 pub const MAX_CIRCUIT_MIN_REQUEST_COUNT: u32 = 100;
 pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4_000;
 pub const MAX_PROVIDER_KEY_WEIGHT: u32 = 1_000;
+/// Default loopback port for the in-process local relay.
+pub const DEFAULT_LOCAL_RELAY_PORT: u16 = 17821;
+pub const MIN_LOCAL_RELAY_PORT: u16 = 1_024;
+pub const MAX_LOCAL_RELAY_PORT: u16 = 65_535;
 pub const MAX_LOCAL_MEMORY_CHARS: usize = 600;
 pub const MIN_CONTEXT_TOOL_LIMIT: usize = 1;
 pub const MAX_CONTEXT_TOOL_LIMIT: usize = 100;
@@ -873,6 +877,15 @@ pub struct UserConfig {
     /// User-Agent sent on provider HTTP requests. Empty uses the built-in default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_user_agent: Option<String>,
+    /// Whether the in-process local relay (for Codex / CC Switch) is running.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub local_relay_enabled: bool,
+    /// Loopback port the local relay listens on (127.0.0.1 only).
+    #[serde(default = "default_local_relay_port")]
+    pub local_relay_port: u16,
+    /// Bearer key callers must present to the local relay. Never log this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_relay_api_key: Option<String>,
 }
 
 impl Default for UserConfig {
@@ -928,6 +941,9 @@ impl Default for UserConfig {
             http_proxy_mode: HttpProxyMode::default(),
             http_proxy_url: None,
             http_user_agent: None,
+            local_relay_enabled: false,
+            local_relay_port: default_local_relay_port(),
+            local_relay_api_key: None,
         }
     }
 }
@@ -1387,6 +1403,10 @@ fn default_context_compaction_threshold_percent() -> u32 {
     DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT
 }
 
+fn default_local_relay_port() -> u16 {
+    DEFAULT_LOCAL_RELAY_PORT
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -1655,6 +1675,38 @@ mod tests {
         let decoded: UserConfig =
             serde_json::from_value(encoded).expect("configured config round-trips");
         assert_eq!(decoded.http_user_agent.as_deref(), Some("codex-cli/1.2.3"));
+    }
+
+    #[test]
+    fn defaults_and_round_trips_local_relay_settings() {
+        let default_config = UserConfig::default();
+        assert!(!default_config.local_relay_enabled);
+        assert_eq!(default_config.local_relay_port, DEFAULT_LOCAL_RELAY_PORT);
+        assert_eq!(default_config.local_relay_api_key, None);
+        let default_json =
+            serde_json::to_value(&default_config).expect("default config serializes");
+        assert!(default_json.get("local_relay_enabled").is_none());
+        assert!(default_json.get("local_relay_api_key").is_none());
+        assert_eq!(default_json["local_relay_port"], DEFAULT_LOCAL_RELAY_PORT);
+
+        let legacy: UserConfig = serde_json::from_value(json!({})).expect("legacy config parses");
+        assert!(!legacy.local_relay_enabled);
+        assert_eq!(legacy.local_relay_port, DEFAULT_LOCAL_RELAY_PORT);
+        assert_eq!(legacy.local_relay_api_key, None);
+
+        let configured = UserConfig {
+            local_relay_enabled: true,
+            local_relay_port: 19000,
+            local_relay_api_key: Some("xcoding-local-test".to_owned()),
+            ..UserConfig::default()
+        };
+        let json = serde_json::to_value(&configured).expect("configured config serializes");
+        assert_eq!(json["local_relay_enabled"], true);
+        assert_eq!(json["local_relay_port"], 19000);
+        assert_eq!(json["local_relay_api_key"], "xcoding-local-test");
+        let decoded: UserConfig =
+            serde_json::from_value(json).expect("configured config round-trips");
+        assert_eq!(decoded, configured);
     }
 
     #[test]

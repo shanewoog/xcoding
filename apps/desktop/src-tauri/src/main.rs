@@ -5,6 +5,7 @@ mod browser;
 mod gitnexus;
 mod passwords;
 mod projects;
+mod relay;
 mod request_logs;
 mod terminal;
 mod workspace_tools;
@@ -448,10 +449,27 @@ fn get_user_config() -> Result<UserConfig, String> {
 }
 
 #[tauri::command]
-fn set_user_config(app: AppHandle, config: UserConfig) -> Result<UserConfig, String> {
+fn set_user_config(
+    app: AppHandle,
+    relay_state: tauri::State<'_, relay::RelayState>,
+    mut config: UserConfig,
+) -> Result<UserConfig, String> {
+    if config.local_relay_enabled
+        && config
+            .local_relay_api_key
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty)
+    {
+        config.local_relay_api_key = Some(format!(
+            "xcoding-local-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+    }
     let next = normalize_user_config(config);
     save_user_config(&next)?;
     apply_user_config_to_env(&next);
+    relay::restart(&relay_state, next.clone())?;
     if let Err(error) = open_core(&app).and_then(|core| {
         core.purge_model_call_logs(next.model_call_log_retention_days)
             .map_err(|error| error.to_string())
@@ -842,6 +860,30 @@ fn main() {
                     return Err(error.into());
                 }
             }
+            let mut startup_config = load_user_config();
+            if startup_config.local_relay_enabled {
+                if startup_config
+                    .local_relay_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+                {
+                    startup_config.local_relay_api_key = Some(format!(
+                        "xcoding-local-{}",
+                        uuid::Uuid::new_v4().simple()
+                    ));
+                    startup_config = normalize_user_config(startup_config);
+                    if let Err(error) = save_user_config(&startup_config) {
+                        boot_log(&format!("local relay key persistence failed: {error}"));
+                    }
+                }
+                apply_user_config_to_env(&startup_config);
+                if let Err(error) = relay::restart(app.state::<relay::RelayState>().inner(), startup_config) {
+                    boot_log(&format!("local relay start failed: {error}"));
+                } else {
+                    boot_log("local relay started on loopback");
+                }
+            }
             let show_item = MenuItem::with_id(app, "show", "显示 XCoding", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
@@ -906,6 +948,7 @@ fn main() {
                 }
             }
         })
+        .manage(relay::RelayState::default())
         .manage(terminal::TerminalState {
             session: std::sync::Mutex::new(None),
         })

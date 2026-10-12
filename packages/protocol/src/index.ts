@@ -304,6 +304,12 @@ export interface UserConfig {
   http_proxy_mode?: HttpProxyMode;
   /** Proxy URL used when http_proxy_mode is custom, e.g. http://127.0.0.1:10808. */
   http_proxy_url?: string;
+  /** Whether the in-process local relay (for Codex / CC Switch) is running. */
+  local_relay_enabled?: boolean;
+  /** Loopback port the local relay listens on (127.0.0.1 only). */
+  local_relay_port?: number;
+  /** Bearer key callers must present to the local relay. Not a provider API key. */
+  local_relay_api_key?: string;
   /** User-Agent sent on provider HTTP requests. Empty uses the built-in default. */
   http_user_agent?: string;
 }

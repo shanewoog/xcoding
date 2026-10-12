@@ -330,6 +330,16 @@ impl Drop for LogState {
 pub(crate) struct RequestLog(Option<Arc<Mutex<LogState>>>);
 
 impl RequestLog {
+    /// Start a request log from the exact bytes sent to an upstream relay.
+    /// Logging may use a parsed copy, but the caller keeps ownership of and
+    /// sends the original byte sequence unchanged.
+    pub(crate) fn start_raw(endpoint: &str, body: &[u8], api_key: &str) -> Self {
+        let value = serde_json::from_slice::<Value>(body).unwrap_or_else(|_| {
+            Value::String(String::from_utf8_lossy(body).into_owned())
+        });
+        Self::start(endpoint, &value, api_key)
+    }
+
     pub(crate) fn start(endpoint: &str, body: &Value, api_key: &str) -> Self {
         let config = load_user_config();
         Self::start_at(

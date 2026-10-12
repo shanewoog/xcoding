@@ -107,6 +107,9 @@ import {
 
 const defaultProvider = "openai";
 const DEFAULT_PROVIDER_BASE_URL = "https://ai.v58.dev";
+const DEFAULT_LOCAL_RELAY_PORT = 17821;
+const MIN_LOCAL_RELAY_PORT = 1024;
+const MAX_LOCAL_RELAY_PORT = 65535;
 const DEFAULT_PERSONALITY = "default";
 const PERSONALITY_OPTIONS = ["default", "pragmatic", "friendly", "concise", "teaching"] as const;
 const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000;
@@ -1635,6 +1638,9 @@ export function App() {
   ]);
   const [activeProviderId, setActiveProviderId] = useState("default");
   const [selectedProviderId, setSelectedProviderId] = useState("default");
+  const [localRelayEnabled, setLocalRelayEnabled] = useState(false);
+  const [localRelayPort, setLocalRelayPort] = useState(DEFAULT_LOCAL_RELAY_PORT);
+  const [localRelayApiKey, setLocalRelayApiKey] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("provider");
@@ -2045,6 +2051,9 @@ export function App() {
         setCircuitMinRequestCount(normalizeBoundedInteger(config.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
         setContextCompactionThresholdPercent(normalizeBoundedInteger(config.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
         setLossyContextCompactionEnabled(config.lossy_context_compaction_enabled === true);
+        setLocalRelayEnabled(config.local_relay_enabled === true);
+        setLocalRelayPort(normalizeBoundedInteger(config.local_relay_port, DEFAULT_LOCAL_RELAY_PORT, MIN_LOCAL_RELAY_PORT, MAX_LOCAL_RELAY_PORT));
+        setLocalRelayApiKey((config.local_relay_api_key || "").trim());
         setModelContextWindowEntries(contextWindowEntriesFromMap(config.model_context_windows));
         setModelRouteEntries(modelRouteEntriesFromMap(config.model_routes));
         setVisionDelegate(visionDelegateFormFromConfig(config.vision_delegate));
@@ -4272,6 +4281,9 @@ export function App() {
           http_proxy_mode: httpProxyMode,
           http_proxy_url: httpProxyUrl.trim() || undefined,
           http_user_agent: httpUserAgent.trim() || undefined,
+          local_relay_enabled: localRelayEnabled,
+          local_relay_port: normalizeBoundedInteger(localRelayPort, DEFAULT_LOCAL_RELAY_PORT, MIN_LOCAL_RELAY_PORT, MAX_LOCAL_RELAY_PORT),
+          local_relay_api_key: localRelayApiKey.trim() || undefined,
           vision_delegate: visionDelegateConfigFromForm(visionDelegate),
           model_capabilities: modelCapabilities,
           custom_instructions: customInstructions.trim() || undefined,
@@ -4304,6 +4316,9 @@ export function App() {
       setCircuitMinRequestCount(normalizeBoundedInteger(savedUser.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
       setContextCompactionThresholdPercent(normalizeBoundedInteger(savedUser.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
       setLossyContextCompactionEnabled(savedUser.lossy_context_compaction_enabled === true);
+      setLocalRelayEnabled(savedUser.local_relay_enabled === true);
+      setLocalRelayPort(normalizeBoundedInteger(savedUser.local_relay_port, DEFAULT_LOCAL_RELAY_PORT, MIN_LOCAL_RELAY_PORT, MAX_LOCAL_RELAY_PORT));
+      setLocalRelayApiKey((savedUser.local_relay_api_key || "").trim());
       setModelContextWindowEntries(contextWindowEntriesFromMap(savedUser.model_context_windows));
       setModelRouteEntries(modelRouteEntriesFromMap(savedUser.model_routes));
       setVisionDelegate(visionDelegateFormFromConfig(savedUser.vision_delegate));
@@ -5234,6 +5249,62 @@ export function App() {
                 </button>
               </div>
               <p className="mode-help">{t(locale, "settings.modelRoutes.help")}</p>
+            </div>
+            <div className="resilience-setting-group">
+              <p className="resilience-setting-group-title">{t(locale, "settings.localRelay.title")}</p>
+              <div className="resilience-toggle-row">
+                <div>
+                  <span className="field-label">{t(locale, "settings.localRelay.enabled")}</span>
+                  <p className="mode-help">{t(locale, "settings.localRelay.hint")}</p>
+                </div>
+                <button
+                  type="button"
+                  className={`browser-toggle${localRelayEnabled ? " on" : ""}`}
+                  aria-label={t(locale, "settings.localRelay.enabled")}
+                  aria-pressed={localRelayEnabled}
+                  onClick={() => setLocalRelayEnabled((enabled) => !enabled)}
+                  disabled={anySessionRunning || isSavingConfig}
+                >
+                  <span className="browser-toggle-knob" />
+                </button>
+              </div>
+              <div className="resilience-setting-grid">
+                <label htmlFor="local-relay-port">
+                  <span className="field-label">{t(locale, "settings.localRelay.port")}</span>
+                  <input
+                    id="local-relay-port"
+                    type="number"
+                    min={MIN_LOCAL_RELAY_PORT}
+                    max={MAX_LOCAL_RELAY_PORT}
+                    step={1}
+                    value={localRelayPort}
+                    onChange={(event) => setLocalRelayPort(normalizeBoundedInteger(Number(event.target.value), DEFAULT_LOCAL_RELAY_PORT, MIN_LOCAL_RELAY_PORT, MAX_LOCAL_RELAY_PORT))}
+                    disabled={anySessionRunning || isSavingConfig}
+                  />
+                </label>
+                <label htmlFor="local-relay-api-key">
+                  <span className="field-label">{t(locale, "settings.localRelay.apiKey")}</span>
+                  <input
+                    id="local-relay-api-key"
+                    type="text"
+                    value={localRelayApiKey}
+                    onChange={(event) => setLocalRelayApiKey(event.target.value)}
+                    disabled={anySessionRunning || isSavingConfig}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </label>
+              </div>
+              <label className="field-label" htmlFor="local-relay-uri">{t(locale, "settings.localRelay.uri")}</label>
+              <input
+                id="local-relay-uri"
+                type="text"
+                value={`http://127.0.0.1:${localRelayPort}/v1`}
+                readOnly
+                spellCheck={false}
+              />
+              <p className="mode-help">{t(locale, "settings.localRelay.responsesOnly")}</p>
+              <p className="mode-help">{t(locale, "settings.localRelay.localKeyHint")}</p>
             </div>
             <p className="mode-help">{t(locale, "settings.providerHelp")}</p>
           </section>

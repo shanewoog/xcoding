@@ -43,7 +43,8 @@ where
 use serde_json::{Value, json};
 use thiserror::Error;
 use xcoding_protocol::{
-    CloudProviderConfig, HttpProxyMode, ListModelsResult, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
+    CloudProviderConfig, DEFAULT_LOCAL_RELAY_PORT, HttpProxyMode, ListModelsResult,
+    MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
     MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
     MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES,
@@ -52,13 +53,87 @@ use xcoding_protocol::{
     MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_FAILURE_THRESHOLD,
     MIN_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
     MIN_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
-    MIN_CONTEXT_WINDOW_TOKENS, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
+    MAX_LOCAL_RELAY_PORT, MIN_CONTEXT_WINDOW_TOKENS, MIN_LOCAL_RELAY_PORT,
+    MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
     MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS,
     ModelRoute, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
 
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
+
+/// Raw upstream byte stream used by the in-process local relay pass-through.
+pub type ProviderByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, ProviderError>> + Send>>;
+
+/// An opened, unmodified upstream `POST {api_root}/responses` response.
+///
+/// The body is handed back byte for byte: the local relay must not re-encode or
+/// reinterpret an OpenAI Responses SSE stream. Upstream credentials stay inside
+/// this type and are never exposed through the public surface.
+pub struct RawResponsesStream {
+    response: reqwest::Response,
+    request_log: request_logs::RequestLog,
+}
+
+impl RawResponsesStream {
+    /// Upstream HTTP status of the opened stream.
+    pub fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
+    /// The upstream `Retry-After` value, preserved verbatim for the local relay.
+    pub fn retry_after_header(&self) -> Option<String> {
+        self.response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    /// Upstream `Retry-After` delta-seconds for internal key cooldowns.
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        parse_retry_after(self.response.headers())
+    }
+
+    /// Upstream `content-type` when present. Carries no credential material.
+    pub fn content_type(&self) -> Option<String> {
+        self.response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    /// Consume the response, yielding upstream bytes unchanged.
+    pub fn into_byte_stream(self) -> ProviderByteStream {
+        let RawResponsesStream {
+            response,
+            request_log: log,
+        } = self;
+        let mut stream = response.bytes_stream();
+        Box::pin(async_stream::try_stream! {
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) => {
+                        log.append(&chunk);
+                        yield chunk.to_vec();
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        log.finish(Some(&message));
+                        Err(ProviderError::StreamDisconnected(message))?;
+                    }
+                }
+            }
+            log.finish(None);
+        })
+    }
+
+    /// Finalize the audit log when the caller stops reading early.
+    pub fn finish(&self, error: Option<&str>) {
+        self.request_log.finish(error);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProviderEvent {
@@ -857,6 +932,24 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
             *user_agent = trimmed;
         }
     }
+    if let Some(key) = config.local_relay_api_key.as_mut() {
+        let trimmed = key.trim().to_owned();
+        if trimmed.is_empty() {
+            config.local_relay_api_key = None;
+        } else {
+            *key = trimmed;
+        }
+    }
+    // The relay only ever binds loopback, so a privileged port cannot work for
+    // a normal user; keep the configured value inside the bindable range rather
+    // than letting the listener fail with a permission error.
+    config.local_relay_port = if config.local_relay_port == 0 {
+        DEFAULT_LOCAL_RELAY_PORT
+    } else {
+        config
+            .local_relay_port
+            .clamp(MIN_LOCAL_RELAY_PORT, MAX_LOCAL_RELAY_PORT)
+    };
     // Custom mode without a URL would proxy nothing; keep system behaviour instead.
     if config.http_proxy_mode == HttpProxyMode::Custom && config.http_proxy_url.is_none() {
         config.http_proxy_mode = HttpProxyMode::System;
@@ -1484,6 +1577,64 @@ impl OpenAiCompatibleProvider {
         Ok((response, request_log))
     }
 
+    /// Open `POST {api_root}/responses` and return the upstream body untouched.
+    ///
+    /// The in-process local relay uses this to pass a Responses request straight
+    /// through: the caller forwards `body` as received and streams the returned
+    /// bytes back without re-encoding them. No Responses↔Chat conversion happens
+    /// here, so a provider whose `wire_api` is not `responses` will simply fail
+    /// upstream and surface that status to the caller.
+    ///
+    /// The upstream API key never leaves this type; only `status`,
+    /// `retry_after_secs` and `content_type` are observable.
+    pub async fn open_responses_raw(
+        &self,
+        body: &[u8],
+        content_type: Option<&str>,
+    ) -> Result<RawResponsesStream, ProviderError> {
+        let url = format!("{}/responses", self.base_url);
+        let request_log = request_logs::RequestLog::start_raw(&url, body, &self.api_key);
+        let start = Instant::now();
+        let mut request = self.client.post(&url).body(body.to_vec());
+        if let Some(content_type) = content_type {
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(content_type) {
+                request = request.header(reqwest::header::CONTENT_TYPE, value);
+            }
+        }
+        if let Ok(user_agent) = reqwest::header::HeaderValue::from_str(&http_user_agent()) {
+            request = request.header(reqwest::header::USER_AGENT, user_agent);
+        }
+        let request = request.bearer_auth(&self.api_key);
+        let request = request.build().map_err(|error| {
+            request_log.finish(Some(&error.to_string()));
+            ProviderError::from(error)
+        })?;
+        request_log.request(&request);
+        let response = self.client.execute(request).await.map_err(|e| {
+            request_log.finish(Some(&e.to_string()));
+            log_to_file(&format!(
+                "[XCoding relay] upstream request failed after {:?}: {}",
+                start.elapsed(),
+                e
+            ));
+            ProviderError::from(e)
+        })?;
+        request_log.response(&response);
+        log_to_file(&format!(
+            "[XCoding relay] upstream POST {} status={} elapsed={:?}",
+            url,
+            response.status(),
+            start.elapsed()
+        ));
+
+        // Keep every upstream status and body available to the desktop relay.
+        // Consuming non-2xx here would turn a byte-for-byte pass-through into an
+        // XCoding-generated error response.
+        Ok(RawResponsesStream {
+            response,
+            request_log,
+        })
+    }
     async fn stream_responses(
         &self,
         model: &str,
@@ -2754,6 +2905,36 @@ mod tests {
             ..UserConfig::default()
         });
         assert_eq!(config.http_user_agent, None);
+    }
+
+    #[test]
+    fn normalize_user_config_normalizes_local_relay_settings() {
+        let config = normalize_user_config(UserConfig {
+            local_relay_api_key: Some("  xcoding-local-abc  ".to_owned()),
+            local_relay_port: 0,
+            ..UserConfig::default()
+        });
+        assert_eq!(
+            config.local_relay_api_key.as_deref(),
+            Some("xcoding-local-abc")
+        );
+        assert_eq!(config.local_relay_port, DEFAULT_LOCAL_RELAY_PORT);
+
+        let config = normalize_user_config(UserConfig {
+            local_relay_api_key: Some("   ".to_owned()),
+            local_relay_port: MAX_LOCAL_RELAY_PORT,
+            ..UserConfig::default()
+        });
+        assert_eq!(config.local_relay_api_key, None);
+        assert_eq!(config.local_relay_port, MAX_LOCAL_RELAY_PORT);
+
+        // A privileged port can never bind for a normal user; keep the
+        // configured value inside the range the listener can actually use.
+        let config = normalize_user_config(UserConfig {
+            local_relay_port: 80,
+            ..UserConfig::default()
+        });
+        assert_eq!(config.local_relay_port, MIN_LOCAL_RELAY_PORT);
     }
 
     #[test]

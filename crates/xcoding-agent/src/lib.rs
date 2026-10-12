@@ -27,7 +27,8 @@ use xcoding_protocol::{
 use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_STEPS};
 use xcoding_providers::{
     ChatContentPart, ChatMessage, ChatMessageContent, OpenAiCompatibleProvider, ProviderError,
-    ProviderEvent, ProviderToolCall, ToolDefinition, load_user_config, normalize_base_url,
+    ProviderEvent, ProviderToolCall, RawResponsesStream, ToolDefinition, load_user_config,
+    normalize_base_url,
     provider_retry_delay,
 };
 use xcoding_tools::{ToolError, ToolExecution, ToolRegistry, is_local_api_request};
@@ -321,6 +322,16 @@ pub fn register_known_secrets(config: &UserConfig) {
                 secrets.insert(key.to_owned());
             }
         }
+    }
+    // The relay key authenticates local callers; it is never sent upstream, but
+    // registering it keeps any accidental echo in logs or errors redacted too.
+    if let Some(key) = config
+        .local_relay_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        secrets.insert(key.to_owned());
     }
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
         let key = key.trim();
@@ -1368,6 +1379,111 @@ fn open_provider(
         None => OpenAiCompatibleProvider::from_environment()?,
     };
     Ok(provider.with_session_id(session_id))
+}
+
+#[derive(Debug, Error)]
+pub enum RelayError {
+    #[error("invalid relay request: {0}")]
+    InvalidRequest(String),
+    #[error("relay unavailable: {0}")]
+    Unavailable(String),
+}
+
+/// Open one Responses request through only the configured active provider.
+///
+/// This is intentionally separate from the normal agent routing path: a local
+/// CC Switch caller must not trigger backup-provider routing or cross a trust
+/// boundary. The request bytes are passed directly to the provider adapter, and
+/// the returned response remains available to the desktop relay unchanged.
+pub async fn open_active_provider_responses(
+    config: &UserConfig,
+    body: &[u8],
+    content_type: Option<&str>,
+) -> Result<RawResponsesStream, RelayError> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|error| RelayError::InvalidRequest(format!("request body must be JSON: {error}")))?;
+    let _model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| RelayError::InvalidRequest("request body must contain a model".to_owned()))?;
+
+    let active_id = config
+        .active_provider_id
+        .as_deref()
+        .ok_or_else(|| RelayError::Unavailable("no active provider is configured".to_owned()))?;
+    let provider = config
+        .providers
+        .iter()
+        .find(|provider| provider.id == active_id)
+        .ok_or_else(|| RelayError::Unavailable("the active provider no longer exists".to_owned()))?;
+    if provider.wire_api != ProviderWireApi::Responses {
+        return Err(RelayError::Unavailable(
+            "the active provider does not support the Responses API".to_owned(),
+        ));
+    }
+
+    let candidates = expand_provider_candidates(config, provider, Some(active_id), None);
+    if candidates.is_empty() {
+        return Err(RelayError::Unavailable(
+            "the active provider has no configured API key".to_owned(),
+        ));
+    }
+
+    // Reuse the existing key-health and circuit gates, but never call
+    // provider_candidates: the local relay is active-provider-only by contract.
+    let mut candidate = candidates
+        .iter()
+        .find(|candidate| provider_key_is_available(candidate) && circuit_allows(candidate));
+    if candidate.is_none() {
+        release_key_cooldowns_when_all_are_blocked(candidates.iter());
+        release_circuits_when_all_are_open(candidates.iter());
+        candidate = candidates
+            .iter()
+            .find(|candidate| provider_key_is_available(candidate) && circuit_allows(candidate));
+    }
+    let Some(candidate) = candidate else {
+        return Err(RelayError::Unavailable(
+            "all keys for the active provider are temporarily unavailable".to_owned(),
+        ));
+    };
+
+    let circuit_settings = CircuitSettings {
+        failure_threshold: config.circuit_failure_threshold,
+        recovery_success_threshold: config.circuit_recovery_success_threshold,
+        recovery_wait: Duration::from_secs(config.circuit_recovery_wait_secs),
+        error_rate_threshold_percent: config.circuit_error_rate_threshold_percent,
+        min_request_count: config.circuit_min_request_count,
+    };
+    let provider = open_provider(candidate, Uuid::new_v4()).map_err(|error| {
+        record_provider_key_failure(candidate, &error);
+        record_provider_failure(candidate, circuit_settings);
+        RelayError::Unavailable(error.to_string())
+    })?;
+    let response = provider
+        .open_responses_raw(body, content_type)
+        .await
+        .map_err(|error| {
+            let agent_error = AgentError::Provider(error);
+            record_provider_key_failure(candidate, &agent_error);
+            record_provider_failure(candidate, circuit_settings);
+            RelayError::Unavailable(agent_error.to_string())
+        })?;
+
+    if response.status().is_success() {
+        record_provider_key_success(candidate);
+        record_provider_success(candidate, circuit_settings);
+    } else {
+        let error = AgentError::Provider(ProviderError::HttpStatus {
+            status: response.status(),
+            body: String::new(),
+            retry_after_secs: response.retry_after_secs(),
+        });
+        record_provider_key_failure(candidate, &error);
+        record_provider_failure(candidate, circuit_settings);
+    }
+    Ok(response)
 }
 
 /// Providers that contributed more than one credential to this candidate list.
