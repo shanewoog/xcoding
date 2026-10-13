@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use xcoding_agent::{RelayError, open_active_provider_responses};
 use xcoding_protocol::UserConfig;
-use xcoding_providers::RawResponsesStream;
+use xcoding_providers::{RawResponsesStream, list_models_with_wire_api};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -121,6 +121,30 @@ async fn handle_connection(
             return write_error(reader.into_inner(), status, message, false).await;
         }
     };
+    if request.method == "GET" {
+        if request.path != "/v1/models" && request.path != "/models" {
+            return write_error(reader.into_inner(), 404, "not found", false).await;
+        }
+        let Some(authorization) = request.authorization.as_deref() else {
+            return write_error(
+                reader.into_inner(),
+                401,
+                "invalid local relay API key",
+                true,
+            )
+            .await;
+        };
+        if !valid_bearer(authorization, relay_key) {
+            return write_error(
+                reader.into_inner(),
+                401,
+                "invalid local relay API key",
+                true,
+            )
+            .await;
+        }
+        return write_model_list(reader.into_inner(), config).await;
+    }
     if request.method != "POST" {
         return write_error(reader.into_inner(), 405, "only POST is supported", false).await;
     }
@@ -165,6 +189,89 @@ async fn handle_connection(
         }
     };
     write_upstream_response(reader.into_inner(), stream).await
+}
+
+async fn write_model_list(
+    mut stream: TcpStream,
+    config: &UserConfig,
+) -> Result<(), std::io::Error> {
+    let Some(active_id) = config.active_provider_id.as_deref() else {
+        return write_error(stream, 503, "no active provider is configured", true).await;
+    };
+    let Some(provider) = config
+        .providers
+        .iter()
+        .find(|provider| provider.id == active_id)
+    else {
+        return write_error(stream, 503, "the active provider no longer exists", true).await;
+    };
+
+    let keys: Vec<&str> = if provider.api_keys.is_empty() {
+        provider
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .into_iter()
+            .collect()
+    } else {
+        provider
+            .api_keys
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.key.trim())
+            .filter(|key| !key.is_empty())
+            .collect()
+    };
+    if keys.is_empty() {
+        return write_error(
+            stream,
+            503,
+            "the active provider has no enabled API key",
+            true,
+        )
+        .await;
+    }
+
+    let mut last_error = None;
+    for api_key in keys {
+        match list_models_with_wire_api(Some(&provider.base_url), Some(api_key), provider.wire_api)
+            .await
+        {
+            Ok(result) => {
+                let data: Vec<serde_json::Value> = result
+                    .models
+                    .into_iter()
+                    .map(|model| {
+                        let mut entry = serde_json::json!({
+                            "id": model.id,
+                            "object": "model"
+                        });
+                        if let Some(owned_by) = model.owned_by {
+                            entry["owned_by"] = serde_json::Value::String(owned_by);
+                        }
+                        entry
+                    })
+                    .collect();
+                let body = serde_json::json!({
+                    "object": "list",
+                    "data": data
+                })
+                .to_string();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await?;
+                stream.write_all(body.as_bytes()).await?;
+                return stream.shutdown().await;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    let message = last_error.unwrap_or_else(|| "failed to list active provider models".to_owned());
+    write_error(stream, 503, &message, true).await
 }
 
 fn parse_request_head(bytes: &[u8]) -> Result<RequestHead, (u16, &'static str)> {
@@ -283,9 +390,167 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use xcoding_protocol::UserConfig;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+    use xcoding_protocol::{
+        CloudProviderConfig, ProviderApiKey, ProviderTrustLevel, ProviderWireApi, UserConfig,
+    };
 
-    use super::{MAX_BODY_BYTES, RelayState, parse_request_head, restart, stop, valid_bearer};
+    use super::{
+        MAX_BODY_BYTES, RelayState, handle_connection, parse_request_head, restart, stop,
+        valid_bearer,
+    };
+
+    async fn run_relay_request(config: UserConfig, request: &'static [u8]) -> Vec<u8> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("relay test listener binds");
+        let address = listener.local_addr().expect("relay test address available");
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("relay accepts client");
+            handle_connection(stream, &config, "local-key")
+                .await
+                .expect("relay handles request");
+        });
+        let mut client = TcpStream::connect(address)
+            .await
+            .expect("client connects to relay");
+        client.write_all(request).await.expect("request writes");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response reads");
+        task.await.expect("relay task completes");
+        response
+    }
+
+    fn relay_config(base_url: &str) -> UserConfig {
+        UserConfig {
+            providers: vec![CloudProviderConfig {
+                id: "active".to_owned(),
+                name: "Active".to_owned(),
+                base_url: base_url.to_owned(),
+                wire_api: ProviderWireApi::Responses,
+                trust_level: ProviderTrustLevel::Relay,
+                api_key: None,
+                api_keys: vec![
+                    ProviderApiKey {
+                        id: "disabled".to_owned(),
+                        label: "Disabled".to_owned(),
+                        key: "disabled-key".to_owned(),
+                        weight: 1,
+                        enabled: false,
+                    },
+                    ProviderApiKey {
+                        id: "enabled".to_owned(),
+                        label: "Enabled".to_owned(),
+                        key: "pool-key".to_owned(),
+                        weight: 1,
+                        enabled: true,
+                    },
+                ],
+                note: None,
+            }],
+            active_provider_id: Some("active".to_owned()),
+            ..UserConfig::default()
+        }
+    }
+
+    fn response_body(response: &[u8]) -> serde_json::Value {
+        let body = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|offset| &response[offset + 4..])
+            .expect("response has headers");
+        serde_json::from_slice(body).expect("response body is JSON")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lists_active_provider_models_using_an_enabled_pool_key() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("upstream binds");
+        let upstream_address = upstream.local_addr().expect("upstream address available");
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.expect("upstream accepts request");
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream
+                    .read_exact(&mut byte)
+                    .await
+                    .expect("upstream request reads");
+                request.push(byte[0]);
+            }
+            let body = r#"{"data":[{"id":"gpt-test","owned_by":"xcoding"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("upstream response writes");
+            String::from_utf8(request).expect("request headers are UTF-8")
+        });
+
+        let response = run_relay_request(
+            relay_config(&format!("http://{upstream_address}")),
+            b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer local-key\r\n\r\n",
+        )
+        .await;
+        let request = upstream_task.await.expect("upstream task completes");
+
+        assert!(request.starts_with("GET /v1/models "));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer pool-key")
+        );
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200 OK"));
+        let body = response_body(&response);
+        assert_eq!(body["object"], "list");
+        assert_eq!(body["data"][0]["id"], "gpt-test");
+        assert_eq!(body["data"][0]["object"], "model");
+        assert_eq!(body["data"][0]["owned_by"], "xcoding");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_list_requires_the_local_relay_key() {
+        let response = run_relay_request(
+            UserConfig::default(),
+            b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer wrong\r\n\r\n",
+        )
+        .await;
+
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 401 Unauthorized"));
+        assert_eq!(
+            response_body(&response)["error"]["message"],
+            "invalid local relay API key"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_list_reports_missing_active_provider() {
+        let response = run_relay_request(
+            UserConfig {
+                active_provider_id: None,
+                ..UserConfig::default()
+            },
+            b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer local-key\r\n\r\n",
+        )
+        .await;
+
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert_eq!(
+            response_body(&response)["error"]["message"],
+            "no active provider is configured"
+        );
+    }
 
     #[test]
     fn restart_from_sync_context_starts_the_listener() {
