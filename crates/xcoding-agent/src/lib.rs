@@ -1400,6 +1400,28 @@ pub async fn open_active_provider_responses(
     body: &[u8],
     content_type: Option<&str>,
 ) -> Result<RawResponsesStream, RelayError> {
+    open_active_provider_request(
+        config,
+        ProviderWireApi::Responses,
+        body,
+        content_type,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Relay only to the active provider using the same protocol as the local request.
+/// Key health and circuit selection are shared; protocol conversion and backup
+/// provider routing are deliberately excluded from this pass-through boundary.
+pub async fn open_active_provider_request(
+    config: &UserConfig,
+    wire_api: ProviderWireApi,
+    body: &[u8],
+    content_type: Option<&str>,
+    anthropic_version: Option<&str>,
+    anthropic_beta: Option<&str>,
+) -> Result<RawResponsesStream, RelayError> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|error| RelayError::InvalidRequest(format!("request body must be JSON: {error}")))?;
     let _model = value
@@ -1418,10 +1440,11 @@ pub async fn open_active_provider_responses(
         .iter()
         .find(|provider| provider.id == active_id)
         .ok_or_else(|| RelayError::Unavailable("the active provider no longer exists".to_owned()))?;
-    if provider.wire_api != ProviderWireApi::Responses {
-        return Err(RelayError::Unavailable(
-            "the active provider does not support the Responses API".to_owned(),
-        ));
+    if provider.wire_api != wire_api {
+        return Err(RelayError::Unavailable(format!(
+            "request protocol {wire_api:?} does not match the active provider protocol {:?}; protocol conversion is not supported",
+            provider.wire_api
+        )));
     }
 
     let candidates = expand_provider_candidates(config, provider, Some(active_id), None);
@@ -1462,7 +1485,13 @@ pub async fn open_active_provider_responses(
         RelayError::Unavailable(error.to_string())
     })?;
     let response = provider
-        .open_responses_raw(body, content_type)
+        .open_raw_request(
+            wire_api,
+            body,
+            content_type,
+            anthropic_version,
+            anthropic_beta,
+        )
         .await
         .map_err(|error| {
             let agent_error = AgentError::Provider(error);

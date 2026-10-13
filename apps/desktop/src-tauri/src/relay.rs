@@ -3,8 +3,8 @@ use std::sync::Mutex;
 use futures_util::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use xcoding_agent::{RelayError, open_active_provider_responses};
-use xcoding_protocol::UserConfig;
+use xcoding_agent::{RelayError, open_active_provider_request};
+use xcoding_protocol::{ProviderWireApi, UserConfig};
 use xcoding_providers::{RawResponsesStream, list_models_with_wire_api};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -90,6 +90,9 @@ struct RequestHead {
     method: String,
     path: String,
     authorization: Option<String>,
+    api_key: Option<String>,
+    anthropic_version: Option<String>,
+    anthropic_beta: Option<String>,
     content_type: Option<String>,
     content_length: Option<usize>,
     transfer_encoding: Option<String>,
@@ -125,16 +128,7 @@ async fn handle_connection(
         if request.path != "/v1/models" && request.path != "/models" {
             return write_error(reader.into_inner(), 404, "not found", false).await;
         }
-        let Some(authorization) = request.authorization.as_deref() else {
-            return write_error(
-                reader.into_inner(),
-                401,
-                "invalid local relay API key",
-                true,
-            )
-            .await;
-        };
-        if !valid_bearer(authorization, relay_key) {
+        if !valid_local_key(&request, relay_key, true) {
             return write_error(
                 reader.into_inner(),
                 401,
@@ -148,9 +142,12 @@ async fn handle_connection(
     if request.method != "POST" {
         return write_error(reader.into_inner(), 405, "only POST is supported", false).await;
     }
-    if request.path != "/v1/responses" && request.path != "/responses" {
-        return write_error(reader.into_inner(), 404, "not found", false).await;
-    }
+    let wire_api = match request.path.as_str() {
+        "/v1/responses" | "/responses" => ProviderWireApi::Responses,
+        "/v1/chat/completions" | "/chat/completions" => ProviderWireApi::ChatCompletions,
+        "/v1/messages" | "/messages" => ProviderWireApi::AnthropicMessages,
+        _ => return write_error(reader.into_inner(), 404, "not found", false).await,
+    };
     if request
         .transfer_encoding
         .as_deref()
@@ -164,19 +161,23 @@ async fn handle_connection(
     if content_length > MAX_BODY_BYTES {
         return write_error(reader.into_inner(), 413, "request body too large", false).await;
     }
-    let Some(authorization) = request.authorization.as_deref() else {
-        return write_error(reader.into_inner(), 401, "invalid local relay API key", false).await;
-    };
-    if !valid_bearer(authorization, relay_key) {
+    if !valid_local_key(
+        &request,
+        relay_key,
+        wire_api == ProviderWireApi::AnthropicMessages,
+    ) {
         return write_error(reader.into_inner(), 401, "invalid local relay API key", false).await;
     }
 
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body).await?;
-    let stream = match open_active_provider_responses(
+    let stream = match open_active_provider_request(
         config,
+        wire_api,
         &body,
         request.content_type.as_deref(),
+        request.anthropic_version.as_deref(),
+        request.anthropic_beta.as_deref(),
     )
     .await
     {
@@ -297,6 +298,9 @@ fn parse_request_head(bytes: &[u8]) -> Result<RequestHead, (u16, &'static str)> 
         let value = value.trim();
         match name.trim().to_ascii_lowercase().as_str() {
             "authorization" => request.authorization = Some(value.to_owned()),
+            "x-api-key" => request.api_key = Some(value.to_owned()),
+            "anthropic-version" => request.anthropic_version = Some(value.to_owned()),
+            "anthropic-beta" => request.anthropic_beta = Some(value.to_owned()),
             "content-type" => request.content_type = Some(value.to_owned()),
             "content-length" => {
                 let length = value.parse::<usize>().map_err(|_| (400, "invalid Content-Length"))?;
@@ -309,6 +313,13 @@ fn parse_request_head(bytes: &[u8]) -> Result<RequestHead, (u16, &'static str)> 
         }
     }
     Ok(request)
+}
+
+fn valid_local_key(request: &RequestHead, expected: &str, allow_api_key: bool) -> bool {
+    match request.authorization.as_deref() {
+        Some(authorization) => valid_bearer(authorization, expected),
+        None => allow_api_key && request.api_key.as_deref() == Some(expected),
+    }
 }
 
 fn valid_bearer(value: &str, expected: &str) -> bool {
@@ -403,7 +414,7 @@ mod tests {
         valid_bearer,
     };
 
-    async fn run_relay_request(config: UserConfig, request: &'static [u8]) -> Vec<u8> {
+    async fn run_relay_request(config: UserConfig, request: &[u8]) -> Vec<u8> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("relay test listener binds");
@@ -466,6 +477,258 @@ mod tests {
             .map(|offset| &response[offset + 4..])
             .expect("response has headers");
         serde_json::from_slice(body).expect("response body is JSON")
+    }
+
+    async fn assert_protocol_passthrough(
+        wire_api: ProviderWireApi,
+        local_path: &str,
+        upstream_path: &str,
+        authentication: &str,
+        response_type: &str,
+        response_body: &[u8],
+        status: u16,
+    ) {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let expected_response = response_body.to_vec();
+        let upstream_response_type = response_type.to_owned();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                reader.read_exact(&mut byte).await.unwrap();
+                head.push(byte[0]);
+            }
+            let headers = String::from_utf8(head).unwrap();
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).await.unwrap();
+            let mut stream = reader.into_inner();
+            let reason = if status == 429 {
+                "Too Many Requests"
+            } else {
+                "OK"
+            };
+            let head = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {upstream_response_type}\r\nRetry-After: 7\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                expected_response.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            // Separate writes exercise streaming without interpreting SSE events.
+            for chunk in expected_response.chunks(7) {
+                stream.write_all(chunk).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            (headers, body)
+        });
+        let mut config = relay_config(&format!("http://{address}/v1"));
+        config.providers[0].wire_api = wire_api;
+        config.providers[0].id = format!("protocol-{address}");
+        config.active_provider_id = Some(config.providers[0].id.clone());
+        let body: &[u8] = if response_type == "application/json" {
+            br#"{ "model" : "test-model", "stream": false, "messages": [], "input": [], "max_tokens": 32, "custom_field": {"keep":"unchanged"} }"#
+        } else {
+            br#"{ "model" : "test-model", "stream": true, "messages": [], "input": [], "max_tokens": 32, "custom_field": {"keep":"unchanged"} }"#
+        };
+        let protocol_headers = if local_path == "/messages" {
+            ""
+        } else {
+            "anthropic-version: 2023-06-01\r\nanthropic-beta: tools-2024-04-04\r\n"
+        };
+        let request = format!(
+            "POST {local_path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authentication}\r\nContent-Type: application/json\r\n{protocol_headers}Cookie: private-local-cookie\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut request = request.into_bytes();
+        request.extend_from_slice(body);
+        let response = run_relay_request(config, &request).await;
+        assert!(String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {status} ")));
+        let (headers, actual_body) = tokio::time::timeout(Duration::from_secs(2), upstream_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(headers.starts_with(&format!("POST {upstream_path} ")));
+        let headers = headers.to_ascii_lowercase();
+        assert!(!headers.contains("local-key"));
+        assert!(!headers.contains("disabled-key"));
+        assert!(!headers.contains("private-local-cookie"));
+        if wire_api == ProviderWireApi::AnthropicMessages {
+            assert!(headers.contains("x-api-key: pool-key"));
+            assert!(!headers.contains("authorization:"));
+            assert!(headers.contains("anthropic-version: 2023-06-01"));
+            if protocol_headers.is_empty() {
+                assert!(!headers.contains("anthropic-beta:"));
+            } else {
+                assert!(headers.contains("anthropic-beta: tools-2024-04-04"));
+            }
+        } else {
+            assert!(headers.contains("authorization: bearer pool-key"));
+            assert!(!headers.contains("x-api-key:"));
+            assert!(!headers.contains("anthropic-version:"));
+            assert!(!headers.contains("anthropic-beta:"));
+        }
+        assert_eq!(actual_body, body);
+        let offset = response
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        assert_eq!(&response[offset..], response_body);
+        let response_headers = String::from_utf8_lossy(&response[..offset]).to_ascii_lowercase();
+        assert!(response_headers.contains("retry-after: 7"));
+        assert!(response_headers.contains(&format!(
+            "content-type: {}",
+            response_type.to_ascii_lowercase()
+        )));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn responses_stream_remains_byte_for_byte_passthrough() {
+        assert_protocol_passthrough(
+            ProviderWireApi::Responses,
+            "/v1/responses",
+            "/v1/responses",
+            "Authorization: Bearer local-key",
+            "text/event-stream",
+            b"event: response.output_text.delta\ndata: {\"delta\":\"hello\"}\n\n",
+            200,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_completions_stream_is_byte_for_byte_passthrough() {
+        assert_protocol_passthrough(
+            ProviderWireApi::ChatCompletions,
+            "/v1/chat/completions",
+            "/v1/chat/completions",
+            "Authorization: Bearer local-key",
+            "text/event-stream",
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n",
+            200,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anthropic_messages_accepts_local_x_api_key_and_forwards_protocol_headers() {
+        assert_protocol_passthrough(
+            ProviderWireApi::AnthropicMessages, "/v1/messages", "/v1/messages",
+            "x-api-key: local-key", "text/event-stream",
+            b"event: content_block_delta\ndata: {\"delta\":{\"text\":\"hello\"}}\n\nevent: message_stop\ndata: {}\n\n", 200,
+        ).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anthropic_messages_accepts_bearer_and_preserves_upstream_errors() {
+        assert_protocol_passthrough(
+            ProviderWireApi::AnthropicMessages,
+            "/messages",
+            "/v1/messages",
+            "Authorization: Bearer local-key",
+            "application/json",
+            br#"{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}"#,
+            429,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_completions_alias_preserves_json_response() {
+        assert_protocol_passthrough(
+            ProviderWireApi::ChatCompletions,
+            "/chat/completions",
+            "/v1/chat/completions",
+            "Authorization: Bearer local-key",
+            "application/json",
+            br#"{"id":"chat-test","choices":[{"message":{"content":"hello"}}]}"#,
+            200,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn new_protocol_routes_reject_invalid_local_credentials() {
+        for (path, authentication) in [
+            ("/v1/chat/completions", "Authorization: Bearer wrong"),
+            ("/v1/messages", "x-api-key: wrong"),
+            (
+                "/v1/messages",
+                "x-api-key: local-key\r\nAuthorization: Bearer wrong",
+            ),
+        ] {
+            let request = format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{authentication}\r\nContent-Length: 2\r\n\r\n{{}}"
+            );
+            let response = run_relay_request(UserConfig::default(), request.as_bytes()).await;
+            assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 401 "));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn relay_rejects_protocol_mismatch_without_contacting_upstream() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let config = relay_config(&format!("http://{}", upstream.local_addr().unwrap()));
+        let body = br#"{"model":"test-model","messages":[]}"#;
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer local-key\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut request = request.into_bytes();
+        request.extend_from_slice(body);
+        let response = run_relay_request(config, &request).await;
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 503 "));
+        assert!(
+            response_body(&response)["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("protocol")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), upstream.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_list_accepts_the_local_x_api_key() {
+        let response = run_relay_request(
+            UserConfig {
+                active_provider_id: None,
+                ..UserConfig::default()
+            },
+            b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nx-api-key: local-key\r\n\r\n",
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 503 "));
+        assert_eq!(
+            response_body(&response)["error"]["message"],
+            "no active provider is configured"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn new_protocol_routes_validate_body_before_contacting_upstream() {
+        for path in ["/v1/chat/completions", "/v1/messages"] {
+            for body in ["not-json", "{}"] {
+                let request = format!(
+                    "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer local-key\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let response = run_relay_request(UserConfig::default(), request.as_bytes()).await;
+                assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 400 "));
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

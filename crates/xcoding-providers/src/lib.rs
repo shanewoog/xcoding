@@ -1592,7 +1592,26 @@ impl OpenAiCompatibleProvider {
         body: &[u8],
         content_type: Option<&str>,
     ) -> Result<RawResponsesStream, ProviderError> {
-        let url = format!("{}/responses", self.base_url);
+        self.open_raw_request(ProviderWireApi::Responses, body, content_type, None, None)
+            .await
+    }
+
+    /// Open a relay request without rewriting its JSON or interpreting its response.
+    /// Only protocol headers are forwarded; upstream credentials are supplied here.
+    pub async fn open_raw_request(
+        &self,
+        wire_api: ProviderWireApi,
+        body: &[u8],
+        content_type: Option<&str>,
+        anthropic_version: Option<&str>,
+        anthropic_beta: Option<&str>,
+    ) -> Result<RawResponsesStream, ProviderError> {
+        let suffix = match wire_api {
+            ProviderWireApi::Responses => "responses",
+            ProviderWireApi::ChatCompletions => "chat/completions",
+            ProviderWireApi::AnthropicMessages => "messages",
+        };
+        let url = format!("{}/{suffix}", self.base_url);
         let request_log = request_logs::RequestLog::start_raw(&url, body, &self.api_key);
         let start = Instant::now();
         let mut request = self.client.post(&url).body(body.to_vec());
@@ -1604,7 +1623,20 @@ impl OpenAiCompatibleProvider {
         if let Ok(user_agent) = reqwest::header::HeaderValue::from_str(&http_user_agent()) {
             request = request.header(reqwest::header::USER_AGENT, user_agent);
         }
-        let request = request.bearer_auth(&self.api_key);
+        let request = match wire_api {
+            ProviderWireApi::AnthropicMessages => {
+                let request = request
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", anthropic_version.unwrap_or("2023-06-01"));
+                match anthropic_beta {
+                    Some(beta) => request.header("anthropic-beta", beta),
+                    None => request,
+                }
+            }
+            ProviderWireApi::ChatCompletions | ProviderWireApi::Responses => {
+                request.bearer_auth(&self.api_key)
+            }
+        };
         let request = request.build().map_err(|error| {
             request_log.finish(Some(&error.to_string()));
             ProviderError::from(error)
