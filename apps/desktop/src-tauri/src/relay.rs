@@ -56,11 +56,12 @@ pub fn restart(state: &RelayState, config: UserConfig) -> Result<(), String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("failed to configure local relay listener: {error}"))?;
-    let listener = TcpListener::from_std(listener)
-        .map_err(|error| format!("failed to start local relay listener: {error}"))?;
     let bind_key = key.to_owned();
     let task = tauri::async_runtime::spawn(async move {
-        accept_loop(listener, config, bind_key).await;
+        match TcpListener::from_std(listener) {
+            Ok(listener) => accept_loop(listener, config, bind_key).await,
+            Err(error) => eprintln!("failed to start local relay listener: {error}"),
+        }
     });
     if let Ok(mut slot) = state.handle.lock() {
         *slot = Some(RelayHandle { task });
@@ -276,7 +277,49 @@ async fn write_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_BODY_BYTES, parse_request_head, valid_bearer};
+    use std::{
+        net::{SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use xcoding_protocol::UserConfig;
+
+    use super::{MAX_BODY_BYTES, RelayState, parse_request_head, restart, stop, valid_bearer};
+
+    #[test]
+    fn restart_from_sync_context_starts_the_listener() {
+        let probe = StdTcpListener::bind(("127.0.0.1", 0)).expect("probe port binds");
+        let port = probe
+            .local_addr()
+            .expect("probe address is available")
+            .port();
+        drop(probe);
+
+        let state = RelayState::default();
+        let config = UserConfig {
+            local_relay_enabled: true,
+            local_relay_port: port,
+            local_relay_api_key: Some("test-key".to_owned()),
+            ..UserConfig::default()
+        };
+        restart(&state, config).expect("relay starts without a Tokio context on this thread");
+
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if StdTcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "relay did not begin accepting connections"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        stop(&state);
+    }
 
     #[test]
     fn accepts_supported_path_and_headers() {
