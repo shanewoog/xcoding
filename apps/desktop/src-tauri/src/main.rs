@@ -454,6 +454,7 @@ fn set_user_config(
     relay_state: tauri::State<'_, relay::RelayState>,
     mut config: UserConfig,
 ) -> Result<UserConfig, String> {
+    let previous = load_user_config();
     if config.local_relay_enabled
         && config
             .local_relay_api_key
@@ -469,7 +470,9 @@ fn set_user_config(
     let next = normalize_user_config(config);
     save_user_config(&next)?;
     apply_user_config_to_env(&next);
-    relay::restart(&relay_state, next.clone())?;
+    if previous.local_relay_enabled != next.local_relay_enabled {
+        relay::restart(&relay_state, next.clone())?;
+    }
     if let Err(error) = open_core(&app).and_then(|core| {
         core.purge_model_call_logs(next.model_call_log_retention_days)
             .map_err(|error| error.to_string())

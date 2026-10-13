@@ -28,7 +28,23 @@ pub struct RelayHandle {
 
 impl RelayHandle {
     pub fn stop(self) {
-        self.task.abort();
+        let task = self.task;
+        task.abort();
+        wait_for_task(task);
+    }
+}
+
+fn wait_for_task(task: tauri::async_runtime::JoinHandle<()>) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let runtime = tauri::async_runtime::handle();
+        tauri::async_runtime::spawn_blocking(move || {
+            let _ = runtime.block_on(task);
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv();
+    } else {
+        let _ = tauri::async_runtime::block_on(task);
     }
 }
 
@@ -831,20 +847,26 @@ mod tests {
             local_relay_api_key: Some("test-key".to_owned()),
             ..UserConfig::default()
         };
-        restart(&state, config).expect("relay starts without a Tokio context on this thread");
+        restart(&state, config.clone()).expect("relay starts without a Tokio context on this thread");
 
         let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if StdTcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
-                break;
+        let wait_for_listener = || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if StdTcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "relay did not begin accepting connections"
+                );
+                thread::sleep(Duration::from_millis(10));
             }
-            assert!(
-                Instant::now() < deadline,
-                "relay did not begin accepting connections"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        };
+        wait_for_listener();
+
+        restart(&state, config).expect("relay can restart on the same port");
+        wait_for_listener();
 
         stop(&state);
     }
