@@ -1628,6 +1628,11 @@ fn record_provider_failure(candidate: &ProviderCandidate, settings: CircuitSetti
 }
 
 fn is_retryable_provider_attempt(error: &AgentError) -> bool {
+    // An explicit rejection of the selected model cannot be fixed by resending
+    // the same request to the same provider, even when it uses HTTP 404/400.
+    if provider_rejected_selected_model(error) {
+        return false;
+    }
     match error {
         AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
@@ -1684,6 +1689,8 @@ fn provider_rejected_selected_model(error: &AgentError) -> bool {
         || body.contains("model not found")
         || body.contains("unknown model")
         || body.contains("model does not exist")
+        || body.contains("not supported by any configured account")
+        || body.contains("not supported by any account")
 }
 
 /// Returns `true` when the provider refused the request because the history
@@ -1985,16 +1992,35 @@ impl<'a> AgentService<'a> {
     where
         F: FnMut(SessionEvent),
     {
+        self.ensure_not_cancelled_preserving(session.id, "")
+            .map_err(|error| ProviderAttemptFailure {
+                error,
+                output_chars: 0,
+                tool_calls: 0,
+                ttft_ms: None,
+                total_ms: None,
+            })?;
         let attempt_started_at = tokio::time::Instant::now();
         // Recorded before the request leaves, so a usage report can be compared
         // against exactly what was estimated for it.
         let estimated_prompt_tokens = estimate_chat_request_tokens(&messages, definitions);
-        let mut stream = match tokio::time::timeout(
-            stream_first_event_timeout,
-            provider.stream_chat(model, messages, definitions, reasoning_effort),
-        )
-        .await
-        {
+        let stream_result = tokio::select! {
+            biased;
+            _ = self.wait_until_cancelled(session.id) => {
+                return Err(ProviderAttemptFailure {
+                    error: AgentError::Cancelled,
+                    output_chars: 0,
+                    tool_calls: 0,
+                    ttft_ms: None,
+                    total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
+                });
+            }
+            result = tokio::time::timeout(
+                stream_first_event_timeout,
+                provider.stream_chat(model, messages, definitions, reasoning_effort),
+            ) => result,
+        };
+        let mut stream = match stream_result {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
                 return Err(ProviderAttemptFailure {
@@ -2504,6 +2530,7 @@ impl<'a> AgentService<'a> {
                         }
                     };
                     loop {
+                        self.ensure_not_cancelled_preserving(session.id, &last_partial)?;
                         let attempt = retry_attempt + 1;
                         let mut attempt_messages = messages.clone();
                         // Transform messages based on vision route status.
@@ -2666,6 +2693,7 @@ impl<'a> AgentService<'a> {
                             }
                             other => other,
                         };
+                        self.ensure_not_cancelled_preserving(session.id, &last_partial)?;
                         match attempt_result {
                             Ok((content, tool_calls, model_reported, ttft_ms, total_ms)) => {
                                 if attempt_has_new_images
@@ -2782,8 +2810,12 @@ impl<'a> AgentService<'a> {
                                                     ),
                                                 },
                                             );
-                                            tokio::time::sleep(provider_retry_delay(retry_attempt))
-                                                .await;
+                                            self.wait_for_retry_delay(
+                                                session.id,
+                                                &last_partial,
+                                                provider_retry_delay(retry_attempt),
+                                            )
+                                            .await?;
                                             continue;
                                         }
                                     }
@@ -2816,7 +2848,12 @@ impl<'a> AgentService<'a> {
                                             message,
                                         },
                                     );
-                                    tokio::time::sleep(provider_retry_delay(retry_attempt)).await;
+                                    self.wait_for_retry_delay(
+                                        session.id,
+                                        &last_partial,
+                                        provider_retry_delay(retry_attempt),
+                                    )
+                                    .await?;
                                     continue;
                                 }
 
@@ -2850,8 +2887,12 @@ impl<'a> AgentService<'a> {
                                                 ),
                                             },
                                         );
-                                        tokio::time::sleep(provider_retry_delay(retry_attempt))
-                                            .await;
+                                        self.wait_for_retry_delay(
+                                            session.id,
+                                            &last_partial,
+                                            provider_retry_delay(retry_attempt),
+                                        )
+                                        .await?;
                                         continue;
                                     }
                                 }
@@ -2953,6 +2994,7 @@ impl<'a> AgentService<'a> {
                 // otherwise MessageCompleted could be followed by neither a terminal
                 // TaskCompleted nor an Error event.
                 let summary = self.enrich_task_summary(&session)?;
+                self.ensure_not_cancelled_preserving(session.id, &content)?;
                 let result = self.core.complete_chat(session.id, content)?;
                 self.emit(
                     on_event,
@@ -3768,6 +3810,32 @@ impl<'a> AgentService<'a> {
             Err(AgentError::Cancelled)
         } else {
             Ok(())
+        }
+    }
+
+    async fn wait_until_cancelled(&self, session_id: Uuid) {
+        loop {
+            if self.core.is_session_cancelled(session_id).unwrap_or(false) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_retry_delay(
+        &self,
+        session_id: Uuid,
+        partial_assistant: &str,
+        delay: Duration,
+    ) -> Result<(), AgentError> {
+        tokio::select! {
+            biased;
+            _ = self.wait_until_cancelled(session_id) => {
+                self.ensure_not_cancelled_preserving(session_id, partial_assistant)
+            }
+            _ = tokio::time::sleep(delay) => {
+                self.ensure_not_cancelled_preserving(session_id, partial_assistant)
+            }
         }
     }
 
@@ -8939,6 +9007,19 @@ private material
         });
         assert!(!is_context_overflow_error(&error));
         assert!(provider_rejected_selected_model(&error));
+        assert!(!is_retryable_provider_attempt(&error));
+    }
+
+    #[test]
+    fn model_not_supported_by_configured_accounts_is_not_retried() {
+        let error = AgentError::Provider(ProviderError::HttpStatus {
+            status: xcoding_providers::StatusCode::NOT_FOUND,
+            body: r#"{"error":{"message":"Model \"gpt-6-astra\" is not supported by any configured account in this group","type":"model_not_found"}}"#.to_owned(),
+            retry_after_secs: None,
+        });
+
+        assert!(provider_rejected_selected_model(&error));
+        assert!(!is_retryable_provider_attempt(&error));
     }
 
     #[test]

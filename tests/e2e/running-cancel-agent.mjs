@@ -50,6 +50,8 @@ async function main() {
 
   try {
     await testMidStreamCancel(rpc, mock, workspace);
+    await testStopDuringProviderRetry(rpc, mock, workspace);
+    await testUnsupportedModelIsNotRetried(rpc, mock, workspace);
     await testMidCommandCancel(rpc, mock, workspace);
     await testFailedCommandRefeed(rpc, mock, workspace);
     await testAutoEditStillRequiresCommandApproval(rpc, mock, workspace);
@@ -78,6 +80,39 @@ async function testMidStreamCancel(rpc, mock, workspace) {
   assert.equal(chat.session.status, "cancelled");
   assert.equal(chat.message ?? null, null);
   assert.ok(rpc.events.some((event) => event.type === "session_cancelled" && event.session_id === delta.session_id));
+}
+
+async function testStopDuringProviderRetry(rpc, mock, workspace) {
+  mock.scenario = "retryable-error";
+  const requestCountBefore = mock.requests.length;
+  const chatPromise = rpc.request("session.chat", {
+    workspace_root: workspace,
+    message: "Retry once, then stop.",
+    model: "fixture-model",
+    mode: "ask",
+  });
+  const retry = await waitForEvent(rpc, (event) => event.type === "retrying", 10_000);
+  const cancel = await rpc.request("session.cancel", { session_id: retry.session_id });
+  assert.equal(cancel.session.status, "cancelled");
+  const chat = await chatPromise;
+  assert.equal(chat.session.status, "cancelled");
+  await delay(400);
+  assert.equal(mock.requests.length, requestCountBefore + 1, "cancel during backoff must prevent the next provider request");
+}
+
+async function testUnsupportedModelIsNotRetried(rpc, mock, workspace) {
+  mock.scenario = "unsupported-model";
+  const requestCountBefore = mock.requests.length;
+  await assert.rejects(
+    rpc.request("session.chat", {
+      workspace_root: workspace,
+      message: "Use an unsupported model.",
+      model: "fixture-model",
+      mode: "ask",
+    }),
+    /HTTP 404/,
+  );
+  assert.equal(mock.requests.length, requestCountBefore + 1, "the unsupported model should fail after one request");
 }
 
 async function testMidCommandCancel(rpc, mock, workspace) {
@@ -273,6 +308,18 @@ async function startMockProvider() {
     state.requests.push(payload);
     const messages = payload.messages ?? [];
     const hasToolResult = messages.some((message) => message.role === "tool");
+
+    if (state.scenario === "retryable-error") {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "temporarily unavailable", type: "server_error" } }));
+      return;
+    }
+
+    if (state.scenario === "unsupported-model") {
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: `Model \"${payload.model}\" is not supported by any configured account in this group`, type: "model_not_found" } }));
+      return;
+    }
 
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
 
