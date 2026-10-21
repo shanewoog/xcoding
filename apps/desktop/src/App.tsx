@@ -6422,6 +6422,7 @@ export function App() {
               onToggle={() => setEnvPopoverOpen((value) => !value)}
               buttonRef={envButtonRef}
               summary={envSummary}
+              workspaceRoot={workspaceRoot}
             />
             <HeaderPanelToggle
               locale={locale}

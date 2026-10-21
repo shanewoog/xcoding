@@ -210,6 +210,7 @@ $releaseGitPaths = @(
   "docs/zh/session-safety.md",
   "tests/e2e/full-auto-mode.mjs",
   "apps/desktop/src/App.tsx",
+  "apps/desktop/src/panels.tsx",
   "apps/desktop/src/RequestLogs.tsx",
   "apps/desktop/src/RequestLogs.css",
   "tests/e2e/desktop-request-logs.mjs",

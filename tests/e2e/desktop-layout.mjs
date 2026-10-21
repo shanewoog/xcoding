@@ -188,6 +188,17 @@ async function main() {
   ]) {
     assert.ok(panelsSource.includes(needle) || appSource.includes(needle), "panel wiring missing " + needle);
   }
+  assert.match(
+    appSource,
+    /<HeaderEnvButton[\s\S]*?workspaceRoot=\{workspaceRoot\}/,
+    "conversation header must receive the current workspace root",
+  );
+  assert.match(
+    panelsSource,
+    /export function HeaderEnvButton[\s\S]*?className="header-workspace-path"[\s\S]*?title=\{workspaceRoot\}[\s\S]*?\{workspaceRoot\}/,
+    "conversation header must render the current workspace root",
+  );
+  assert.ok(cssSource.includes(".header-workspace-path"), "workspace root path styles missing");
 
   for (const needle of [
     "terminal-context-menu",

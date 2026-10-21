@@ -3129,12 +3129,14 @@ export function HeaderEnvButton({
   onToggle,
   buttonRef,
   summary,
+  workspaceRoot,
 }: {
   locale: Locale;
   open: boolean;
   onToggle: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   buttonRef: React.RefObject<HTMLButtonElement | null>;
   summary: string;
+  workspaceRoot: string;
 }) {
   return (
     <button
@@ -3146,6 +3148,11 @@ export function HeaderEnvButton({
       aria-label={t(locale, "env.title")}
       aria-expanded={open}
     >
+      {workspaceRoot ? (
+        <span className="header-workspace-path" title={workspaceRoot}>
+          {workspaceRoot}
+        </span>
+      ) : null}
       <span className="header-env-label">{summary}</span>
     </button>
   );
