@@ -62,7 +62,11 @@ Update-VersionField (Join-Path $Root "apps\desktop\src-tauri\tauri.conf.json") '
 Update-VersionField (Join-Path $Root "apps\desktop\src-tauri\Cargo.lock") '(?ms)(name = "xcoding-desktop"\r?\nversion = ")[^"]+(".*?dependencies = \[)' $version
 
 # Stop a running portable/desktop process so the release binary can be overwritten.
-Get-Process XCoding, xcoding-desktop -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+# Remember whether XCoding.exe was running so it can be restarted after packaging.
+$xcodingProcesses = @(Get-Process -Name "XCoding" -ErrorAction SilentlyContinue)
+$restartXcodingAfterPackage = $xcodingProcesses.Count -gt 0
+$desktopProcesses = @(Get-Process -Name "xcoding-desktop" -ErrorAction SilentlyContinue)
+@($xcodingProcesses + $desktopProcesses) | Stop-Process -Force -ErrorAction SilentlyContinue
 
 if (-not $SkipBuild) {
   Write-Host "Building frontend + Tauri production binary (custom-protocol, no installer)..."
@@ -106,6 +110,10 @@ try {
   Copy-Item -LiteralPath $exe -Destination $fallback -Force
   Write-Host "Warning: XCoding.exe locked; wrote $fallback instead."
   $destExe = $fallback
+}
+if ($restartXcodingAfterPackage) {
+  Start-Process -FilePath $destExe -WorkingDirectory $outDir
+  Write-Host "Restarted XCoding after packaging."
 }
 # Keep original name for debugging if needed.
 Copy-Item -LiteralPath $exe -Destination (Join-Path $outDir "xcoding-desktop.exe") -Force -ErrorAction SilentlyContinue

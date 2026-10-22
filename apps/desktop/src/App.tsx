@@ -6455,13 +6455,6 @@ export function App() {
             <button
               type="button"
               role="menuitem"
-              onClick={() => void renameProject(projectMenu.root)}
-            >
-              {t(locale, "action.rename")}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
               onClick={() => {
                 const root = projectMenu.root;
                 setProjectMenu(null);
@@ -6471,6 +6464,13 @@ export function App() {
               }}
             >
               {t(locale, "action.openInExplorer")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => void renameProject(projectMenu.root)}
+            >
+              {t(locale, "action.rename")}
             </button>
             <button
               type="button"
