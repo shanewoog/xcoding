@@ -1871,6 +1871,18 @@ export function App() {
     () => new Set(hiddenProjectPaths.map((item) => normalizeRoot(item)).filter(Boolean)),
     [hiddenProjectPaths],
   );
+  const projectNameByRoot = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const project of diskProjects) {
+      const key = normalizeRoot(project.path);
+      const name = project.title.trim();
+      if (key && name) map.set(key, name);
+    }
+    return map;
+  }, [diskProjects]);
+  const activeProjectName =
+    projectNameByRoot.get(normalizeRoot(workspaceRoot.trim())) ||
+    (workspaceRoot.trim() ? projectLabel(workspaceRoot.trim()) : "");
   const projectGroups = useMemo(
     () =>
       groupSessionsByProject(
@@ -4005,6 +4017,41 @@ export function App() {
       });
     } catch {
       // Ignore preference persistence failures.
+    }
+  }
+
+  async function renameProject(root: string): Promise<void> {
+    const target = root.trim();
+    if (!target) return;
+    const key = normalizeRoot(target);
+    const current = diskProjects.find((project) => normalizeRoot(project.path) === key);
+    const requested = window.prompt(
+      t(locale, "project.renamePrompt"),
+      current?.title.trim() || projectLabel(target),
+    );
+    setProjectMenu(null);
+    if (requested === null) return;
+    const title = requested.trim();
+    if (!title) {
+      setError(t(locale, "project.renameEmpty"));
+      return;
+    }
+    if (!isTauriRuntime) {
+      setError(t(locale, "error.tauriOnly"));
+      return;
+    }
+    setError(null);
+    try {
+      const renamed = await invoke<{ project: ProjectDir }>("rename_project", {
+        params: { path: target, title },
+      });
+      setDiskProjects((currentProjects) =>
+        currentProjects.map((project) =>
+          normalizeRoot(project.path) === key ? renamed.project : project,
+        ),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t(locale, "project.renameFailed"));
     }
   }
 
@@ -6387,6 +6434,13 @@ export function App() {
             <button
               type="button"
               role="menuitem"
+              onClick={() => void renameProject(projectMenu.root)}
+            >
+              {t(locale, "action.rename")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
               onClick={() => {
                 const root = projectMenu.root;
                 setProjectMenu(null);
@@ -6808,28 +6862,35 @@ export function App() {
           />
           <div className="composer-footer">
             <div className="composer-footer-meta">
-              <button
-                type="button"
-                className="composer-model-log-button"
-                onClick={() => {
-                  setView("model-logs");
-                  void loadModelCallLogs(activeSessionId);
-                }}
-                title={t(locale, "logs.open")}
-              >
-                {t(locale, "logs.open")}
-              </button>
-              <span title={sendHint || undefined}>
-              {queueMode
-                ? t(locale, "composer.queueModeLabel")
-                : canContinueSession(activeSession)
-                  ? t(locale, "composer.continueId", { id: activeSession!.id.slice(0, 8) })
-                  : sendHint
-                    ? sendHint
-                    : workspaceRoot.trim()
-                      ? workspaceRoot
-                      : t(locale, "composer.chooseWorkspace")}
-              </span>
+              <div className="composer-footer-meta-row">
+                <button
+                  type="button"
+                  className="composer-model-log-button"
+                  onClick={() => {
+                    setView("model-logs");
+                    void loadModelCallLogs(activeSessionId);
+                  }}
+                  title={t(locale, "logs.open")}
+                >
+                  {t(locale, "logs.open")}
+                </button>
+                <span title={sendHint || undefined}>
+                  {queueMode
+                    ? workspaceRoot.trim()
+                      ? activeProjectName
+                      : t(locale, "composer.chooseWorkspace")
+                    : canContinueSession(activeSession)
+                      ? t(locale, "composer.continueId", { id: activeSession!.id.slice(0, 8) })
+                      : sendHint
+                        ? sendHint
+                        : workspaceRoot.trim()
+                          ? workspaceRoot
+                          : t(locale, "composer.chooseWorkspace")}
+                </span>
+              </div>
+              {queueMode ? (
+                <span className="composer-queue-hint">{t(locale, "composer.queueModeLabel")}</span>
+              ) : null}
             </div>
             <div className="composer-actions">
               <select

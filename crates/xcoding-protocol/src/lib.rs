@@ -980,6 +980,17 @@ pub struct ImportProjectResult {
     pub copied: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RenameProjectParams {
+    pub path: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RenameProjectResult {
+    pub project: ProjectDir,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PingResult {
     pub ok: bool,

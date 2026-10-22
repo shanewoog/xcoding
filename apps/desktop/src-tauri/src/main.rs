@@ -32,9 +32,10 @@ use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
     CreateProjectResult, ImportProjectParams, ImportProjectResult, ListModelsResult, PingResult,
     ModelCallReport, ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus,
-    ProviderWireApi, ReplaySessionResult, ResolveActionParams,
-    ResolveActionResult, RollbackRestorePointParams, RollbackRestorePointResult, Session,
-    SessionDetail, SetConfigParams, UserConfig, WorkspaceConfig,
+    ProviderWireApi, RenameProjectParams, RenameProjectResult, ReplaySessionResult,
+    ResolveActionParams, ResolveActionResult, RollbackRestorePointParams,
+    RollbackRestorePointResult, Session, SessionDetail, SetConfigParams, UserConfig,
+    WorkspaceConfig,
 };
 use xcoding_providers::{
     apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models_with_wire_api,
@@ -508,6 +509,11 @@ fn create_project(params: CreateProjectParams) -> Result<CreateProjectResult, St
 }
 
 #[tauri::command]
+fn rename_project(params: RenameProjectParams) -> Result<RenameProjectResult, String> {
+    projects::rename_project(params)
+}
+
+#[tauri::command]
 async fn import_project(params: ImportProjectParams) -> Result<ImportProjectResult, String> {
     tauri::async_runtime::spawn_blocking(move || projects::import_project(params))
         .await
@@ -972,6 +978,7 @@ fn main() {
             import_local_skill,
             list_projects,
             create_project,
+            rename_project,
             import_project,
             pick_directory,
             ensure_chat_workspace,

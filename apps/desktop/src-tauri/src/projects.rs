@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use pinyin::ToPinyin;
 use serde_json::json;
 use xcoding_protocol::{
-    CreateProjectParams, CreateProjectResult, ImportProjectParams, ImportProjectResult, ProjectDir,
+    CreateProjectParams, CreateProjectResult, ImportProjectParams, ImportProjectResult,
+    ProjectDir, RenameProjectParams, RenameProjectResult,
 };
 
 fn is_cjk(ch: char) -> bool {
@@ -257,6 +258,23 @@ pub fn ensure_chat_workspace(workspace_home: Option<&str>) -> Result<String, Str
     Ok(root.to_string_lossy().to_string())
 }
 
+pub fn rename_project(params: RenameProjectParams) -> Result<RenameProjectResult, String> {
+    let path_raw = params.path.trim();
+    let title = params.title.trim();
+    if path_raw.is_empty() {
+        return Err("project path is required".to_owned());
+    }
+    if title.is_empty() {
+        return Err("project title is required".to_owned());
+    }
+    let path = resolve_existing_dir(Path::new(path_raw))?;
+    write_title(&path, title)?;
+    let Some(project) = project_from_path(path) else {
+        return Err("failed to load renamed project".to_owned());
+    };
+    Ok(RenameProjectResult { project })
+}
+
 pub fn list_projects(workspace_home: &str) -> Result<Vec<ProjectDir>, String> {
     let home = PathBuf::from(workspace_home.trim());
     if workspace_home.trim().is_empty() {
@@ -380,9 +398,10 @@ pub fn pick_directory(title: Option<String>) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_dir_recursive, direct_child_project, is_within_home, project_dir_slug,
-        unique_destination,
+        copy_dir_recursive, direct_child_project, is_within_home, list_projects, project_dir_slug,
+        rename_project, unique_destination,
     };
+    use xcoding_protocol::RenameProjectParams;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -435,6 +454,26 @@ mod tests {
         assert!(direct_child_project(&home, &nested).is_err());
         assert!(direct_child_project(&home, &home).is_err());
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn rename_project_updates_title() {
+        let home = temp_dir("rename-home");
+        let child = home.join("demo");
+        fs::create_dir_all(&child).unwrap();
+        let renamed = rename_project(RenameProjectParams {
+            path: child.to_string_lossy().to_string(),
+            title: "新名字".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(renamed.project.title, "新名字");
+        let listed = list_projects(home.to_str().unwrap()).unwrap();
+        let found = listed
+            .iter()
+            .find(|project| project.dir_name == "demo")
+            .expect("renamed project should be listed");
+        assert_eq!(found.title, "新名字");
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
