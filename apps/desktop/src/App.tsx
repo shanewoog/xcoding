@@ -412,6 +412,30 @@ function toolMessagePreview(content: string): string {
   return `${collapsed.slice(0, 71)}…`;
 }
 
+// Codex-style one-line preview for a collapsed tool-result card: prefer the
+// tool's primary identifier (path, query, command) over raw JSON noise.
+function toolCardPreview(content: string): string {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const path = typeof parsed.path === "string" ? parsed.path : "";
+      const query = typeof parsed.query === "string" ? parsed.query : "";
+      const executable = typeof parsed.executable === "string" ? parsed.executable : "";
+      const rawArgs = parsed.args;
+      const argText = Array.isArray(rawArgs) ? rawArgs.map((item) => String(item)).join(" ") : "";
+      const command = [executable, argText].filter(Boolean).join(" ");
+      const primary = path || query || command;
+      if (primary) return toolMessagePreview(primary);
+      for (const value of Object.values(parsed)) {
+        if (typeof value === "string" && value.trim()) return toolMessagePreview(value);
+      }
+    }
+  } catch {
+    // Not JSON; fall through to the plain-text preview.
+  }
+  return toolMessagePreview(content);
+}
+
 type ToolCallLike = { id: string; name: string; arguments: Record<string, unknown> };
 
 type InlineActivityEntry = {
@@ -551,22 +575,17 @@ function splitInlineActivityByMessage(
 
 type ConversationEntry =
   | { kind: "message"; message: Message }
-  | { kind: "tool-group"; id: string; messages: Message[] };
+  | { kind: "tool"; message: Message };
 
+// Codex-style: every read-only tool result renders as its own collapsed card.
 function groupConversationMessages(messages: Message[]): ConversationEntry[] {
   const entries: ConversationEntry[] = [];
   for (const message of messages) {
-    if (message.role !== "tool") {
+    if (message.role === "tool") {
+      entries.push({ kind: "tool", message });
+    } else {
       entries.push({ kind: "message", message });
-      continue;
     }
-
-    const last = entries.at(-1);
-    if (last?.kind === "tool-group") {
-      last.messages.push(message);
-      continue;
-    }
-    entries.push({ kind: "tool-group", id: message.id, messages: [message] });
   }
   return entries;
 }
@@ -624,6 +643,8 @@ const TEXT_FILE_EXTENSIONS = new Set([
 ]);
 const SYSTEM_CONTEXT_TOKEN_RESERVE = 4_000;
 const IMAGE_CONTEXT_TOKEN_ESTIMATE = 2_000;
+const CONTEXT_USAGE_RING_RADIUS = 15.5;
+const CONTEXT_USAGE_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_USAGE_RING_RADIUS;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const CJK_CHARACTER = /[\u2E80-\u9FFF\uF900-\uFAFF]/u;
 
@@ -6506,20 +6527,13 @@ export function App() {
           onScroll={(event) => updateConversationBottomState(event.currentTarget)}
         >
           {groupConversationMessages(messages).map((entry) => {
-            if (entry.kind === "tool-group") {
+            if (entry.kind === "tool") {
               return (
-                <details className="message message-tool-group" key={entry.id}>
+                <details className="message message-tool" key={entry.message.id}>
                   <summary>
-                    <span>{t(locale, "role.tool")} · {entry.messages.length}</span>
+                    <span className="message-preview">{toolCardPreview(entry.message.content)}</span>
                   </summary>
-                  <div className="tool-message-list">
-                    {entry.messages.map((message) => (
-                      <section className="tool-message-item" key={message.id}>
-                        <span className="message-preview">{toolMessagePreview(message.content)}</span>
-                        <div className="message-body">{message.content}</div>
-                      </section>
-                    ))}
-                  </div>
+                  <div className="message-body">{entry.message.content}</div>
                 </details>
               );
             }
@@ -6938,8 +6952,19 @@ export function App() {
                   aria-haspopup="dialog"
                   aria-label={t(locale, "context.title")}
                   title={t(locale, "context.title")}
+                  data-level={100 - contextUsage.percent >= 50 ? "ok" : 100 - contextUsage.percent >= 15 ? "warn" : "low"}
                 >
-                  <span aria-hidden="true">i</span>
+                  <svg className="context-usage-ring" viewBox="0 0 36 36" aria-hidden="true">
+                    <circle className="context-usage-ring-track" cx="18" cy="18" r="15.5" />
+                    <circle
+                      className="context-usage-ring-value"
+                      cx="18"
+                      cy="18"
+                      r="15.5"
+                      strokeDasharray={`${((100 - contextUsage.percent) / 100) * CONTEXT_USAGE_RING_CIRCUMFERENCE} ${CONTEXT_USAGE_RING_CIRCUMFERENCE}`}
+                    />
+                  </svg>
+                  <span className="context-usage-glyph" aria-hidden="true">i</span>
                 </button>
                 {contextUsageOpen ? (
                   <div className="context-usage-popover" role="dialog" aria-label={t(locale, "context.title")}>
