@@ -45,6 +45,7 @@ pub struct RequestLogSummary {
     pub id: String,
     pub created_at: String,
     pub model: String,
+    pub reasoning_effort: Option<String>,
     pub endpoint: String,
     pub status: String,
     pub http_status: Option<u16>,
@@ -151,7 +152,14 @@ fn query_at(
     }
     let connection = open_database(path, retention_days)?;
     let mut statement = connection.prepare(
-        "SELECT id, created_at, model, endpoint, status, http_status, duration_ms FROM request_logs
+        "SELECT id, created_at, model, endpoint, status, http_status, duration_ms,
+        CASE WHEN json_valid(json_extract(detail, '$.request_body')) THEN
+            CAST(COALESCE(
+                NULLIF(json_extract(json_extract(detail, '$.request_body'), '$.reasoning.effort'), ''),
+                NULLIF(json_extract(json_extract(detail, '$.request_body'), '$.reasoning_effort'), '')
+            ) AS TEXT)
+        END AS reasoning_effort
+        FROM request_logs
         WHERE (?1 IS NULL OR created_at >= ?1) AND (?2 IS NULL OR created_at <= ?2)
         AND instr(lower(model), lower(?3)) > 0 AND instr(lower(endpoint), lower(?4)) > 0
         AND (?5 = '' OR status = ?5)
@@ -177,6 +185,7 @@ fn query_at(
                     status: row.get(4)?,
                     http_status: row.get(5)?,
                     duration_ms: row.get(6)?,
+                    reasoning_effort: row.get(7)?,
                 })
             },
         )
@@ -784,6 +793,37 @@ mod tests {
                 .items
                 .is_empty()
         );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn summary_reads_reasoning_effort_from_request_body() {
+        let path = test_path();
+        for body in [
+            json!({"model":"responses","reasoning":{"effort":"high"}}),
+            json!({"model":"chat","reasoning_effort":"max"}),
+            json!({"model":"none"}),
+        ] {
+            let log = RequestLog::start_at(&path, true, 30, "https://example.com/v1", &body, "");
+            log.finish(None);
+        }
+        for (model, expected) in [
+            ("responses", Some("high")),
+            ("chat", Some("max")),
+            ("none", None),
+        ] {
+            let page = query_at(
+                &path,
+                30,
+                &RequestLogQuery {
+                    model: model.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].reasoning_effort.as_deref(), expected);
+        }
         std::fs::remove_file(path).unwrap();
     }
 

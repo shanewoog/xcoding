@@ -2,7 +2,7 @@
 
 进入 **设置 → 日志查询**，开启页首的 **记录模型请求详情**，点击顶部 **保存设置**。开关默认关闭，对保存后发起的新模型请求生效。
 
-- 查询默认返回最新 10 条，可按开始/结束时间、模型名称、请求地址和状态组合筛选，支持每页 10 条翻页。
+- 查询默认返回最新 10 条，可按开始/结束时间、模型名称、请求地址和状态组合筛选，支持每页 10 条翻页。列表同时显示请求中实际发送的思考等级（优先读取 `reasoning.effort`，兼容 `reasoning_effort`；未记录时显示 `—`）。
 - 点击 **查看详情** 查看发送的请求 Headers、POST JSON、原始响应正文（流式请求为 SSE）、HTTP 状态、耗时和错误。Headers、发送内容和返回内容区域上方各有 **复制** 按钮，复制对应区域的原文；Headers 保持鉴权脱敏，空内容或未记录的 Headers 不可复制。时间筛选使用本机时区。
 - Headers 在初始请求构建后、发送前记录，包含 User-Agent、Content-Type、Host、Content-Length 和协议专用头；Host、Content-Length 等 HTTP 客户端自动生成的字段按该请求补全。不包含代理 CONNECT 或重定向衍生请求。旧日志未记录的 Headers 无法补回。
 - 覆盖 Chat Completions、Responses 和 Anthropic Messages，包括重试及摘要等辅助模型调用。不记录模型列表查询。

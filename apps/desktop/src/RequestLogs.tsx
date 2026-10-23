@@ -8,12 +8,13 @@ interface LogSummary {
   id: string;
   created_at: string;
   model: string;
+  reasoning_effort: string | null;
   endpoint: string;
   status: LogStatus;
   http_status: number | null;
   duration_ms: number;
 }
-interface LogDetail extends LogSummary {
+interface LogDetail extends Omit<LogSummary, "reasoning_effort"> {
   request_body: string;
   request_headers?: { name: string; value: string }[] | null;
   response_body: string;
@@ -157,13 +158,13 @@ export function RequestLogs({ locale, enabled, onEnabledChange, disabled }: {
     <div className="request-log-table-wrap" aria-busy={loading}>
       {page.items.length ? <table className="request-log-table">
         <thead><tr>
-          <th>{t(locale, "requestLogs.time")}</th><th>{t(locale, "requestLogs.model")}</th>
+          <th>{t(locale, "requestLogs.time")}</th><th>{t(locale, "requestLogs.model")}</th><th>{t(locale, "requestLogs.reasoning")}</th>
           <th>{t(locale, "requestLogs.endpoint")}</th><th>{t(locale, "requestLogs.status")}</th>
           <th>{t(locale, "requestLogs.http")}</th><th>{t(locale, "requestLogs.duration")}</th><th>{t(locale, "requestLogs.details")}</th>
         </tr></thead>
         <tbody>{page.items.map((item) => <tr key={item.id}>
           <td><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString(locale)}</time></td>
-          <td>{item.model}</td><td>{item.endpoint}</td><td>{t(locale, statusKeys[item.status])}</td>
+          <td>{item.model}</td><td>{item.reasoning_effort ?? "—"}</td><td>{item.endpoint}</td><td>{t(locale, statusKeys[item.status])}</td>
           <td>{item.http_status ?? "—"}</td><td>{item.duration_ms}</td>
           <td><button type="button" className="quiet-button" disabled={loading} onClick={() => void showDetail(item.id)}>{t(locale, "requestLogs.details")}</button></td>
         </tr>)}</tbody>
