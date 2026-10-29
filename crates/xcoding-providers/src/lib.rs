@@ -380,7 +380,10 @@ impl ProviderError {
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
             Self::InvalidResponse(message) => {
-                message == "rate_limit_exceeded" || message.starts_with("rate_limit_exceeded:")
+                message == "rate_limit_exceeded"
+                    || message.starts_with("rate_limit_exceeded:")
+                    || message == "gateway_concurrency_limit"
+                    || message.starts_with("gateway_concurrency_limit:")
             }
             Self::MissingApiKey
             | Self::Utf8(_)
@@ -3554,10 +3557,26 @@ mod tests {
     }
 
     #[test]
-    fn invalid_response_only_retries_explicit_rate_limit_codes() {
+    fn responses_gateway_concurrency_limit_is_retryable() {
+        let event = parse_responses_event(
+            r#"{"type":"response.failed","response":{"error":{"code":"gateway_concurrency_limit","message":"Concurrency limit exceeded for account, please retry later"}}}"#,
+        )
+        .expect("gateway concurrency limit event parses");
+        let ResponsesParsedEvent::Failed(message) = event else {
+            panic!("expected failed event");
+        };
+        let error = ProviderError::InvalidResponse(message);
+        assert!(error.is_retryable());
+        assert!(!error.is_context_overflow());
+    }
+
+    #[test]
+    fn invalid_response_only_retries_explicit_transient_codes() {
         for message in [
             "rate_limit_exceeded",
             "rate_limit_exceeded: Too many requests",
+            "gateway_concurrency_limit",
+            "gateway_concurrency_limit: Concurrency limit exceeded for account, please retry later",
         ] {
             assert!(ProviderError::InvalidResponse(message.to_owned()).is_retryable());
         }
@@ -3567,6 +3586,7 @@ mod tests {
             "insufficient_quota: Check your plan and billing details",
             "invalid_request_error: rate_limit_exceeded is not a valid parameter",
             "rate_limit_exceeded_unknown: request failed",
+            "gateway_concurrency_limit_unknown: request failed",
             "context_length_exceeded: Your input exceeds the context window",
         ] {
             assert!(!ProviderError::InvalidResponse(message.to_owned()).is_retryable());

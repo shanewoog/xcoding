@@ -9342,6 +9342,16 @@ private material
     }
 
     #[test]
+    fn gateway_concurrency_limit_is_retryable_by_the_agent_loop() {
+        let error = AgentError::Provider(ProviderError::InvalidResponse(
+            "gateway_concurrency_limit: Concurrency limit exceeded for account, please retry later"
+                .to_owned(),
+        ));
+
+        assert!(is_retryable_provider_attempt(&error));
+    }
+
+    #[test]
     fn overflow_trim_shrinks_and_converges() {
         // Each retry must send strictly fewer messages than the previous one.
         let mut count = 100usize;
