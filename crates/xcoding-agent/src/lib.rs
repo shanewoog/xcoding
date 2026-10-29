@@ -10,7 +10,12 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
-use xcoding_context::ContextSnapshot;
+use xcoding_context::{
+    ContextSnapshot,
+    compression::{
+        CompressionOptions, compress_stored_tool_output, compress_tool_output,
+    },
+};
 use xcoding_core::{CoreError, CoreService};
 use xcoding_mcp::{McpError, McpRuntime, load_plugin_config};
 use xcoding_policy::{PermissionDecision, PermissionKind, evaluate_detailed};
@@ -88,6 +93,7 @@ const MAX_TOKEN_CALIBRATION: f64 = 4.0;
 struct RecordedToolOutput {
     output: String,
     new_context_start: Option<usize>,
+    message_id: Option<Uuid>,
 }
 
 #[derive(Debug, Error)]
@@ -1844,7 +1850,7 @@ impl<'a> AgentService<'a> {
         let mut mcp =
             McpRuntime::prepare_with_plugin_config(&session.workspace_root, &plugin_config)?;
 
-        let output = if params.approved {
+        let (output, message_id) = if params.approved {
             self.emit(
                 &mut on_event,
                 SessionEvent::ToolStart {
@@ -1857,7 +1863,7 @@ impl<'a> AgentService<'a> {
                 .execute_and_record(&session, &tools, &action.tool_call, &mut mcp, &mut on_event)
                 .await
             {
-                Ok(recorded) => recorded.output,
+                Ok(recorded) => (recorded.output, recorded.message_id),
                 Err(AgentError::Cancelled) => {
                     let result = self.cancelled_result(session.id, &mut on_event)?;
                     return Ok(ResolveActionResult {
@@ -1892,13 +1898,13 @@ impl<'a> AgentService<'a> {
                     summary: "Action rejected by user".to_owned(),
                 },
             );
-            output
+            (output, None)
         };
 
         let result = match self
             .run_session(
                 &session,
-                Some((&action.tool_call, output.as_str())),
+                Some((&action.tool_call, output.as_str(), message_id)),
                 &mut on_event,
             )
             .await
@@ -2172,7 +2178,7 @@ impl<'a> AgentService<'a> {
     async fn run_session<F>(
         &self,
         session: &Session,
-        resolved_tool: Option<(&ToolCall, &str)>,
+        resolved_tool: Option<(&ToolCall, &str, Option<Uuid>)>,
         on_event: &mut F,
     ) -> Result<ChatResult, AgentError>
     where
@@ -2189,6 +2195,10 @@ impl<'a> AgentService<'a> {
             McpRuntime::prepare_with_plugin_config(&session.workspace_root, &plugin_config)?;
         let user_config = load_user_config();
         register_known_secrets(&user_config);
+        let compression_options = CompressionOptions {
+            enabled: user_config.tool_output_compression_enabled,
+            ..CompressionOptions::default()
+        };
         // Recomputed once per tool round below, so a turn that runs several
         // rounds spreads them over the rotation instead of pinning the whole
         // turn to whichever provider won the first round.
@@ -2297,25 +2307,40 @@ impl<'a> AgentService<'a> {
         let mut vision_route_cache = VisionRouteCache::new();
         let mut vision_descriptions_applied = false;
         // Build messages from stored history with original images intact.
+        let resolved_message_id = resolved_tool.and_then(|(_, _, message_id)| message_id);
         for message in history.iter().skip(compacted_message_count) {
-            messages.push(provider_message_from_stored(message));
+            if resolved_message_id == Some(message.id) {
+                continue;
+            }
+            messages.push(provider_message_from_stored_with_options(
+                message,
+                &compression_options,
+            ));
         }
 
-        if let Some((tool_call, output)) = resolved_tool {
+        if let Some((tool_call, output, message_id)) = resolved_tool {
             // Prefer the live resolve pair over the degraded historical note.
-            if let Some(last) = messages.last() {
-                if last.role == "assistant"
-                    && message_content_contains_text(last.content.as_ref(), output)
-                {
-                    messages.pop();
+            if message_id.is_none() {
+                if let Some(last) = messages.last() {
+                    if last.role == "assistant"
+                        && message_content_contains_text(last.content.as_ref(), output)
+                    {
+                        messages.pop();
+                    }
                 }
             }
+            let model_output = model_facing_tool_output(
+                tool_call.name.as_str(),
+                output,
+                message_id,
+                &compression_options,
+            );
             messages.push(ChatMessage::assistant_tool_calls(vec![provider_tool_call(
                 tool_call,
             )?]));
             messages.push(bounded_tool_result(
                 &tool_call.id,
-                output,
+                &model_output,
                 user_config.lossy_context_compaction_enabled,
             ));
         }
@@ -3110,11 +3135,22 @@ impl<'a> AgentService<'a> {
                             .execute_and_record(session, &tools, &tool_call, &mut mcp, on_event)
                             .await?;
                         if let Some(start) = recorded.new_context_start {
-                            messages = rebuild_messages_for_new_context(messages, start, &history);
+                            messages = rebuild_messages_for_new_context_with_options(
+                                messages,
+                                start,
+                                &history,
+                                &compression_options,
+                            );
                         }
+                        let model_output = model_facing_tool_output(
+                            tool_call.name.as_str(),
+                            &recorded.output,
+                            recorded.message_id,
+                            &compression_options,
+                        );
                         messages.push(bounded_tool_result(
                             &tool_call.id,
-                            &recorded.output,
+                            &model_output,
                             user_config.lossy_context_compaction_enabled,
                         ));
                     }
@@ -3937,6 +3973,7 @@ impl<'a> AgentService<'a> {
                         .map(|output| RecordedToolOutput {
                             output,
                             new_context_start: None,
+                            message_id: None,
                         });
                 }
             }
@@ -3976,8 +4013,9 @@ impl<'a> AgentService<'a> {
                 let output = serde_json::to_string(&execution.output)
                     .map_err(|error| AgentError::InvalidProviderToolCall(error.to_string()))?;
                 let output = redact_sensitive_tool_output(&output);
-                self.core.record_tool_message(session.id, &output)?;
+                let message = self.core.record_tool_message(session.id, &output)?;
                 let success = tool_execution_success(tool_call, &execution.output);
+                let message_id = success.then_some(message.id);
                 self.emit(
                     on_event,
                     SessionEvent::ToolEnd {
@@ -4001,6 +4039,7 @@ impl<'a> AgentService<'a> {
                 Ok(RecordedToolOutput {
                     output,
                     new_context_start,
+                    message_id,
                 })
             }
             Err(ToolError::Cancelled) => Err(AgentError::Cancelled),
@@ -4009,6 +4048,7 @@ impl<'a> AgentService<'a> {
                 .map(|output| RecordedToolOutput {
                     output,
                     new_context_start: None,
+                    message_id: None,
                 }),
         }
     }
@@ -5489,6 +5529,18 @@ fn context_budget_tokens(
         / 100
 }
 
+fn model_facing_tool_output(
+    tool_name: &str,
+    output: &str,
+    message_id: Option<Uuid>,
+    options: &CompressionOptions,
+) -> String {
+    let Some(message_id) = message_id else {
+        return output.to_owned();
+    };
+    compress_tool_output(tool_name, output, &message_id.to_string(), options).content
+}
+
 fn bounded_tool_result(tool_call_id: &str, output: &str, allow_lossy: bool) -> ChatMessage {
     let content = if allow_lossy {
         truncate_tool_output(output, MAX_TOOL_RESULT_CHARS)
@@ -5746,7 +5798,15 @@ fn no_vision_descriptions(_images: &[(String, String)]) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn provider_message_from_stored(message: &Message) -> ChatMessage {
+    provider_message_from_stored_with_options(message, &CompressionOptions::default())
+}
+
+fn provider_message_from_stored_with_options(
+    message: &Message,
+    options: &CompressionOptions,
+) -> ChatMessage {
     match message.role {
         MessageRole::System => ChatMessage::system(message.content.clone()),
         MessageRole::User => user_chat_message_from_stored(&message.content),
@@ -5754,24 +5814,45 @@ fn provider_message_from_stored(message: &Message) -> ChatMessage {
         // Historical tool rows are not full OpenAI tool pairs yet. Keep them as
         // assistant notes so resume still has the outcomes, and re-seed the
         // just-resolved tool below as a proper tool result.
-        MessageRole::Tool => ChatMessage::assistant(format!(
-            "Previously recorded tool output: {}",
-            redact_sensitive_tool_output(&message.content)
-        )),
+        MessageRole::Tool => {
+            let content = redact_sensitive_tool_output(&message.content);
+            let content = compress_stored_tool_output(
+                &content,
+                &message.id.to_string(),
+                options,
+            )
+            .content;
+            ChatMessage::assistant(format!("Previously recorded tool output: {content}"))
+        }
     }
 }
 
+#[cfg(test)]
 fn rebuild_messages_for_new_context(
     messages: Vec<ChatMessage>,
     start_message_count: usize,
     history: &[Message],
+) -> Vec<ChatMessage> {
+    rebuild_messages_for_new_context_with_options(
+        messages,
+        start_message_count,
+        history,
+        &CompressionOptions::default(),
+    )
+}
+
+fn rebuild_messages_for_new_context_with_options(
+    messages: Vec<ChatMessage>,
+    start_message_count: usize,
+    history: &[Message],
+    options: &CompressionOptions,
 ) -> Vec<ChatMessage> {
     let mut rebuilt: Vec<ChatMessage> = messages
         .into_iter()
         .filter(|message| message.role == "system")
         .collect();
     for message in history.iter().skip(start_message_count) {
-        rebuilt.push(provider_message_from_stored(message));
+        rebuilt.push(provider_message_from_stored_with_options(message, options));
     }
     rebuilt
 }
@@ -6386,6 +6467,7 @@ mod tests {
     }
 
     use super::*;
+    use xcoding_context::compression::RECOVERY_HEADER_PREFIX;
     use xcoding_providers::StatusCode;
 
     fn empty_windows() -> BTreeMap<String, usize> {
@@ -6401,6 +6483,72 @@ mod tests {
             "created_at": "2026-07-27T00:00:00Z"
         }))
         .expect("test message")
+    }
+
+    fn test_message_with_id(id: Uuid, role: &str, content: impl Into<String>) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id.to_string(),
+            "session_id": "a39f2ce3-e8ca-4dc0-8bdd-dfc92aebdcaf",
+            "role": role,
+            "content": content.into(),
+            "created_at": "2026-07-27T00:00:00Z"
+        }))
+        .expect("test message")
+    }
+
+    fn test_message_text(message: &ChatMessage) -> String {
+        chat_message_content_as_text(message.content.as_ref().expect("message content"))
+    }
+
+    fn compression_options() -> CompressionOptions {
+        CompressionOptions {
+            enabled: true,
+            min_chars: 10,
+            min_savings_percent: 1,
+        }
+    }
+
+    fn long_run_output(first_stdout_line: &str) -> String {
+        let mut stdout = first_stdout_line.to_owned();
+        for index in 0..200 {
+            stdout.push_str(&format!("\nline {index}: ordinary output"));
+        }
+        serde_json::to_string(&json!({
+            "executable": "cargo",
+            "args": ["test"],
+            "cwd": "D:/work",
+            "success": true,
+            "exit_code": 0,
+            "stdout": stdout,
+            "stderr": "warning: one\nordinary",
+            "timed_out": false
+        }))
+        .expect("run output json")
+    }
+
+    fn long_search_output() -> String {
+        let results = (0..50)
+            .map(|index| {
+                json!({
+                    "path": format!("src/file{index}.rs"),
+                    "line": index,
+                    "text": "match",
+                    "before": ["context ".repeat(50)],
+                    "after": ["context ".repeat(50)]
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&json!({
+            "results": results,
+            "truncated": false,
+            "stats": {
+                "directories_scanned": 4,
+                "files_scanned": 10,
+                "bytes_scanned": 4096,
+                "elapsed_ms": 1
+            }
+        }))
+        .expect("search output json")
     }
 
     fn local_api_tool_call(script: &str) -> ToolCall {
@@ -6954,6 +7102,165 @@ private material
         };
         assert!(!content.contains("plain-secret-value"));
         assert!(content.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn model_facing_tool_output_compresses_only_safe_supported_results() {
+        let options = compression_options();
+        let message_id = Uuid::new_v4();
+        let run_output = long_run_output("first line");
+        let compressed =
+            model_facing_tool_output("run_command", &run_output, Some(message_id), &options);
+        assert!(compressed.starts_with(RECOVERY_HEADER_PREFIX));
+        assert!(compressed.contains(&format!("message_id={message_id}")));
+        assert!(compressed.contains("strategy=run_command"));
+        assert!(!compressed.contains("line 100: ordinary output"));
+
+        let search_output = long_search_output();
+        let compressed_search = model_facing_tool_output(
+            "search_code",
+            &search_output,
+            Some(Uuid::new_v4()),
+            &options,
+        );
+        assert!(compressed_search.contains("strategy=search_code"));
+        assert!(!compressed_search.contains("before"));
+
+        assert_eq!(
+            model_facing_tool_output("run_command", &run_output, None, &options),
+            run_output
+        );
+        assert_eq!(
+            model_facing_tool_output(
+                "run_command",
+                &run_output,
+                Some(message_id),
+                &CompressionOptions::default(),
+            ),
+            run_output
+        );
+        assert_eq!(
+            model_facing_tool_output(
+                "read_file",
+                &run_output,
+                Some(message_id),
+                &options,
+            ),
+            run_output
+        );
+
+        let mut failed: Value = serde_json::from_str(&run_output).expect("run output");
+        failed["success"] = json!(false);
+        let mut timed_out: Value = serde_json::from_str(&run_output).expect("run output");
+        timed_out["timed_out"] = json!(true);
+        for output in [failed, timed_out] {
+            let output = serde_json::to_string(&output).expect("failed output json");
+            assert_eq!(
+                model_facing_tool_output(
+                    "run_command",
+                    &output,
+                    Some(message_id),
+                    &options,
+                ),
+                output
+            );
+        }
+    }
+
+    #[test]
+    fn stored_tool_replay_redacts_then_compresses_with_recovery_id() {
+        let message_id = Uuid::new_v4();
+        let full_output = long_run_output("api_key=plain-secret-value");
+        let message = test_message_with_id(message_id, "tool", &full_output);
+
+        let replay =
+            provider_message_from_stored_with_options(&message, &compression_options());
+        let content = test_message_text(&replay);
+        assert!(content.starts_with(&format!(
+            "Previously recorded tool output: {}",
+            RECOVERY_HEADER_PREFIX
+        )));
+        assert!(content.contains(&format!("message_id={message_id}")));
+        assert!(!content.contains("plain-secret-value"));
+        assert!(content.contains("[REDACTED]"));
+        assert!(!content.contains("line 100: ordinary output"));
+
+        let uncompressed =
+            provider_message_from_stored_with_options(&message, &CompressionOptions::default());
+        let content = test_message_text(&uncompressed);
+        assert!(!content.contains(RECOVERY_HEADER_PREFIX));
+        assert!(content.contains("line 100: ordinary output"));
+        assert!(!content.contains("plain-secret-value"));
+        assert!(content.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn new_context_rebuild_applies_the_same_compression_options() {
+        let run_output = long_run_output("first line");
+        let history = vec![
+            test_message_with_id(Uuid::new_v4(), "user", "before"),
+            test_message_with_id(Uuid::new_v4(), "tool", run_output.clone()),
+            test_message_with_id(Uuid::new_v4(), "user", "after"),
+        ];
+
+        let rebuilt = rebuild_messages_for_new_context_with_options(
+            vec![ChatMessage::system("system"), ChatMessage::user("stale")],
+            1,
+            &history,
+            &compression_options(),
+        );
+        assert_eq!(rebuilt.len(), 3);
+        assert_eq!(rebuilt[0].role, "system");
+        assert_eq!(rebuilt[1].role, "assistant");
+        assert!(test_message_text(&rebuilt[1])
+            .contains(RECOVERY_HEADER_PREFIX));
+
+        let uncompressed = rebuild_messages_for_new_context_with_options(
+            vec![ChatMessage::system("system")],
+            1,
+            &history,
+            &CompressionOptions::default(),
+        );
+        assert!(!test_message_text(&uncompressed[1])
+            .contains(RECOVERY_HEADER_PREFIX));
+        assert!(test_message_text(&uncompressed[1])
+            .contains("line 100: ordinary output"));
+    }
+
+    #[test]
+    fn history_read_recovers_the_full_stored_tool_output() {
+        let core = CoreService::in_memory().expect("in-memory core starts");
+        let session = start_context_test_session(&core, "D:/work/compression", "question");
+        let full_output = long_run_output("first line");
+        let message = core
+            .record_tool_message(session.id, &full_output)
+            .expect("full tool output is stored");
+
+        let model_output = model_facing_tool_output(
+            "run_command",
+            &full_output,
+            Some(message.id),
+            &compression_options(),
+        );
+        assert!(model_output.contains(RECOVERY_HEADER_PREFIX));
+        assert!(!model_output.contains("line 100: ordinary output"));
+
+        let stored = core.messages(session.id).expect("history reloads");
+        assert_eq!(stored.last().expect("recorded tool message").content, full_output);
+
+        let agent = AgentService::new(&core);
+        let read = execute_context_tool(
+            &agent,
+            &session,
+            ToolName::HistoryRead,
+            json!({"message_id": message.id}),
+        )
+        .expect("history read returns the stored message");
+        assert_eq!(read["message"]["content"], full_output);
+        assert!(!read["message"]["content"]
+            .as_str()
+            .expect("stored content")
+            .contains(RECOVERY_HEADER_PREFIX));
     }
 
     #[test]

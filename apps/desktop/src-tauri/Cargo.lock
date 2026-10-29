@@ -5407,6 +5407,7 @@ dependencies = [
 name = "xcoding-context"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "xcoding-mcp",
 ]
 
@@ -5425,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "xcoding-desktop"
-version = "1.0.91"
+version = "1.0.92"
 dependencies = [
  "dotenvy",
  "futures-util",

@@ -174,8 +174,8 @@ $nextVersion = "{0}.{1}.{2}" -f $parts[0], $parts[1], ([int]$parts[2] + 1)
 [System.IO.File]::WriteAllText($versionFile, "$nextVersion`n", [System.Text.UTF8Encoding]::new($false))
 Write-Host "  Next release version: $nextVersion"
 
-# Publish the release metadata and source changes, but never stage untracked files
-# such as local .env files or generated artifacts.
+# Publish the release metadata and source changes. Only the explicit allowlist is staged,
+# so unrelated untracked files such as local .env files or generated artifacts stay out.
 $releaseGitPaths = @(
   "VERSION",
   "package.json",
@@ -199,6 +199,8 @@ $releaseGitPaths = @(
   "crates/xcoding-agent/src/lib.rs",
   "crates/xcoding-server/src/main.rs",
   "crates/xcoding-core/src/lib.rs",
+  "crates/xcoding-context/Cargo.toml",
+  "crates/xcoding-context/src/compression.rs",
   "crates/xcoding-context/src/lib.rs",
   "crates/xcoding-store/Cargo.toml",
   "crates/xcoding-store/src/lib.rs",

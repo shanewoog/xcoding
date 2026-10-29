@@ -858,6 +858,10 @@ pub struct UserConfig {
     /// lossless path opens a new context window instead.
     #[serde(default, skip_serializing_if = "is_false")]
     pub lossy_context_compaction_enabled: bool,
+    /// Whether successful tool output may be compacted in model-facing context.
+    /// The complete output remains stored and recoverable through `history_read`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tool_output_compression_enabled: bool,
     /// Vision delegate configuration for models without native vision support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_delegate: Option<VisionDelegateConfig>,
@@ -935,6 +939,7 @@ impl Default for UserConfig {
             model_context_windows: BTreeMap::new(),
             context_compaction_threshold_percent: DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
             lossy_context_compaction_enabled: false,
+            tool_output_compression_enabled: false,
             vision_delegate: None,
             model_capabilities: BTreeMap::new(),
             model_routes: BTreeMap::new(),
@@ -1613,6 +1618,28 @@ mod tests {
 
         let legacy: UserConfig = serde_json::from_value(json!({})).expect("legacy config parses");
         assert!(!legacy.lossy_context_compaction_enabled);
+    }
+
+    #[test]
+    fn defaults_and_round_trips_tool_output_compression_flag() {
+        let default_config = UserConfig::default();
+        assert!(!default_config.tool_output_compression_enabled);
+        let default_json =
+            serde_json::to_value(&default_config).expect("default config serializes");
+        assert!(default_json.get("tool_output_compression_enabled").is_none());
+
+        let enabled = UserConfig {
+            tool_output_compression_enabled: true,
+            ..default_config
+        };
+        let enabled_json = serde_json::to_value(&enabled).expect("enabled config serializes");
+        assert_eq!(enabled_json["tool_output_compression_enabled"], true);
+        let decoded: UserConfig =
+            serde_json::from_value(enabled_json).expect("enabled config round-trips");
+        assert!(decoded.tool_output_compression_enabled);
+
+        let legacy: UserConfig = serde_json::from_value(json!({})).expect("legacy config parses");
+        assert!(!legacy.tool_output_compression_enabled);
     }
 
     #[test]

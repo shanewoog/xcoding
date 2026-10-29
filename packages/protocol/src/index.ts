@@ -294,6 +294,8 @@ export interface UserConfig {
   context_compaction_threshold_percent?: number;
   /** When true, older history is summarized. Default lossless path opens a new context window. */
   lossy_context_compaction_enabled?: boolean;
+  /** Whether successful tool output may be compacted in model-facing context. */
+  tool_output_compression_enabled?: boolean;
   /** Describes images with a second model when the session model cannot read them. */
   vision_delegate?: VisionDelegateConfig;
   /** Per-model capability overrides keyed by normalized (trimmed, lowercased) model id. */

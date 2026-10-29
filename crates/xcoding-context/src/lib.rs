@@ -2,6 +2,8 @@
 
 use std::{collections::VecDeque, fs, path::Path};
 
+pub mod compression;
+
 use xcoding_mcp::{PluginConfig, load_plugin_config, user_skill_root};
 
 /// Workspace-root rule files, in load order.

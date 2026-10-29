@@ -1560,6 +1560,7 @@ export function App() {
   const [circuitMinRequestCount, setCircuitMinRequestCount] = useState(DEFAULT_CIRCUIT_MIN_REQUEST_COUNT);
   const [contextCompactionThresholdPercent, setContextCompactionThresholdPercent] = useState(DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT);
   const [lossyContextCompactionEnabled, setLossyContextCompactionEnabled] = useState(false);
+  const [toolOutputCompressionEnabled, setToolOutputCompressionEnabled] = useState(false);
   const [modelContextWindowEntries, setModelContextWindowEntries] = useState<ModelContextWindowEntry[]>([]);
   const [modelRouteEntries, setModelRouteEntries] = useState<ModelRouteEntry[]>([]);
   const [modelRouteStatuses, setModelRouteStatuses] = useState<ModelRouteStatus[]>([]);
@@ -2084,6 +2085,7 @@ export function App() {
         setCircuitMinRequestCount(normalizeBoundedInteger(config.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
         setContextCompactionThresholdPercent(normalizeBoundedInteger(config.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
         setLossyContextCompactionEnabled(config.lossy_context_compaction_enabled === true);
+        setToolOutputCompressionEnabled(config.tool_output_compression_enabled === true);
         setLocalRelayEnabled(config.local_relay_enabled === true);
         setLocalRelayPort(normalizeBoundedInteger(config.local_relay_port, DEFAULT_LOCAL_RELAY_PORT, MIN_LOCAL_RELAY_PORT, MAX_LOCAL_RELAY_PORT));
         setLocalRelayApiKey((config.local_relay_api_key || "").trim());
@@ -4336,6 +4338,7 @@ export function App() {
           circuit_min_request_count: normalizeBoundedInteger(circuitMinRequestCount, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT),
           context_compaction_threshold_percent: normalizeBoundedInteger(contextCompactionThresholdPercent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT),
           lossy_context_compaction_enabled: lossyContextCompactionEnabled,
+          tool_output_compression_enabled: toolOutputCompressionEnabled,
           // Compatibility mirror for the current active provider.
           base_url: selectedProvider.base_url,
           api_key: selectedProvider.api_key,
@@ -4384,6 +4387,7 @@ export function App() {
       setCircuitMinRequestCount(normalizeBoundedInteger(savedUser.circuit_min_request_count, DEFAULT_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_MIN_REQUEST_COUNT));
       setContextCompactionThresholdPercent(normalizeBoundedInteger(savedUser.context_compaction_threshold_percent, DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT));
       setLossyContextCompactionEnabled(savedUser.lossy_context_compaction_enabled === true);
+      setToolOutputCompressionEnabled(savedUser.tool_output_compression_enabled === true);
       setLocalRelayEnabled(savedUser.local_relay_enabled === true);
       setLocalRelayPort(normalizeBoundedInteger(savedUser.local_relay_port, DEFAULT_LOCAL_RELAY_PORT, MIN_LOCAL_RELAY_PORT, MAX_LOCAL_RELAY_PORT));
       setLocalRelayApiKey((savedUser.local_relay_api_key || "").trim());
@@ -5636,6 +5640,19 @@ export function App() {
               <span>
                 <strong>{t(locale, "field.lossyContextCompaction")}</strong>
                 <small>{t(locale, "field.lossyContextCompactionHint")}</small>
+              </span>
+            </label>
+            <label className="checkbox-row" htmlFor="tool-output-compression-enabled">
+              <input
+                id="tool-output-compression-enabled"
+                type="checkbox"
+                checked={toolOutputCompressionEnabled}
+                onChange={(event) => setToolOutputCompressionEnabled(event.target.checked)}
+                disabled={anySessionRunning || isSavingConfig}
+              />
+              <span>
+                <strong>{t(locale, "field.toolOutputCompression")}</strong>
+                <small>{t(locale, "field.toolOutputCompressionHint")}</small>
               </span>
             </label>
             <div className="resilience-setting-grid">
