@@ -9352,6 +9352,18 @@ private material
     }
 
     #[test]
+    fn quota_reset_time_is_not_retried_by_the_agent_loop() {
+        let error = AgentError::Provider(ProviderError::HttpStatus {
+            status: xcoding_providers::StatusCode::TOO_MANY_REQUESTS,
+            body: r#"{"error":{"message":"{\"code\":6004,\"msg\":\"usage exceeds frequency limit, but don't worry, your usage will reset at 2026-10-31 17:51:18 UTC+8, alternatively, you can switch to the other models to continue using it.\",\"requestId\":\"8125ba89ed258381516f2f20e083bc6f\"}"}}"#
+                .to_owned(),
+            retry_after_secs: None,
+        });
+
+        assert!(!is_retryable_provider_attempt(&error));
+    }
+
+    #[test]
     fn overflow_trim_shrinks_and_converges() {
         // Each retry must send strictly fewer messages than the previous one.
         let mut count = 100usize;

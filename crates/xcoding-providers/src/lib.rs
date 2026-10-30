@@ -358,7 +358,12 @@ impl ProviderError {
                     || error.is_body()
                     || (!error.is_decode() && error.status().is_none())
             }
-            Self::HttpStatus { status, .. } => {
+            Self::HttpStatus { status, body, .. } => {
+                if *status == StatusCode::TOO_MANY_REQUESTS
+                    && body_indicates_scheduled_quota_reset(body)
+                {
+                    return false;
+                }
                 if self.is_tool_result_mismatch() {
                     return false;
                 }
@@ -380,10 +385,11 @@ impl ProviderError {
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
             Self::InvalidResponse(message) => {
-                message == "rate_limit_exceeded"
-                    || message.starts_with("rate_limit_exceeded:")
-                    || message == "gateway_concurrency_limit"
-                    || message.starts_with("gateway_concurrency_limit:")
+                !body_indicates_scheduled_quota_reset(message)
+                    && (message == "rate_limit_exceeded"
+                        || message.starts_with("rate_limit_exceeded:")
+                        || message == "gateway_concurrency_limit"
+                        || message.starts_with("gateway_concurrency_limit:"))
             }
             Self::MissingApiKey
             | Self::Utf8(_)
@@ -716,6 +722,21 @@ fn body_indicates_context_overflow(body: &str) -> bool {
         || lower.contains("maximum context")
         || lower.contains("too many tokens")
         || (lower.contains("exceeds") && (lower.contains("token") || lower.contains("context")))
+}
+
+/// A quota response that names its reset time cannot succeed before that time.
+/// Treat it as terminal instead of spending the bounded retry budget.
+fn body_indicates_scheduled_quota_reset(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    ["will reset at", "resets at"].iter().any(|marker| {
+        lower.find(marker).is_some_and(|index| {
+            lower[index + marker.len()..]
+                .trim_start()
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_digit())
+        })
+    })
 }
 
 /// Recognizes an edge-protection block page. Model APIs answer with JSON, so an
@@ -3588,6 +3609,7 @@ mod tests {
             "rate_limit_exceeded_unknown: request failed",
             "gateway_concurrency_limit_unknown: request failed",
             "context_length_exceeded: Your input exceeds the context window",
+            "rate_limit_exceeded: usage exceeds frequency limit; your usage will reset at 2026-10-31 17:51:18 UTC+8",
         ] {
             assert!(!ProviderError::InvalidResponse(message.to_owned()).is_retryable());
         }
@@ -3797,6 +3819,35 @@ mod tests {
                 body: "forbidden".to_owned(),
                 retry_after_secs: None,
             }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn http_429_with_explicit_quota_reset_time_is_not_retried() {
+        let body = r#"{"error":{"message":"{\"code\":6004,\"msg\":\"usage exceeds frequency limit, but don't worry, your usage will reset at 2026-10-31 17:51:18 UTC+8, alternatively, you can switch to the other models to continue using it.\",\"requestId\":\"8125ba89ed258381516f2f20e083bc6f\"}"}}"#;
+        let error = ProviderError::HttpStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: body.to_owned(),
+            retry_after_secs: None,
+        };
+
+        assert!(!error.is_retryable());
+        // A 429 without a reset time keeps the existing bounded retry.
+        assert!(
+            ProviderError::HttpStatus {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: "slow down".to_owned(),
+                retry_after_secs: None,
+            }
+            .is_retryable()
+        );
+        // Streamed failures carrying the same message are terminal too.
+        assert!(
+            !ProviderError::InvalidResponse(
+                "rate_limit_exceeded: your usage will reset at 2026-10-31 17:51:18 UTC+8"
+                    .to_owned()
+            )
             .is_retryable()
         );
     }
