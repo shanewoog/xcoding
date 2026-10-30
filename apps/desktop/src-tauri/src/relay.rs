@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use xcoding_agent::{RelayError, open_active_provider_request};
 use xcoding_protocol::{ProviderWireApi, UserConfig};
-use xcoding_providers::{RawResponsesStream, list_models_with_wire_api};
+use xcoding_providers::{RawResponsesStream, list_models_with_wire_api, load_user_config};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -75,7 +75,7 @@ pub fn restart(state: &RelayState, config: UserConfig) -> Result<(), String> {
     let bind_key = key.to_owned();
     let task = tauri::async_runtime::spawn(async move {
         match TcpListener::from_std(listener) {
-            Ok(listener) => accept_loop(listener, config, bind_key).await,
+            Ok(listener) => accept_loop(listener, bind_key, load_user_config).await,
             Err(error) => eprintln!("failed to start local relay listener: {error}"),
         }
     });
@@ -88,14 +88,18 @@ pub fn restart(state: &RelayState, config: UserConfig) -> Result<(), String> {
     Ok(())
 }
 
-async fn accept_loop(listener: TcpListener, config: UserConfig, relay_key: String) {
+async fn accept_loop<F>(listener: TcpListener, relay_key: String, load_config: F)
+where
+    F: Fn() -> UserConfig + Clone + Send + 'static,
+{
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             break;
         };
-        let config = config.clone();
         let relay_key = relay_key.clone();
+        let load_config = load_config.clone();
         tauri::async_runtime::spawn(async move {
+            let config = load_config();
             let _ = handle_connection(stream, &config, &relay_key).await;
         });
     }
@@ -413,6 +417,10 @@ async fn write_error(
 mod tests {
     use std::{
         net::{SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -426,8 +434,8 @@ mod tests {
     };
 
     use super::{
-        MAX_BODY_BYTES, RelayState, handle_connection, parse_request_head, restart, stop,
-        valid_bearer,
+        MAX_BODY_BYTES, RelayState, accept_loop, handle_connection, parse_request_head, restart,
+        stop, valid_bearer,
     };
 
     async fn run_relay_request(config: UserConfig, request: &[u8]) -> Vec<u8> {
@@ -451,6 +459,19 @@ mod tests {
             .await
             .expect("response reads");
         task.await.expect("relay task completes");
+        response
+    }
+
+    async fn request_from_listener(address: SocketAddr, request: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect(address)
+            .await
+            .expect("client connects to relay");
+        client.write_all(request).await.expect("request writes");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response reads");
         response
     }
 
@@ -829,6 +850,61 @@ mod tests {
             response_body(&response)["error"]["message"],
             "no active provider is configured"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accept_loop_loads_latest_config_for_each_connection() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("relay test listener binds");
+        let address = listener.local_addr().expect("relay test address available");
+        let use_updated_config = Arc::new(AtomicBool::new(false));
+
+        let initial_config = UserConfig {
+            active_provider_id: Some("active".to_owned()),
+            ..UserConfig::default()
+        };
+        let updated_config = UserConfig {
+            providers: vec![CloudProviderConfig {
+                id: "active".to_owned(),
+                name: "Active".to_owned(),
+                base_url: "http://127.0.0.1:1".to_owned(),
+                wire_api: ProviderWireApi::Responses,
+                trust_level: ProviderTrustLevel::Relay,
+                api_key: None,
+                api_keys: Vec::new(),
+                note: None,
+            }],
+            active_provider_id: Some("active".to_owned()),
+            ..UserConfig::default()
+        };
+        let flag = Arc::clone(&use_updated_config);
+        let load_config = move || {
+            if flag.load(Ordering::SeqCst) {
+                updated_config.clone()
+            } else {
+                initial_config.clone()
+            }
+        };
+
+        let task = tokio::spawn(accept_loop(listener, "local-key".to_owned(), load_config));
+        let request = b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer local-key\r\n\r\n";
+
+        let first = request_from_listener(address, request).await;
+        assert_eq!(
+            response_body(&first)["error"]["message"],
+            "the active provider no longer exists"
+        );
+
+        use_updated_config.store(true, Ordering::SeqCst);
+        let second = request_from_listener(address, request).await;
+        assert_eq!(
+            response_body(&second)["error"]["message"],
+            "the active provider has no enabled API key"
+        );
+
+        task.abort();
+        let _ = task.await;
     }
 
     #[test]
