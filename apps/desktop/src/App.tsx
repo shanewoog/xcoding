@@ -3,6 +3,8 @@ import { RequestLogs } from "./RequestLogs";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type {
   CancelSessionResult,
   ChatImageAttachment,
@@ -575,17 +577,23 @@ function splitInlineActivityByMessage(
 
 type ConversationEntry =
   | { kind: "message"; message: Message }
-  | { kind: "tool"; message: Message };
+  | { kind: "tool-group"; id: string; messages: Message[] };
 
-// Codex-style: every read-only tool result renders as its own collapsed card.
+// Codex-style: consecutive read-only tool results share one collapsed card.
 function groupConversationMessages(messages: Message[]): ConversationEntry[] {
   const entries: ConversationEntry[] = [];
   for (const message of messages) {
-    if (message.role === "tool") {
-      entries.push({ kind: "tool", message });
-    } else {
+    if (message.role !== "tool") {
       entries.push({ kind: "message", message });
+      continue;
     }
+
+    const last = entries.at(-1);
+    if (last?.kind === "tool-group") {
+      last.messages.push(message);
+      continue;
+    }
+    entries.push({ kind: "tool-group", id: message.id, messages: [message] });
   }
   return entries;
 }
@@ -1396,6 +1404,43 @@ const CODE_FENCE_CLOSE_PATTERN = /^\s*`{3,}\s*$/;
 function AssistantMessageBody({ content, onOpenLink }: { content: string; onOpenLink: (url: string) => void }) {
   if (!content) return <>{content}</>;
   return <>{renderMarkdownBlocks(content, onOpenLink)}</>;
+}
+
+function ReviewMarkdownSummary({
+  summary,
+  onOpenLink,
+}: {
+  summary: string;
+  onOpenLink: (url: string) => void;
+}) {
+  return (
+    <div className="review-summary markdown-viewer">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children }) => {
+            const external = Boolean(href && /^https?:\/\//i.test(href));
+            return (
+              <a
+                href={href}
+                rel={external ? "noreferrer" : undefined}
+                target={external ? "_blank" : undefined}
+                onClick={(event) => {
+                  if (!external || !href) return;
+                  event.preventDefault();
+                  onOpenLink(href);
+                }}
+              >
+                {children}
+              </a>
+            );
+          },
+        }}
+      >
+        {summary}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; locale: Locale }) {
@@ -6544,13 +6589,20 @@ export function App() {
           onScroll={(event) => updateConversationBottomState(event.currentTarget)}
         >
           {groupConversationMessages(messages).map((entry) => {
-            if (entry.kind === "tool") {
+            if (entry.kind === "tool-group") {
               return (
-                <details className="message message-tool" key={entry.message.id}>
+                <details className="message message-tool-group" key={entry.id}>
                   <summary>
-                    <span className="message-preview">{toolCardPreview(entry.message.content)}</span>
+                    <span>{t(locale, "role.tool")} · {entry.messages.length}</span>
                   </summary>
-                  <div className="message-body">{entry.message.content}</div>
+                  <div className="tool-message-list">
+                    {entry.messages.map((message) => (
+                      <section className="tool-message-item" key={message.id}>
+                        <span className="message-preview">{toolCardPreview(message.content)}</span>
+                        <div className="message-body">{message.content}</div>
+                      </section>
+                    ))}
+                  </div>
                 </details>
               );
             }
@@ -6766,7 +6818,7 @@ export function App() {
                 <strong>{review.title}</strong>
                 {review.highRisk ? <span className="risk-badge">{t(locale, "risk.high")}</span> : null}
               </div>
-              <p className="review-summary">{review.summary}</p>
+              <ReviewMarkdownSummary summary={review.summary} onOpenLink={openAssistantLink} />
               {review.bodyKind === "patch" && patchPreview ? (
                 <>
                   <code>{patchPreview.path}</code>
@@ -7135,7 +7187,7 @@ export function App() {
                   <strong>{review.title}</strong>
                   {review.highRisk ? <span className="risk-badge">{t(locale, "risk.high")}</span> : null}
                 </div>
-                <p className="review-summary">{review.summary}</p>
+                <ReviewMarkdownSummary summary={review.summary} onOpenLink={openAssistantLink} />
                 {review.bodyKind === "patch" && patchPreview ? (
                   <>
                     <code>{patchPreview.path}</code>

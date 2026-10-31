@@ -199,6 +199,7 @@ function buildReviewPresentation(action, summary, hasPatchPreview) {
 async function main() {
   const reviewSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/review.ts"), "utf8");
   const appSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8");
+  const panelsSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/panels.tsx"), "utf8");
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
   const cliSource = await readFile(resolve(repositoryRoot, "apps/cli/src/index.ts"), "utf8");
 
@@ -225,12 +226,38 @@ async function main() {
     "rememberLocalApiApproval",
     "skip_local_api_confirmation",
     'review.bodyKind === "git"',
+    "react-markdown",
+    "remark-gfm",
+    "function ReviewMarkdownSummary",
+    "<ReactMarkdown",
+    "remarkPlugins={[remarkGfm]}",
   ]) {
     assert.ok(appSource.includes(needle), "App.tsx missing " + needle);
   }
+  assert.equal(
+    (appSource.match(
+      /<ReviewMarkdownSummary\s+summary=\{review\.summary\}\s+onOpenLink=\{openAssistantLink\}\s*\/>/g,
+    ) ?? []).length,
+    2,
+    "App.tsx should render both review summaries as Markdown",
+  );
+  for (const needle of [
+    'right-tools-body${tab === "browser" ? " is-browser" : ""}${tab === "review" ? " is-review" : ""}',
+    'review-changes${selected && diff ? " is-diff" : ""}',
+  ]) {
+    assert.ok(panelsSource.includes(needle), "panels.tsx missing " + needle);
+  }
+  assert.match(cssSource, /\.right-tools-body\.is-review\s*\{[^}]*height:\s*100%;[^}]*overflow:\s*hidden;/s);
+  assert.match(cssSource, /\.right-tools-review\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*none;[^}]*height:\s*100%;[^}]*min-height:\s*0;/s);
+  assert.match(cssSource, /\.right-tools-review > \.review-changes\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;[^}]*overflow:\s*auto;/s);
+  assert.match(cssSource, /\.review-changes\.is-diff \.review-diff\s*\{[^}]*flex:\s*1 1 auto;[^}]*max-height:\s*none;[^}]*min-height:\s*0;/s);
   for (const needle of [".risk-badge", ".command-preview", ".review-panel.high-risk", ".approve-risk-button", ".local-api-confirmation"]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);
   }
+  assert.match(
+    cssSource,
+    /\.review-summary\.markdown-viewer\s*\{[^}]*background:\s*transparent;[^}]*border:\s*0;[^}]*max-height:\s*none;[^}]*overflow:\s*visible;[^}]*padding:\s*0;/s,
+  );
   assert.ok(cliSource.includes("WARNING: HIGH-RISK command"), "CLI missing HIGH-RISK command warning");
   assert.ok(
     cliSource.includes("WARNING: HIGH-RISK git operation"),

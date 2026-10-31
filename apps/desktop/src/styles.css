@@ -1498,7 +1498,7 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 .message:focus-within .message-meta {
   opacity: 1;
 }
-.message-tool {
+.message-tool-group {
   align-self: flex-start;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
@@ -1506,42 +1506,53 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   max-width: min(82ch, 94%);
   padding: 0;
 }
-.message-tool > summary {
+.message-tool-group > summary {
   align-items: center;
   color: var(--tool);
   cursor: pointer;
-  display: grid;
-  gap: 0.45rem 0.75rem;
-  grid-template-columns: auto minmax(0, 1fr);
+  display: flex;
+  font-weight: 600;
+  gap: 0.45rem;
   list-style: none;
   padding: 0.55rem 0.75rem;
 }
-.message-tool > summary::-webkit-details-marker {
+.message-tool-group > summary::-webkit-details-marker {
   display: none;
 }
-.message-tool > summary::before {
+.message-tool-group > summary::before {
   color: var(--text-muted);
   content: "▸";
   font-size: 0.75rem;
 }
-.message-tool[open] > summary::before {
+.message-tool-group[open] > summary::before {
   content: "▾";
 }
-.message-tool .message-preview {
-  color: var(--text-muted);
-  font-size: 0.8rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.message-tool .message-body {
+.tool-message-list {
   border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.55rem 0.75rem 0.75rem;
+}
+.tool-message-item {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  gap: 0.35rem;
+  overflow: hidden;
+}
+.tool-message-item .message-preview {
+  color: var(--tool);
+  font-size: 0.78rem;
+  padding: 0.45rem 0.55rem 0;
+}
+.tool-message-item .message-body {
   color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.78rem;
-  max-height: 14rem;
+  max-height: 12rem;
   overflow: auto;
-  padding: 0.65rem 0.75rem 0.75rem;
+  padding: 0 0.55rem 0.5rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -3644,10 +3655,28 @@ body.is-resizing-right-panel .browser-surface-host {
   padding: 0;
 }
 .right-tools-review {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.75rem;
-  max-width: 70ch;
+  width: 100%;
+  max-width: none;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
+}
+.right-tools-body.is-review {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.right-tools-review > .review-preview {
+  flex: none;
+  min-width: 0;
+}
+.right-tools-review > .review-changes {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .bottom-terminal {
@@ -4027,10 +4056,132 @@ body.is-resizing-right-panel .browser-surface-host {
   min-width: 0;
   white-space: pre;
 }
+.markdown-viewer {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.65;
+  max-height: 70vh;
+  min-width: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 0.9rem 1rem;
+}
+.markdown-viewer > :first-child { margin-top: 0; }
+.markdown-viewer > :last-child { margin-bottom: 0; }
+.markdown-viewer h1,
+.markdown-viewer h2,
+.markdown-viewer h3,
+.markdown-viewer h4,
+.markdown-viewer h5,
+.markdown-viewer h6 {
+  color: var(--text);
+  font-weight: 650;
+  line-height: 1.3;
+  margin: 1.15em 0 0.55em;
+}
+.markdown-viewer h1 { font-size: 1.45rem; }
+.markdown-viewer h2 { font-size: 1.25rem; }
+.markdown-viewer h3 { font-size: 1.1rem; }
+.markdown-viewer h4,
+.markdown-viewer h5,
+.markdown-viewer h6 { font-size: 1rem; }
+.markdown-viewer p { margin: 0 0 0.75em; }
+.markdown-viewer ul,
+.markdown-viewer ol {
+  margin: 0 0 0.75em;
+  padding-left: 1.4rem;
+}
+.markdown-viewer li + li { margin-top: 0.25em; }
+.markdown-viewer li > ul,
+.markdown-viewer li > ol { margin-top: 0.25em; }
+.markdown-viewer a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+.markdown-viewer a:hover { color: var(--accent-strong); }
+.markdown-viewer code {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.88em;
+  padding: 0.1em 0.3em;
+}
+.markdown-viewer pre {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: auto;
+  padding: 0.7rem;
+}
+.markdown-viewer pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  white-space: pre;
+}
+.markdown-viewer blockquote {
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-muted);
+  margin: 0 0 0.75em;
+  padding-left: 0.8rem;
+}
+.markdown-viewer hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 1rem 0;
+}
+.markdown-viewer table {
+  border-collapse: collapse;
+  display: block;
+  margin: 0 0 0.75em;
+  max-width: 100%;
+  overflow: auto;
+}
+.markdown-viewer th,
+.markdown-viewer td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.55rem;
+  text-align: left;
+}
+.markdown-viewer th {
+  background: var(--bg-hover);
+  color: var(--text);
+  font-weight: 600;
+}
+.markdown-viewer img {
+  height: auto;
+  max-width: 100%;
+}
+.markdown-viewer .contains-task-list {
+  list-style: none;
+  padding-left: 0.2rem;
+}
+.markdown-viewer .task-list-item { list-style: none; }
+.markdown-viewer input[type="checkbox"] {
+  margin: 0 0.4rem 0 0;
+  vertical-align: middle;
+}
 .review-preview {
   display: grid;
   gap: 0.5rem;
   min-width: 0;
+}
+.review-summary.markdown-viewer {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  margin: 0;
+  max-height: none;
+  overflow: visible;
+  padding: 0;
 }
 .review-changes {
   display: grid;
@@ -4105,6 +4256,18 @@ body.is-resizing-right-panel .browser-surface-host {
 .review-diff {
   max-height: 70vh;
   overflow: auto;
+}
+.review-changes.is-diff {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.review-changes.is-diff > :not(.review-diff) { flex: none; }
+.review-changes.is-diff .review-diff {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
 }
 .diff-line.context {
   color: var(--text-secondary);

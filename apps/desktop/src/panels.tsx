@@ -4,6 +4,8 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { t, type Locale } from "./i18n";
 import {
   analyzeGitNexus,
@@ -136,6 +138,31 @@ function joinWorkspacePath(root: string, relative: string): string {
 function parentRelative(path: string): string {
   const parts = path.replace(/\//g, "\\").split("\\").filter(Boolean);
   parts.pop();
+  return parts.join("\\");
+}
+
+function isMarkdownFile(path: string): boolean {
+  return /\.(?:md|markdown)$/i.test(path);
+}
+
+function resolveMarkdownLink(markdownPath: string, href: string): string | null {
+  const withoutQuery = href.split("#", 1)[0].split("?", 1)[0];
+  let decoded = withoutQuery;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    // Keep malformed URL encoding as-is so the user still gets a predictable fallback.
+  }
+  const parts = parentRelative(markdownPath).replace(/\\/g, "/").split("/").filter(Boolean);
+  for (const part of decoded.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
   return parts.join("\\");
 }
 
@@ -272,7 +299,7 @@ function ReviewChangesPanel({
 
   if (selected && diff) {
     return (
-      <div className="review-changes">
+      <div className={`review-changes${selected && diff ? " is-diff" : ""}`}>
         <div className="review-changes-toolbar">
           <button
             type="button"
@@ -2805,6 +2832,7 @@ export function RightToolsPanel({
   const [viewedFile, setViewedFile] = useState<WorkspaceFileContent | null>(null);
   const [viewerLoading, setViewerLoading] = useState(false);
   const [fileFilter, setFileFilter] = useState("");
+  const [markdownPreview, setMarkdownPreview] = useState(false);
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const loadFiles = useCallback(
@@ -2845,11 +2873,13 @@ export function RightToolsPanel({
         const content = await readWorkspaceFile(root, entry.path);
         if (content.binary || content.too_large) {
           setViewedFile(null);
+          setMarkdownPreview(false);
           setFilesError(t(locale, content.binary ? "panel.fileBinary" : "panel.fileTooLarge"));
           await openPath(joinWorkspacePath(root, entry.path));
           return;
         }
         setViewedFile(content);
+        setMarkdownPreview(isMarkdownFile(entry.path));
       } catch (cause) {
         setFilesError(cause instanceof Error ? cause.message : String(cause));
       } finally {
@@ -2867,6 +2897,7 @@ export function RightToolsPanel({
 
   useEffect(() => {
     setViewedFile(null);
+    setMarkdownPreview(false);
   }, [workspaceRoot]);
 
   const visibleEntries = useMemo(() => {
@@ -2879,6 +2910,7 @@ export function RightToolsPanel({
     () => (viewedFile ? viewedFile.text.replace(/\n$/, "").split("\n") : []),
     [viewedFile],
   );
+  const isMarkdown = viewedFile ? isMarkdownFile(viewedFile.path) : false;
 
   const onRightPanelResizeStart = (event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -2944,7 +2976,7 @@ export function RightToolsPanel({
           ×
         </button>
       </div>
-      <div className={`right-tools-body${tab === "browser" ? " is-browser" : ""}`}>
+      <div className={`right-tools-body${tab === "browser" ? " is-browser" : ""}${tab === "review" ? " is-review" : ""}`}>
         {tab === "review" ? (
           <div className="right-tools-review">
             {reviewContent}
@@ -2970,7 +3002,14 @@ export function RightToolsPanel({
             {viewedFile ? (
               <div className="file-viewer">
                 <div className="bottom-files-toolbar">
-                  <button type="button" className="quiet-button" onClick={() => setViewedFile(null)}>
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    onClick={() => {
+                      setViewedFile(null);
+                      setMarkdownPreview(false);
+                    }}
+                  >
                     {t(locale, "panel.backToFiles")}
                   </button>
                   <code className="bottom-files-path" title={viewedFile.path}>
@@ -2982,6 +3021,16 @@ export function RightToolsPanel({
                       size: formatFileSize(viewedFile.byte_size),
                     })}
                   </span>
+                  {isMarkdown ? (
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      aria-pressed={markdownPreview}
+                      onClick={() => setMarkdownPreview((preview) => !preview)}
+                    >
+                      {t(locale, markdownPreview ? "panel.markdownSource" : "panel.markdownPreview")}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="quiet-button"
@@ -3006,16 +3055,58 @@ export function RightToolsPanel({
                   </button>
                 </div>
                 {filesError ? <p className="error-message">{filesError}</p> : null}
-                <pre className="file-viewer-body">
-                  {viewedFileLines.map((line, index) => (
-                    <span key={index} className="file-viewer-line">
-                      <span className="file-viewer-gutter" aria-hidden="true">
-                        {index + 1}
+                {isMarkdown && markdownPreview ? (
+                  <div className="markdown-viewer">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        a: ({ href, children }) => {
+                          const external = Boolean(href && /^https?:\/\//i.test(href));
+                          const local = Boolean(
+                            href && !href.startsWith("#") && !external && !/^[a-z][a-z0-9+.-]*:/i.test(href),
+                          );
+                          return (
+                            <a
+                              href={href}
+                              rel={external ? "noreferrer" : undefined}
+                              target={external ? "_blank" : undefined}
+                              onClick={(event) => {
+                                if (!href || (!external && !local)) return;
+                                event.preventDefault();
+                                if (external) {
+                                  void openExternalUrl(href).catch((cause) => {
+                                    setFilesError(cause instanceof Error ? cause.message : String(cause));
+                                  });
+                                  return;
+                                }
+                                const target = resolveMarkdownLink(viewedFile.path, href);
+                                if (!target) return;
+                                void openPath(joinWorkspacePath(workspaceRoot, target)).catch((cause) => {
+                                  setFilesError(cause instanceof Error ? cause.message : String(cause));
+                                });
+                              }}
+                            >
+                              {children}
+                            </a>
+                          );
+                        },
+                      }}
+                    >
+                      {viewedFile.text}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <pre className="file-viewer-body">
+                    {viewedFileLines.map((line, index) => (
+                      <span key={index} className="file-viewer-line">
+                        <span className="file-viewer-gutter" aria-hidden="true">
+                          {index + 1}
+                        </span>
+                        <span className="file-viewer-text">{line || " "}</span>
                       </span>
-                      <span className="file-viewer-text">{line || " "}</span>
-                    </span>
-                  ))}
-                </pre>
+                    ))}
+                  </pre>
+                )}
               </div>
             ) : (
               <>

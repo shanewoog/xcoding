@@ -67,6 +67,27 @@ async function main() {
     "the files tab must render text file content in the panel",
   );
   assert.ok(
+    panelsSource.includes('import ReactMarkdown from "react-markdown"')
+      && panelsSource.includes('import remarkGfm from "remark-gfm"'),
+    "markdown files must use the markdown renderer with GFM support",
+  );
+  assert.ok(
+    panelsSource.includes("function isMarkdownFile")
+      && panelsSource.includes("setMarkdownPreview(isMarkdownFile(entry.path))"),
+    "markdown files must open in preview mode by default",
+  );
+  assert.ok(
+    panelsSource.includes("<ReactMarkdown")
+      && panelsSource.includes("remarkPlugins={[remarkGfm]}")
+      && panelsSource.includes('className="markdown-viewer"'),
+    "markdown files must render into the markdown viewer",
+  );
+  assert.ok(
+    panelsSource.includes("aria-pressed={markdownPreview}")
+      && panelsSource.includes('t(locale, markdownPreview ? "panel.markdownSource" : "panel.markdownPreview")'),
+    "markdown files must offer a source and preview toggle",
+  );
+  assert.ok(
     panelsSource.includes("content.binary || content.too_large"),
     "binary and oversized files must fall back to the system application",
   );
@@ -111,6 +132,16 @@ async function main() {
     !/\.file-viewer-body\s*\{[^}]*#[0-9a-fA-F]{3}/.test(cssSource),
     "the file viewer must use theme tokens instead of hard-coded colors",
   );
+  assert.match(
+    cssSource, /\.markdown-viewer\s*\{[\s\S]*overflow:\s*auto;/,
+    "the markdown viewer must scroll its content",
+  );
+  assert.ok(
+    !/#[0-9a-fA-F]{3,8}\b/.test(
+      cssSource.slice(cssSource.indexOf(".markdown-viewer"), cssSource.indexOf(".review-preview")),
+    ),
+    "the markdown viewer must use theme tokens instead of hard-coded colors",
+  );
 
   for (const key of [
     "panel.backToFiles",
@@ -120,6 +151,8 @@ async function main() {
     "panel.rootCrumb",
     "panel.filterFiles",
     "panel.fileMeta",
+    "panel.markdownPreview",
+    "panel.markdownSource",
     "review.changesTitle",
     "review.backToChanges",
     "review.diffEmpty",
