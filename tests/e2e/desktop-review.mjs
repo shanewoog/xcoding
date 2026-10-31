@@ -250,6 +250,7 @@ async function main() {
   assert.match(cssSource, /\.right-tools-body\.is-review\s*\{[^}]*height:\s*100%;[^}]*overflow:\s*hidden;/s);
   assert.match(cssSource, /\.right-tools-review\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*none;[^}]*height:\s*100%;[^}]*min-height:\s*0;/s);
   assert.match(cssSource, /\.right-tools-review > \.review-changes\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;[^}]*overflow:\s*auto;/s);
+  assert.match(cssSource, /\.review-changes\s*\{[^}]*align-content:\s*start;/s, "review changes must keep content-sized rows when the panel fills its height");
   assert.match(cssSource, /\.review-changes\.is-diff \.review-diff\s*\{[^}]*flex:\s*1 1 auto;[^}]*max-height:\s*none;[^}]*min-height:\s*0;/s);
   for (const needle of [".risk-badge", ".command-preview", ".review-panel.high-risk", ".approve-risk-button", ".local-api-confirmation"]) {
     assert.ok(cssSource.includes(needle), "styles.css missing " + needle);

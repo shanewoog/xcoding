@@ -4205,6 +4205,7 @@ body.is-resizing-right-panel .browser-surface-host {
   padding: 0;
 }
 .review-changes {
+  align-content: start;
   display: grid;
   gap: 0.5rem;
   min-width: 0;
