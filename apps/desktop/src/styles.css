@@ -3669,6 +3669,13 @@ body.is-resizing-right-panel .browser-surface-host {
   min-height: 0;
   overflow: hidden;
 }
+.right-tools-body.is-files {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
 .right-tools-review > .review-preview {
   flex: none;
   min-width: 0;
@@ -3945,7 +3952,13 @@ body.is-resizing-right-panel .browser-surface-host {
 
 .bottom-files {
   display: grid;
+  flex: 1 1 auto;
   gap: 0.5rem;
+  min-height: 0;
+  overflow: auto;
+}
+.bottom-files.is-viewing {
+  overflow: hidden;
 }
 .bottom-files-toolbar {
   align-items: center;
@@ -4021,9 +4034,11 @@ body.is-resizing-right-panel .browser-surface-host {
 }
 
 .file-viewer {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.5rem;
-  grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
   min-width: 0;
 }
 .file-viewer-body {
@@ -4055,6 +4070,12 @@ body.is-resizing-right-panel .browser-surface-host {
 .file-viewer-text {
   min-width: 0;
   white-space: pre;
+}
+.file-viewer > .file-viewer-body,
+.file-viewer > .markdown-viewer {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
 }
 .markdown-viewer {
   background: var(--bg-input);

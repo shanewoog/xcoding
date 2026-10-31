@@ -2976,7 +2976,7 @@ export function RightToolsPanel({
           ×
         </button>
       </div>
-      <div className={`right-tools-body${tab === "browser" ? " is-browser" : ""}${tab === "review" ? " is-review" : ""}`}>
+      <div className={`right-tools-body${tab === "browser" ? " is-browser" : ""}${tab === "review" ? " is-review" : ""}${tab === "files" ? " is-files" : ""}`}>
         {tab === "review" ? (
           <div className="right-tools-review">
             {reviewContent}
@@ -2998,7 +2998,7 @@ export function RightToolsPanel({
         {tab === "code" ? <GitNexusPanel locale={locale} active={open && tab === "code"} workspaceRoot={workspaceRoot} /> : null}
 
         {tab === "files" ? (
-          <div className="bottom-files">
+          <div className={`bottom-files${viewedFile ? " is-viewing" : ""}`}>
             {viewedFile ? (
               <div className="file-viewer">
                 <div className="bottom-files-toolbar">

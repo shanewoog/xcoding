@@ -5426,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "xcoding-desktop"
-version = "1.0.96"
+version = "1.0.97"
 dependencies = [
  "dotenvy",
  "futures-util",

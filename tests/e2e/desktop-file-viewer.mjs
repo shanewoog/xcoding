@@ -104,6 +104,11 @@ async function main() {
     "the file viewer must render line numbers",
   );
   assert.ok(
+    panelsSource.includes('tab === "files" ? " is-files" : ""')
+      && panelsSource.includes('className={`bottom-files${viewedFile ? " is-viewing" : ""}`}'),
+    "the file viewer must opt into full-height panel layout",
+  );
+  assert.ok(
     panelsSource.includes("function ReviewChangesPanel") && panelsSource.includes("<ReviewChangesPanel"),
     "the review tab must render the working tree changes panel",
   );
@@ -128,6 +133,26 @@ async function main() {
   );
 
   assert.match(cssSource, /\.file-viewer-body\s*\{[\s\S]*overflow:\s*auto;/, "the file viewer must scroll its content");
+  assert.match(
+    cssSource,
+    /\.right-tools-body\.is-files\s*\{[^}]*height:\s*100%;[^}]*overflow:\s*hidden;/s,
+    "the files tab must fill the right tools body",
+  );
+  assert.match(
+    cssSource,
+    /\.bottom-files\.is-viewing\s*\{[^}]*overflow:\s*hidden;/s,
+    "the open file viewer must contain its own scrolling",
+  );
+  assert.match(
+    cssSource,
+    /\.file-viewer\s*\{[^}]*display:\s*flex;[^}]*height:\s*100%;[^}]*min-height:\s*0;/s,
+    "the file viewer must fill the files tab",
+  );
+  assert.match(
+    cssSource,
+    /\.file-viewer > \.file-viewer-body,[\s\S]*?\.file-viewer > \.markdown-viewer\s*\{[^}]*flex:\s*1 1 auto;[^}]*max-height:\s*none;[^}]*min-height:\s*0;/s,
+    "the file content must fill the viewer instead of being capped at 70vh",
+  );
   assert.ok(
     !/\.file-viewer-body\s*\{[^}]*#[0-9a-fA-F]{3}/.test(cssSource),
     "the file viewer must use theme tokens instead of hard-coded colors",
