@@ -183,6 +183,22 @@ impl RpcError {
         }
     }
 
+    pub fn sensitive_content_blocked(category: &str, location: &str, provider: &str) -> Self {
+        Self {
+            code: 1102,
+            message: format!(
+                "relay provider `{provider}` blocked sensitive content: category={category}, location={location}; 请移除敏感内容或切换到可信供应商"
+            ),
+            data: Some(serde_json::json!({
+                "code": "sensitive_content_blocked",
+                "category": category,
+                "location": location,
+                "provider": provider,
+                "action": "remove_secret_or_use_trusted_provider",
+            })),
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             code: -32000,

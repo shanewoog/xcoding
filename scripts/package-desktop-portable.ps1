@@ -230,6 +230,7 @@ $releaseGitPaths = @(
   "apps/desktop/src/activity.ts",
   "apps/desktop/src/styles.css",
   "tests/e2e/desktop-layout.mjs",
+  "tests/e2e/desktop-project-collapse.mjs",
   "tests/e2e/desktop-file-viewer.mjs",
   "tests/e2e/desktop-review.mjs",
   "tests/e2e/desktop-activity.mjs",

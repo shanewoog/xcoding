@@ -1033,6 +1033,27 @@ function SettingsIcon() {
   );
 }
 
+function ProjectChevronIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      className={`project-chevron ${collapsed ? "is-collapsed" : ""}`}
+      width="12"
+      height="12"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="m4 6 4 4 4-4"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function gitSnapshotText(summary: TaskSummary, locale: Locale): string {
   return [
     summary.git_branch ? t(locale, "summary.branch", { name: summary.git_branch }) : "",
@@ -6443,21 +6464,37 @@ export function App() {
               normalizeRoot(group.root) === normalizeRoot(workspaceRoot);
             return (
               <div className={`project-group ${isCurrentProject ? "is-current" : ""}`} key={group.root}>
-                <button
-                  type="button"
-                  className="project-header"
-                  onClick={() => {
-                    setCollapsedProjects((current) => ({ ...current, [group.root]: false }));
-                    selectProject(group.root);
-                  }}
+                <div
+                  className={`project-header ${collapsed ? "is-collapsed" : ""}`}
                   onContextMenu={(event) => openProjectMenu(event, group.root)}
                   title={group.root}
                 >
-                  <span className="project-chevron" aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
-                  <span className="project-icon" aria-hidden="true">📁</span>
-                  <span className="project-name">{group.name}</span>
-                  <span className="project-count">{group.sessions.length}</span>
-                </button>
+                  <button
+                    type="button"
+                    className="project-collapse"
+                    aria-expanded={!collapsed}
+                    aria-label={t(locale, collapsed ? "action.expandProject" : "action.collapseProject")}
+                    title={t(locale, collapsed ? "action.expandProject" : "action.collapseProject")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleProjectCollapsed(group.root);
+                    }}
+                  >
+                    <ProjectChevronIcon collapsed={collapsed} />
+                  </button>
+                  <button
+                    type="button"
+                    className="project-select"
+                    onClick={() => {
+                      setCollapsedProjects((current) => ({ ...current, [group.root]: false }));
+                      selectProject(group.root);
+                    }}
+                  >
+                    <span className="project-icon" aria-hidden="true">📁</span>
+                    <span className="project-name">{group.name}</span>
+                    <span className="project-count">{group.sessions.length}</span>
+                  </button>
+                </div>
                 {collapsed ? null : group.sessions.map((session) => (
                   <button
                     type="button"

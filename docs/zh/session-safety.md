@@ -75,10 +75,28 @@ export XCODING_OPENAI_BASE_URL="https://ai.v58.dev/v1" # optional
 
 在 `relay` 供应商上：
 
-- 检测到私钥、常见云凭据、Bearer/JWT、`.env` 或类似高置信度敏感内容时，请求会被阻断；无法可靠解析消息时也按敏感内容处理。
-- 图片不会发送给中转站的视觉委托供应商。
-- `apply_patch`、`run_command` 和 MCP 工具即使原本可自动执行，也会降级为需要用户确认。
+- 向 Provider 发送前会单独构建脱敏副本，只替换敏感值，保留字段名、引号、缩进、空格和 CRLF。覆盖私钥、常见云凭据、Bearer/JWT、Cookie/session token、`access_token`、`refresh_token`、`api_key`、已知 Provider 凭据等高置信度内容。
+- 对 relay 的 Provider 副本会优先把敏感值替换为稳定的不透明引用，例如 `{{secret:<id>}}`；引用只保存在当前进程内存中，真实值仅在本地工具执行前解析。引用缺失、格式损坏或无法解析时按 fail-closed 处理。
+- 本地工具执行继续使用真实 `ToolCall.arguments`；待审批动作写入数据库时也保留真实参数。Provider 请求使用脱敏副本；工具与审批事件在持久化和发送给客户端前也会脱敏，`tool_call_id` 与工具调用配对保持不变。
+- `full-auto` 不会因为工具参数包含敏感内容而额外要求审批；它继续自动执行非网络、未被硬拒绝的工具，同时只向 Provider 发送引用或脱敏副本。
+- 脱敏后仍无法安全处理时按 fail-closed 处理，不会把原文继续发送给 relay。
+- 图片不会发送给 relay。relay 主模型遇到图片时，只能由 `local` 或 `official` 视觉委托转换为文字；委托未配置、本身也是 relay 或转换失败时会明确失败，不会静默删除图片后继续。
+- 在 `ask` / `auto-edit` 下，`apply_patch`、`run_command` 和 MCP 工具即使原本可自动执行，也会降级为需要用户确认；`full-auto` 保持自动执行，但工具参数和结果仍按 Secret Reference / 脱敏规则处理。
 - 会校验供应商返回的模型标识；声明模型与请求模型不一致时，本轮调用失败，不接受中转站静默换模型。
+
+敏感内容拦截使用 JSON-RPC 错误码 `1102`，`data` 为机器可读结构：
+
+```json
+{
+  "code": "sensitive_content_blocked",
+  "category": "session_token",
+  "location": "tool_call_arguments",
+  "provider": "WorkBuddy",
+  "action": "remove_secret_or_use_trusted_provider"
+}
+```
+
+`category` 可用于区分 `session_token`、`authorization_bearer`、`cookie`、`access_token`、`refresh_token`、`api_key`、`private_key`、`provider_api_key`、`known_secret`、`image_payload` 和 `unredactable_content`。`location` 至少会标明问题来自 `message_content`、`tool_call_arguments`、`tool_output`、`context_compaction`、`memory_extraction` 或 `vision`。错误消息只包含类别、位置和 Provider 名称，不包含真实值、哈希或其他可逆指纹。
 
 这不是对中转站“可信”的证明。涉密内容应优先使用本地或确认过的官方直连，并在网络、供应商日志和访问权限层面另行落实审计与留存策略。
 

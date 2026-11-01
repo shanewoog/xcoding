@@ -244,10 +244,9 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   border-radius: 6px;
   color: var(--text);
   display: grid;
-  gap: 0.35rem;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
-  padding: 0.45rem 0.5rem;
-  text-align: left;
+  gap: 0.15rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 0.3rem 0.35rem;
   width: 100%;
 }
 .project-header:hover {
@@ -257,7 +256,57 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .project-group.is-current > .project-header {
   background: var(--accent-soft);
 }
-.project-chevron, .project-icon {
+.project-collapse,
+.project-select {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+}
+.project-collapse {
+  align-items: center;
+  border-radius: 4px;
+  display: flex;
+  height: 1.4rem;
+  justify-content: center;
+  padding: 0;
+  width: 1.4rem;
+}
+.project-header .project-collapse:hover,
+.project-header .project-select:hover {
+  background: transparent;
+  border-color: transparent;
+}
+.project-header .project-collapse:hover {
+  background: var(--bg-hover);
+}
+.project-header .project-collapse:focus-visible,
+.project-header .project-select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.project-select {
+  align-items: center;
+  display: grid;
+  gap: 0.35rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 0.15rem 0.15rem 0.15rem 0;
+  text-align: left;
+  width: 100%;
+}
+.project-chevron {
+  color: var(--text-muted);
+  display: block;
+  height: 0.8rem;
+  transition: transform 120ms ease;
+  width: 0.8rem;
+}
+.project-chevron.is-collapsed {
+  transform: rotate(-90deg);
+}
+.project-icon {
   color: var(--text-muted);
   font-size: 0.78rem;
   line-height: 1;

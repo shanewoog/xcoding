@@ -8,7 +8,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin, Stdout},
     sync::mpsc,
 };
-use xcoding_agent::{AgentError, AgentService};
+use xcoding_agent::{AgentError, AgentService, SensitiveContentBlock};
 use xcoding_core::{CoreError, CoreService};
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, JsonRpcNotification, JsonRpcRequest,
@@ -334,13 +334,17 @@ fn rpc_error_for_agent(error: AgentError) -> RpcError {
         AgentError::Tool(error) => RpcError::invalid_params(error.to_string()),
         AgentError::Provider(error) => RpcError::provider_error(error.to_string()),
         AgentError::InvalidProviderToolCall(message) => RpcError::provider_error(message),
+        AgentError::SensitiveDataBlocked(SensitiveContentBlock {
+            category,
+            location,
+            provider,
+        }) => RpcError::sensitive_content_blocked(category, location, &provider),
         AgentError::ToolCallLimit
         | AgentError::EmptyProviderResponse
         | AgentError::ProviderBusyResponse(_)
         | AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
         | AgentError::ProviderFallbackExhausted(_)
-        | AgentError::SensitiveDataBlocked
         | AgentError::ModelMismatch { .. } => RpcError::provider_error(error.to_string()),
         AgentError::Cancelled => RpcError::invalid_params("session cancelled".to_owned()),
         AgentError::Mcp(error) => RpcError::invalid_params(error.to_string()),
@@ -389,10 +393,33 @@ fn parse_database_path() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::path::PathBuf;
 
     #[test]
     fn database_path_default_is_not_implicit() {
         assert!(PathBuf::from(".xcoding/xcoding.db").ends_with("xcoding.db"));
+    }
+
+    #[test]
+    fn sensitive_content_block_has_structured_rpc_data() {
+        let error = AgentError::SensitiveDataBlocked(SensitiveContentBlock {
+            category: "session_token",
+            location: "tool_call_arguments",
+            provider: "WorkBuddy".to_owned(),
+        });
+        let rpc = rpc_error_for_agent(error);
+        assert_eq!(rpc.code, 1102);
+        assert!(rpc.message.contains("session_token"));
+        assert!(rpc.message.contains("tool_call_arguments"));
+        assert!(rpc.message.contains("WorkBuddy"));
+        let data = rpc
+            .data
+            .expect("sensitive error must carry structured data");
+        assert_eq!(data["code"], "sensitive_content_blocked");
+        assert_eq!(data["category"], "session_token");
+        assert_eq!(data["location"], "tool_call_arguments");
+        assert_eq!(data["provider"], "WorkBuddy");
+        assert_eq!(data["action"], "remove_secret_or_use_trusted_provider");
     }
 }
