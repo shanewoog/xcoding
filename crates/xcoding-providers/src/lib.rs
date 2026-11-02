@@ -2261,6 +2261,169 @@ enum ResponsesParsedEvent {
     Ignored,
 }
 
+const DSML_MARKERS: [&str; 6] = [
+    "<｜DSML｜",
+    "</｜DSML｜",
+    "<｜｜DSML｜｜",
+    "</｜｜DSML｜｜",
+    "<|DSML|",
+    "</|DSML|",
+];
+
+fn normalize_leaked_dsml(content: &str) -> String {
+    content
+        .replace("<｜｜DSML｜｜", "<｜DSML｜")
+        .replace("</｜｜DSML｜｜", "</｜DSML｜")
+        .replace("<|DSML|", "<｜DSML｜")
+        .replace("</|DSML|", "</｜DSML｜")
+}
+
+fn find_dsml_tag(input: &str, name: &str, closing: bool) -> Option<(usize, usize)> {
+    let prefix = if closing {
+        "</｜DSML｜"
+    } else {
+        "<｜DSML｜"
+    };
+    let mut cursor = 0;
+    while let Some(relative) = input[cursor..].find(prefix) {
+        let start = cursor + relative;
+        let after_prefix = start + prefix.len();
+        let rest = &input[after_prefix..];
+        let name_start = after_prefix + rest.len().saturating_sub(rest.trim_start().len());
+        let tail = &input[name_start..];
+        if tail.starts_with(name) {
+            let after_name = name_start + name.len();
+            let boundary = input[after_name..].chars().next()?;
+            if !boundary.is_whitespace() && boundary != '>' {
+                cursor = after_prefix;
+                continue;
+            }
+            let tag_rest = &input[after_name..];
+            if let Some(end_relative) = tag_rest.find('>') {
+                let between = &tag_rest[..end_relative];
+                if !closing || between.trim().is_empty() {
+                    return Some((start, after_name + end_relative + 1));
+                }
+            }
+        }
+        cursor = after_prefix;
+    }
+    None
+}
+
+fn dsml_attribute(header: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=");
+    let start = header.find(&needle)? + needle.len();
+    let rest = header[start..].trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &rest[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_owned())
+}
+
+/// Recover a complete DeepSeek DSML tool-call block that leaked into assistant
+/// text. A partial block is intentionally rejected so the caller can retry
+/// instead of persisting protocol markup as a final answer.
+pub fn recover_leaked_dsml_tool_calls(
+    content: &str,
+    definitions: &[ToolDefinition],
+) -> Result<Option<Vec<ProviderToolCall>>, String> {
+    if !DSML_MARKERS.iter().any(|marker| content.contains(marker)) {
+        return Ok(None);
+    }
+    if definitions.is_empty() {
+        return Err("DSML markup appeared in a response with no available tools".to_owned());
+    }
+
+    let normalized = normalize_leaked_dsml(content);
+    let (_block_start, block_body_start) = find_dsml_tag(&normalized, "tool_calls", false)
+        .ok_or_else(|| "DSML tool-call block has no opening tool_calls tag".to_owned())?;
+    let after_block_open = &normalized[block_body_start..];
+    let (block_close_start, _) = find_dsml_tag(after_block_open, "tool_calls", true)
+        .ok_or_else(|| "DSML tool-call block is missing its closing tag".to_owned())?;
+    let block_body = &after_block_open[..block_close_start];
+
+    let mut cursor = 0;
+    let mut calls = Vec::new();
+    while cursor < block_body.len() {
+        if block_body[cursor..].trim().is_empty() {
+            break;
+        }
+        let (invoke_start, invoke_body_start) =
+            find_dsml_tag(&block_body[cursor..], "invoke", false).ok_or_else(|| {
+                "DSML tool-call block contains text outside invoke tags".to_owned()
+            })?;
+        let invoke_start = cursor + invoke_start;
+        let invoke_body_start = cursor + invoke_body_start;
+        let after_open = &block_body[invoke_body_start..];
+        let (invoke_close_start, invoke_close_end) =
+            find_dsml_tag(after_open, "invoke", true)
+                .ok_or_else(|| "DSML invoke block is missing its closing tag".to_owned())?;
+        let header = &block_body[invoke_start..invoke_body_start];
+        let name = dsml_attribute(header, "name")
+            .ok_or_else(|| "DSML invoke is missing a name attribute".to_owned())?;
+        if !definitions.iter().any(|definition| definition.name == name) {
+            return Err(format!("DSML requested unavailable tool `{name}`"));
+        }
+
+        let invoke_body = &after_open[..invoke_close_start];
+        let mut arguments = serde_json::Map::new();
+        let mut parameter_cursor = 0;
+        while parameter_cursor < invoke_body.len() {
+            if invoke_body[parameter_cursor..].trim().is_empty() {
+                break;
+            }
+            let (parameter_start, parameter_body_start) =
+                find_dsml_tag(&invoke_body[parameter_cursor..], "parameter", false).ok_or_else(
+                    || "DSML invoke contains text outside parameter tags".to_owned(),
+                )?;
+            let parameter_start = parameter_cursor + parameter_start;
+            let parameter_body_start = parameter_cursor + parameter_body_start;
+            let after_parameter_open = &invoke_body[parameter_body_start..];
+            let (parameter_close_start, parameter_close_end) =
+                find_dsml_tag(after_parameter_open, "parameter", true)
+                    .ok_or_else(|| "DSML parameter is missing its closing tag".to_owned())?;
+            let header = &invoke_body[parameter_start..parameter_body_start];
+            let parameter_name = dsml_attribute(header, "name")
+                .ok_or_else(|| "DSML parameter is missing a name attribute".to_owned())?;
+            if arguments.contains_key(&parameter_name) {
+                return Err(format!("DSML parameter `{parameter_name}` is duplicated"));
+            }
+            let raw_value = after_parameter_open[..parameter_close_start].trim();
+            let is_string = dsml_attribute(header, "string")
+                .map(|value| value != "false")
+                .unwrap_or(true);
+            let value = if is_string {
+                Value::String(raw_value.to_owned())
+            } else {
+                serde_json::from_str(raw_value).map_err(|error| {
+                    format!("invalid DSML parameter `{parameter_name}` JSON: {error}")
+                })?
+            };
+            arguments.insert(parameter_name, value);
+            parameter_cursor = parameter_body_start + parameter_close_end;
+        }
+
+        let arguments = serde_json::to_string(&Value::Object(arguments))
+            .map_err(|error| format!("cannot encode DSML tool arguments: {error}"))?;
+        calls.push(ProviderToolCall {
+            id: format!("dsml_{}", uuid::Uuid::new_v4()),
+            kind: "function".to_owned(),
+            function: ProviderFunctionCall { name, arguments },
+            truncated: false,
+        });
+        cursor = invoke_body_start + invoke_close_end;
+    }
+
+    if calls.is_empty() {
+        return Err("DSML tool-call block contained no invoke tags".to_owned());
+    }
+    Ok(Some(calls))
+}
+
 fn parse_responses_event(data: &str) -> Result<ResponsesParsedEvent, ProviderError> {
     let event: Value = serde_json::from_str(data)?;
     match event
@@ -3386,6 +3549,49 @@ mod tests {
         assert_eq!(body["tools"][0]["strict"], false);
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn recovers_complete_leaked_dsml_tool_calls() {
+        let definitions = vec![ToolDefinition {
+            name: "read_file".to_owned(),
+            description: "Read one file".to_owned(),
+            parameters: json!({"type": "object"}),
+        }];
+        let content = concat!(
+            "I will inspect it.\n",
+            "<｜DSML｜tool_calls>\n",
+            "<｜DSML｜invoke name=\"read_file\">\n",
+            "<｜DSML｜parameter name=\"path\" string=\"true\">src/lib.rs</｜DSML｜parameter>\n",
+            "</｜DSML｜invoke>\n",
+            "</｜DSML｜tool_calls>"
+        );
+
+        let calls = recover_leaked_dsml_tool_calls(content, &definitions)
+            .expect("complete DSML parses")
+            .expect("DSML should be detected");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read_file");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"src/lib.rs"}"#);
+    }
+
+    #[test]
+    fn rejects_partial_leaked_dsml_tool_calls() {
+        let definitions = vec![ToolDefinition {
+            name: "read_file".to_owned(),
+            description: "Read one file".to_owned(),
+            parameters: json!({"type": "object"}),
+        }];
+        let content = concat!(
+            "Previously recorded tool output: ...\n",
+            "</｜｜DSML｜｜ parameter>\n",
+            "</｜｜DSML｜｜ invoke>\n",
+            "</｜｜DSML｜｜ calls>"
+        );
+
+        let error = recover_leaked_dsml_tool_calls(content, &definitions)
+            .expect_err("partial DSML must not be treated as final text");
+        assert!(error.contains("opening tool_calls tag"));
     }
 
     // Regression: providers reject a request whose assistant

@@ -345,6 +345,7 @@ fn rpc_error_for_agent(error: AgentError) -> RpcError {
         | AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
         | AgentError::ProviderFallbackExhausted(_)
+        | AgentError::LeakedToolProtocol(_)
         | AgentError::ModelMismatch { .. } => RpcError::provider_error(error.to_string()),
         AgentError::Cancelled => RpcError::invalid_params("session cancelled".to_owned()),
         AgentError::Mcp(error) => RpcError::invalid_params(error.to_string()),

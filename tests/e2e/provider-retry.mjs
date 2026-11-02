@@ -16,6 +16,7 @@ async function main() {
   await assertEmptyResponseFailsClearly();
   await assertRetryThenFail();
   await assertRetryThenSucceed();
+  await assertLeakedDsmlIsRetriedWithProtocolRepair();
   await assertFallsBackToAnotherConfiguredProvider();
   await assertRotatesToAnotherKeyOfTheSameProvider();
   await assertBalancesOneModelAcrossProviders();
@@ -1077,6 +1078,62 @@ async function assertRestartsAfterPartialAnswerWasStreamed() {
   }
 }
 
+async function assertLeakedDsmlIsRetriedWithProtocolRepair() {
+  const mock = await startFlakyProvider({
+    succeedAfter: 2,
+    alwaysStatus: 503,
+    leakedDsmlBeforeAnswer: 1,
+  });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-dsml-retry-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-dsml-retry-home-"));
+  await configureSingleMockProvider(homeDirectory, mock.baseUrl);
+  const rpc = startRpcClient({
+    databasePath: resolve(databaseDirectory, "xcoding.db"),
+    environment: {
+      ...process.env,
+      OPENAI_API_KEY: "e2e-test-key",
+      XCODING_OPENAI_BASE_URL: mock.baseUrl,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
+    },
+  });
+
+  try {
+    const result = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Recover a leaked DSML tool call",
+      model: "fixture-model",
+    });
+    assert.equal(result.session.status, "done");
+    assert.match(result.message?.content ?? "", /hello after retries/i);
+    assert.doesNotMatch(result.message?.content ?? "", /DSML|Previously recorded tool output/i);
+    assert.equal(mock.requests.length, 2, `expected 2 attempts, got ${mock.requests.length}`);
+
+    const resetEvents = rpc.events.filter((event) => event.type === "stream_reset");
+    assert.equal(resetEvents.length, 1, "the leaked protocol text must be discarded");
+    assert.ok(resetEvents[0].discarded_chars > 0);
+    const retryEvents = rpc.events.filter((event) => event.type === "retrying");
+    assert.equal(retryEvents.length, 1, "leaked DSML must trigger one protocol repair attempt");
+    assert.match(retryEvents[0].message, /leaked DSML tool-call markup/i);
+    assert.match(retryEvents[0].message, /opening tool_calls tag/i);
+    assert.match(
+      JSON.stringify(mock.requests[1].messages),
+      /Protocol repair:.*DSML or XML tool-call markup/i,
+      "the retry must carry an explicit protocol repair instruction",
+    );
+    assert.equal(
+      rpc.events.filter((event) => event.type === "error").length,
+      0,
+      "a repaired turn must not surface a terminal error",
+    );
+  } finally {
+    await rpc.close();
+    await mock.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
 async function assertOpenCircuitDoesNotLockOutTheOnlyProvider() {
   const mock = await startFlakyProvider({ succeedAfter: 2, alwaysStatus: 503 });
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-circuit-lockout-"));
@@ -1231,7 +1288,7 @@ function startRpcClient({ databasePath, environment }) {
 }
 
 /**
- * @param {{ succeedAfter: number | null, alwaysStatus: number, disconnectBeforeDone?: number, emptyDone?: boolean, toolRoundsBeforeAnswer?: number, errorBody?: object, rejectedApiKeys?: string[] }} options
+ * @param {{ succeedAfter: number | null, alwaysStatus: number, disconnectBeforeDone?: number, partialTextBeforeDisconnect?: number, leakedDsmlBeforeAnswer?: number, emptyDone?: boolean, toolRoundsBeforeAnswer?: number, errorBody?: object, rejectedApiKeys?: string[] }} options
  * succeedAfter: 1-based attempt number that starts returning SSE success.
  * null means never succeed.
  * rejectedApiKeys: bearer values answered with 401 regardless of attempt count.
@@ -1243,6 +1300,7 @@ async function startFlakyProvider({
   alwaysStatus,
   disconnectBeforeDone = 0,
   partialTextBeforeDisconnect = 0,
+  leakedDsmlBeforeAnswer = 0,
   emptyDone = false,
   toolRoundsBeforeAnswer = 0,
   errorBody = { error: { message: "temporary upstream failure", type: "server_error" } },
@@ -1290,6 +1348,14 @@ async function startFlakyProvider({
     if (attempt <= disconnectBeforeDone) {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end();
+      return;
+    }
+    if (attempt <= leakedDsmlBeforeAnswer) {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "Previously recorded tool output: ...\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>" } }] })}\n\n`,
+      );
+      response.end("data: [DONE]\n\n");
       return;
     }
     if (emptyDone) {

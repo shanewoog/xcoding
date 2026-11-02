@@ -33,6 +33,7 @@ use xcoding_protocol::{DEFAULT_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_PLAN_ST
 use xcoding_providers::{
     ChatContentPart, ChatMessage, ChatMessageContent, OpenAiCompatibleProvider, ProviderError,
     ProviderEvent, ProviderToolCall, RawResponsesStream, ToolDefinition, load_user_config,
+    recover_leaked_dsml_tool_calls,
     normalize_base_url,
     provider_retry_delay,
 };
@@ -130,6 +131,8 @@ pub enum AgentError {
     UnsupportedProvider(String),
     #[error("invalid tool call from provider: {0}")]
     InvalidProviderToolCall(String),
+    #[error("model returned leaked DSML tool-call markup as text: {0}")]
+    LeakedToolProtocol(String),
     #[error("model exceeded the tool-call limit")]
     ToolCallLimit,
     #[error("provider stream did not return its first event within {0} seconds; please retry")]
@@ -330,6 +333,7 @@ static KNOWN_SECRETS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 const SECRET_REFERENCE_PREFIX: &str = "{{secret:";
 const SECRET_REFERENCE_SUFFIX: &str = "}}";
 const SECRET_REFERENCE_INSTRUCTIONS: &str = "Sensitive values may be represented as `{{secret:<id>}}`. If a tool needs one, pass the reference verbatim in the tool arguments; the local runtime resolves it. Never ask the user to reveal the underlying value and never try to decode it.";
+const DSML_PROTOCOL_REPAIR_INSTRUCTIONS: &str = "Protocol repair: the previous assistant response put DSML or XML tool-call markup in ordinary text. If a tool is needed, invoke it through the structured tool-call channel. Never emit DSML, XML, <invoke>, or <parameter> tags in message content.";
 
 /// Raw secrets used to resolve opaque references during local tool execution.
 /// This registry is process-memory only; it is never persisted or sent to a
@@ -2340,7 +2344,8 @@ fn is_retryable_provider_attempt(error: &AgentError) -> bool {
         AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
         | AgentError::EmptyProviderResponse
-        | AgentError::ProviderBusyResponse(_) => true,
+        | AgentError::ProviderBusyResponse(_)
+        | AgentError::LeakedToolProtocol(_) => true,
         AgentError::Provider(provider_error) => {
             // Context overflow needs history trimming, not a plain retry.
             if provider_error.is_context_overflow() {
@@ -2369,7 +2374,8 @@ fn stream_restart_discards_partial_output(error: &AgentError) -> bool {
     match error {
         AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
-        | AgentError::ProviderBusyResponse(_) => true,
+        | AgentError::ProviderBusyResponse(_)
+        | AgentError::LeakedToolProtocol(_) => true,
         AgentError::Provider(provider_error) => matches!(
             provider_error,
             ProviderError::StreamDisconnected(_) | ProviderError::Http(_)
@@ -2761,7 +2767,7 @@ impl<'a> AgentService<'a> {
             }
         };
         let mut content = String::new();
-        let mut tool_calls = Vec::new();
+        let mut tool_calls: Vec<ProviderToolCall> = Vec::new();
         let mut model_reported = None;
         let mut received_event = false;
         let mut first_event_at: Option<tokio::time::Instant> = None;
@@ -2873,6 +2879,33 @@ impl<'a> AgentService<'a> {
                 ttft_ms: first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
                 total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
             });
+        }
+        if tool_calls.is_empty() && !definitions.is_empty() {
+            match recover_leaked_dsml_tool_calls(&content, definitions) {
+                Ok(Some(recovered_calls)) => {
+                    self.emit(
+                        on_event,
+                        SessionEvent::StreamReset {
+                            session_id: session.id,
+                            discarded_chars: content.chars().count(),
+                            reason: "Discarded leaked DSML tool-call text and recovered structured tool calls.".to_owned(),
+                        },
+                    );
+                    content.clear();
+                    tool_calls = recovered_calls;
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    return Err(ProviderAttemptFailure {
+                        error: AgentError::LeakedToolProtocol(reason),
+                        output_chars: content.chars().count(),
+                        tool_calls: 0,
+                        ttft_ms: first_event_at
+                            .map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
+                        total_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
+                    });
+                }
+            }
         }
         if content.trim().is_empty() && tool_calls.is_empty() {
             return Err(ProviderAttemptFailure {
@@ -3124,6 +3157,7 @@ impl<'a> AgentService<'a> {
             // The already-recorded output is preserved as text; the tool is
             // never executed again.
             let mut tool_transcript_repaired = repair_tool_transcript(&mut messages) > 0;
+            let mut dsml_protocol_repair_attempted = false;
             let configured_capability =
                 model_vision_capability(&session.model, &user_config.model_capabilities);
             let (content, tool_calls, completed_candidate_index) = {
@@ -3578,6 +3612,24 @@ impl<'a> AgentService<'a> {
                                         }
                                     }
                                 }
+                                let leaked_dsml_protocol =
+                                    matches!(failure.error, AgentError::LeakedToolProtocol(_));
+                                let repair_instruction_was_added = if leaked_dsml_protocol
+                                    && !dsml_protocol_repair_attempted
+                                {
+                                    let insert_at = messages
+                                        .iter()
+                                        .take_while(|message| message.role == "system")
+                                        .count();
+                                    messages.insert(
+                                        insert_at,
+                                        ChatMessage::system(DSML_PROTOCOL_REPAIR_INSTRUCTIONS),
+                                    );
+                                    dsml_protocol_repair_attempted = true;
+                                    true
+                                } else {
+                                    false
+                                };
                                 let restart_after_visible_output =
                                     visible_output_was_started(&failure)
                                         && stream_restart_discards_partial_output(&failure.error);
@@ -3585,6 +3637,7 @@ impl<'a> AgentService<'a> {
                                     && (!visible_output_was_started(&failure)
                                         || restart_after_visible_output)
                                     && retry_attempt < max_provider_retries
+                                    && (!leaked_dsml_protocol || repair_instruction_was_added)
                                 {
                                     if restart_after_visible_output {
                                         self.emit(
@@ -10753,6 +10806,21 @@ private material
             assert!(visible_output_was_started(&failure));
             assert!(stream_restart_discards_partial_output(&failure.error));
         }
+    }
+
+    #[test]
+    fn leaked_dsml_protocol_restarts_even_after_visible_text() {
+        let error = AgentError::LeakedToolProtocol("partial tool-call block".to_owned());
+        assert!(is_retryable_provider_attempt(&error));
+        let failure = ProviderAttemptFailure {
+            error,
+            output_chars: 45,
+            tool_calls: 0,
+            ttft_ms: None,
+            total_ms: None,
+        };
+        assert!(visible_output_was_started(&failure));
+        assert!(stream_restart_discards_partial_output(&failure.error));
     }
 
     #[test]
