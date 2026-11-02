@@ -77,7 +77,7 @@ function providerCredentialsMissing(status, provider) {
 }
 
 async function main() {
-  const appSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8");
+  const appSource = (await readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8")).replace(/\r\n/g, "\n");
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
   const configSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/config.ts"), "utf8");
   const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
@@ -247,9 +247,13 @@ async function main() {
     !/if \(queueMode\) \{\s*void steerCurrentRun\(\);/.test(keyDownSource),
     "Ctrl+Enter must never turn a queued follow-up into an interrupt",
   );
+  const steerStart = appSource.indexOf("async function steerCurrentRun(");
+  const steerEnd = appSource.indexOf("async function resolveAction", steerStart);
+  assert.ok(steerStart >= 0 && steerEnd > steerStart, "App missing steer handler");
+  const steerSource = appSource.slice(steerStart, steerEnd);
   assert.ok(
-    appSource.includes("if (!sent) restoreComposerDraft(message, images);"),
-    "a steer that never reaches the model must put the message back in the composer",
+    steerSource.includes("if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);"),
+    "a steer that never reaches the model must restore the full composer draft",
   );
   assert.ok(
     appSource.includes("<kbd>Ctrl+Shift</kbd>"),
@@ -409,6 +413,22 @@ async function main() {
   assert.ok(
     appSource.includes("const ensureProviderModels = useCallback("),
     "routing rows must lazily fetch models for the provider they point at",
+  );
+  assert.ok(
+    appSource.includes("function mergeProviderModels"),
+    "configured route models must merge into provider model lists",
+  );
+  assert.ok(
+    appSource.includes("const visibleAvailableModels = useMemo("),
+    "composer models must include enabled route models",
+  );
+  assert.ok(
+    appSource.includes("visibleAvailableModels.map((entry)"),
+    "composer model selector must render merged provider and route models",
+  );
+  assert.ok(
+    appSource.includes("selectedProviderModels = useMemo("),
+    "provider model list must include configured hidden route models",
   );
   const routeSaveCount = (appSource.match(/model_routes: modelRouteMapFromEntries\(modelRouteEntries\)/g) || []).length;
   assert.equal(routeSaveCount, 1, "saving settings must submit model_routes exactly once");

@@ -11,6 +11,17 @@ async function main() {
   const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
 
   assert.ok(appSource.includes("function ProjectChevronIcon"), "missing project chevron icon");
+  assert.ok(appSource.includes("function ProjectsToggleIcon"), "missing projects toggle icon");
+  assert.ok(appSource.includes("projects-toggle-button"), "missing projects toggle button");
+  assert.ok(
+    appSource.includes("aria-expanded={!allProjectsCollapsed}"),
+    "projects toggle must expose expanded state",
+  );
+  assert.ok(appSource.includes("function toggleAllProjects"), "missing all-projects toggle handler");
+  assert.ok(
+    appSource.includes("collapsedProjects[group.root] !== false"),
+    "projects must start collapsed unless explicitly expanded",
+  );
   assert.ok(appSource.includes('className="project-collapse"'), "missing project collapse button");
   assert.ok(appSource.includes('className="project-select"'), "missing project selection button");
   assert.ok(appSource.includes("aria-expanded={!collapsed}"), "collapse button must expose expanded state");
@@ -29,12 +40,16 @@ async function main() {
 
   assert.ok(cssSource.includes(".project-collapse"), "missing project collapse styles");
   assert.ok(cssSource.includes(".project-select"), "missing project selection styles");
+  assert.ok(cssSource.includes(".projects-toggle-button"), "missing projects toggle styles");
+  assert.ok(cssSource.includes(".projects-toggle-icon.is-expanded"), "missing projects toggle animation");
   assert.ok(
     cssSource.includes(".project-chevron.is-collapsed"),
     "missing collapsed chevron rotation style",
   );
   assert.ok(i18nSource.includes('"action.collapseProject"'), "missing collapse localization key");
   assert.ok(i18nSource.includes('"action.expandProject"'), "missing expand localization key");
+  assert.ok(i18nSource.includes('"action.collapseAllProjects"'), "missing all-projects collapse localization key");
+  assert.ok(i18nSource.includes('"action.expandAllProjects"'), "missing all-projects expand localization key");
   assert.ok(i18nSource.includes("Collapse project sessions"), "missing English collapse label");
   assert.ok(i18nSource.includes("折叠项目会话"), "missing Chinese collapse label");
 

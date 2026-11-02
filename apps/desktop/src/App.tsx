@@ -741,6 +741,24 @@ interface ModelRouteEntry {
   modelOverride: string;
 }
 
+/** Include enabled route aliases even when the provider hides them from /models. */
+function mergeProviderModels(
+  models: ProviderModel[],
+  routeEntries: ModelRouteEntry[],
+  providerId: string | undefined,
+): ProviderModel[] {
+  if (!providerId) return models;
+  const merged = new Map(models.map((model) => [model.id, model]));
+  for (const entry of routeEntries) {
+    if (!entry.enabled || entry.providerId !== providerId) continue;
+    const id = entry.model.trim().toLowerCase();
+    if (id && !merged.has(id)) {
+      merged.set(id, { id, owned_by: "model-route" });
+    }
+  }
+  return Array.from(merged.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
 function modelRouteEntriesFromMap(
   value: Record<string, ModelRoute[]> | undefined | null,
 ): ModelRouteEntry[] {
@@ -1047,6 +1065,27 @@ function ProjectChevronIcon({ collapsed }: { collapsed: boolean }) {
         d="m4 6 4 4 4-4"
         stroke="currentColor"
         strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ProjectsToggleIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      className={`projects-toggle-icon ${collapsed ? "is-collapsed" : "is-expanded"}`}
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="m4 5 4 4 4-4M4 9l4 4 4-4"
+        stroke="currentColor"
+        strokeWidth="1.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -1875,7 +1914,18 @@ export function App() {
     () => providers.find((item) => item.id === selectedProviderId) ?? activeProvider,
     [activeProvider, providers, selectedProviderId],
   );
-  const selectedProviderModels = selectedProvider ? providerModelsById[selectedProvider.id] ?? [] : [];
+  const visibleAvailableModels = useMemo(
+    () => mergeProviderModels(availableModels, modelRouteEntries, activeProvider?.id),
+    [activeProvider?.id, availableModels, modelRouteEntries],
+  );
+  const selectedProviderModels = useMemo(
+    () => mergeProviderModels(
+      selectedProvider ? providerModelsById[selectedProvider.id] ?? [] : [],
+      modelRouteEntries,
+      selectedProvider?.id,
+    ),
+    [modelRouteEntries, providerModelsById, selectedProvider],
+  );
   const providerKeyStatusById = useMemo(() => {
     const map = new Map<string, ProviderKeyStatus>();
     for (const status of providerKeyStatuses) {
@@ -1982,6 +2032,9 @@ export function App() {
         diskProjects.filter((project) => !hiddenProjectSet.has(normalizeRoot(project.path))),
       ),
     [sessions, diskProjects, hiddenProjectSet],
+  );
+  const allProjectsCollapsed = projectGroups.every(
+    (group) => collapsedProjects[group.root] !== false,
   );
 
   const envSources = useMemo<SourceItem[]>(
@@ -3082,7 +3135,18 @@ export function App() {
   }
 
   function toggleProjectCollapsed(root: string): void {
-    setCollapsedProjects((current) => ({ ...current, [root]: !current[root] }));
+    setCollapsedProjects((current) => ({ ...current, [root]: current[root] === false }));
+  }
+
+  function toggleAllProjects(): void {
+    const collapse = !allProjectsCollapsed;
+    setCollapsedProjects((current) => {
+      const next = { ...current };
+      for (const group of projectGroups) {
+        next[group.root] = collapse;
+      }
+      return next;
+    });
   }
 
   function openTerminalPanel(seedCommand?: string): void {
@@ -4560,8 +4624,8 @@ export function App() {
   const modelMissing = !model.trim();
   const modelNotInList =
     !!model.trim() &&
-    availableModels.length > 0 &&
-    !availableModels.some((entry) => entry.id === model.trim());
+    visibleAvailableModels.length > 0 &&
+    !visibleAvailableModels.some((entry) => entry.id === model.trim());
   const queueMode = !!(isRunning || activeSession?.status === "running" || activeSession?.status === "need_user");
   const hasComposerContent = !!(prompt.trim() || composerImages.length > 0 || composerTextFiles.length > 0);
   const providerMissing = providerCredentialsMissing(providerStatus, activeProvider);
@@ -6427,19 +6491,32 @@ export function App() {
           </div>
           <div className="projects-header-row">
             <p className="panel-title session-list-title">{t(locale, "field.projects")}</p>
-            <button
-              type="button"
-              className="quiet-button projects-add-button"
-              onClick={() => {
-                setError(null);
-                setCreateProjectName("");
-                setCreateProjectOpen(true);
-              }}
-              aria-label={t(locale, "action.createProject")}
-              title={t(locale, "action.createProject")}
-            >
-              +
-            </button>
+            <div className="projects-header-actions">
+              <button
+                type="button"
+                className="quiet-button projects-toggle-button"
+                onClick={toggleAllProjects}
+                aria-expanded={!allProjectsCollapsed}
+                aria-label={t(locale, allProjectsCollapsed ? "action.expandAllProjects" : "action.collapseAllProjects")}
+                title={t(locale, allProjectsCollapsed ? "action.expandAllProjects" : "action.collapseAllProjects")}
+                disabled={projectGroups.length === 0}
+              >
+                <ProjectsToggleIcon collapsed={allProjectsCollapsed} />
+              </button>
+              <button
+                type="button"
+                className="quiet-button projects-add-button"
+                onClick={() => {
+                  setError(null);
+                  setCreateProjectName("");
+                  setCreateProjectOpen(true);
+                }}
+                aria-label={t(locale, "action.createProject")}
+                title={t(locale, "action.createProject")}
+              >
+                +
+              </button>
+            </div>
           </div>
           {projectGroups.length === 0 ? (
             <div className="empty-state projects-empty">
@@ -6458,7 +6535,7 @@ export function App() {
             </div>
           ) : null}
           {projectGroups.map((group) => {
-            const collapsed = !!collapsedProjects[group.root];
+            const collapsed = collapsedProjects[group.root] !== false;
             const isCurrentProject =
               !activeIsChat &&
               normalizeRoot(group.root) === normalizeRoot(workspaceRoot);
@@ -7029,7 +7106,7 @@ export function App() {
                   }
                   void persistComposerPrefs(next, reasoningEffort);
                 }}
-                disabled={isSavingConfig || (modelsLoading && availableModels.length === 0)}
+                disabled={isSavingConfig || (modelsLoading && visibleAvailableModels.length === 0)}
                 title={t(locale, "field.model")}
                 aria-label={t(locale, "field.model")}
               >
@@ -7043,7 +7120,7 @@ export function App() {
                     {model} ({t(locale, "models.notInList")})
                   </option>
                 ) : null}
-                {availableModels.map((entry) => (
+                {visibleAvailableModels.map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.id}
                   </option>

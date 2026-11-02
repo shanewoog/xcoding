@@ -426,13 +426,34 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   margin: 0;
   position: static;
 }
+.projects-header-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.25rem;
+}
+.projects-toggle-button,
 .projects-add-button {
   flex: 0 0 auto;
+  min-width: 2rem;
+  padding: 0.25rem 0.45rem;
+}
+.projects-toggle-button {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+}
+.projects-toggle-icon {
+  display: block;
+  transition: transform 120ms ease;
+}
+.projects-toggle-icon.is-expanded {
+  transform: rotate(180deg);
+}
+.projects-add-button {
   font-size: 1.05rem;
   font-weight: 700;
   line-height: 1;
-  min-width: 2rem;
-  padding: 0.25rem 0.45rem;
 }
 .projects-empty {
   display: grid;
