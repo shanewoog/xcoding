@@ -17,8 +17,8 @@ use xcoding_protocol::{
     JsonRpcRequest, JsonRpcResponse, ListSessionsParams, ListSessionsResult, LocalMemory, Message,
     MessageRole, ModelCallReport, PendingAction, PendingActionStatus, PersistedSessionEvent,
     PingResult, ReplaySessionParams, ReplaySessionResult, ReplayStep, RestorePoint, RpcError,
-    Session, SessionDetail, SessionEvent, SessionStatus, SetConfigParams, SetConfigResult,
-    TaskSummary, ToolCall, ToolName, WorkspaceConfig,
+    Session, SessionDetail, SessionDisplayDetail, SessionEvent, SessionMessagePage, SessionStatus,
+    SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName, WorkspaceConfig,
 };
 pub use xcoding_store::{RedactionReport, StoredVisionDescription};
 use xcoding_store::{SessionStore, StoreError};
@@ -663,12 +663,62 @@ impl CoreService {
         })
     }
 
+    pub fn session_display_detail(
+        &self,
+        session_id: uuid::Uuid,
+        page_offset: Option<usize>,
+        page_size: usize,
+    ) -> Result<SessionDisplayDetail, CoreError> {
+        let session = self.session(session_id)?;
+        let total_messages = self.store.count_messages(session_id)?;
+        let offset = page_offset.unwrap_or_else(|| total_messages.saturating_sub(page_size));
+        let page = self
+            .store
+            .list_message_previews_page(session_id, offset, page_size)?;
+        Ok(SessionDisplayDetail {
+            session,
+            page,
+            pending_actions: self.store.list_pending_actions(session_id)?,
+            restore_points: self.store.list_restore_points(session_id)?,
+            events: self.store.list_events(session_id)?,
+        })
+    }
+
+    pub fn session_message_page(
+        &self,
+        session_id: uuid::Uuid,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SessionMessagePage, CoreError> {
+        self.store
+            .list_message_previews_page(session_id, offset, limit)
+            .map_err(CoreError::from)
+    }
+
+    pub fn session_events(
+        &self,
+        session_id: uuid::Uuid,
+    ) -> Result<Vec<PersistedSessionEvent>, CoreError> {
+        self.store.list_events(session_id).map_err(CoreError::from)
+    }
+
+    pub fn open_tool_output_attachment(
+        &self,
+        session_id: uuid::Uuid,
+        message_id: uuid::Uuid,
+    ) -> Result<PathBuf, CoreError> {
+        self.store
+            .open_tool_output_attachment(session_id, message_id)
+            .map_err(CoreError::from)
+    }
+
     pub fn session_replay(&self, session_id: uuid::Uuid) -> Result<ReplaySessionResult, CoreError> {
-        let detail = self.session_detail(session_id)?;
+        let session = self.session(session_id)?;
+        let events = self.store.list_events(session_id)?;
         Ok(ReplaySessionResult {
-            session: detail.session,
-            events: detail.events.clone(),
-            steps: build_replay_steps(&detail.events),
+            session,
+            steps: build_replay_steps(&events),
+            events,
         })
     }
 
@@ -1706,6 +1756,55 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn desktop_session_details_return_bounded_history_pages() {
+        let database =
+            std::env::temp_dir().join(format!("xcoding-history-{}.db", uuid::Uuid::new_v4()));
+        let attachments = database.with_file_name(format!(
+            "{}.tool-outputs",
+            database.file_stem().unwrap().to_string_lossy()
+        ));
+        let core = CoreService::open(&database).expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "first message".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("test-model".to_owned()),
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("session starts");
+        core.record_tool_message(session.id, "x".repeat(300 * 1024))
+            .expect("large legacy tool output saves");
+        for index in 0..54 {
+            core.record_assistant_message(session.id, format!("answer {index}"))
+                .expect("message saves");
+        }
+
+        let latest = core
+            .session_display_detail(session.id, None, 50)
+            .expect("latest display page loads");
+        assert_eq!(latest.page.total_messages, 56);
+        assert_eq!(latest.page.offset, 6);
+        assert_eq!(latest.page.messages.len(), 50);
+        let earlier = core
+            .session_message_page(session.id, 0, 6)
+            .expect("earlier display page loads");
+        let large_output = earlier
+            .messages
+            .iter()
+            .find(|message| message.content_bytes == (300 * 1024) as u64)
+            .expect("large tool output is included in the earlier page");
+        assert!(large_output.content.len() <= 16 * 1024 + 64);
+        assert!(large_output.full_output_available);
+        drop(core);
+        let _ = std::fs::remove_file(database);
+        let _ = std::fs::remove_dir_all(attachments);
     }
 
     #[test]

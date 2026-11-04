@@ -34,8 +34,8 @@ use xcoding_protocol::{
     ModelCallReport, ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus,
     ProviderWireApi, RenameProjectParams, RenameProjectResult, ReplaySessionResult,
     ResolveActionParams, ResolveActionResult, RollbackRestorePointParams,
-    RollbackRestorePointResult, Session, SessionDetail, SetConfigParams, UserConfig,
-    WorkspaceConfig,
+    RollbackRestorePointResult, Session, SessionDisplayDetail, SessionMessagePage,
+    PersistedSessionEvent, SetConfigParams, UserConfig, WorkspaceConfig,
 };
 use xcoding_providers::{
     apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models_with_wire_api,
@@ -618,11 +618,48 @@ fn set_workspace_config(
 }
 
 #[tauri::command]
-fn session_detail(app: AppHandle, session_id: String) -> Result<SessionDetail, String> {
+fn session_detail(
+    app: AppHandle,
+    session_id: String,
+    page_offset: Option<usize>,
+    page_size: Option<usize>,
+) -> Result<SessionDisplayDetail, String> {
     let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
     open_core(&app)?
-        .session_detail(session_id)
+        .session_display_detail(session_id, page_offset, page_size.unwrap_or(50))
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn session_message_page(
+    app: AppHandle,
+    session_id: String,
+    offset: usize,
+    limit: usize,
+) -> Result<SessionMessagePage, String> {
+    let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
+    open_core(&app)?
+        .session_message_page(session_id, offset, limit)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn session_events(app: AppHandle, session_id: String) -> Result<Vec<PersistedSessionEvent>, String> {
+    let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
+    open_core(&app)?
+        .session_events(session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn show_tool_output_attachment(app: AppHandle, session_id: String, message_id: String) -> Result<(), String> {
+    let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
+    let message_id = uuid::Uuid::parse_str(&message_id).map_err(|error| error.to_string())?;
+    let path = open_core(&app)?
+        .open_tool_output_attachment(session_id, message_id)
+        .map_err(|error| error.to_string())?;
+    let directory = path.parent().ok_or_else(|| "attachment directory is unavailable".to_owned())?;
+    workspace_tools::open_path(directory.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -992,6 +1029,9 @@ fn main() {
             clear_local_memories,
             redact_historical_secrets,
             session_detail,
+            session_message_page,
+            session_events,
+            show_tool_output_attachment,
             session_replay,
             model_call_report,
             request_logs::query_model_request_logs,

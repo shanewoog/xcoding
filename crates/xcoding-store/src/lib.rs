@@ -1,19 +1,25 @@
 //! SQLite persistence for XCoding sessions and messages.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, FixedOffset, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_protocol::{
     ContextCompaction, ContextWindow, CreateSessionParams, KeyCallReport, LocalMemory,
     MAX_CONTEXT_TOOL_LIMIT, MAX_LOCAL_MEMORY_CHARS, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole,
     ModelCallReport, ModelCallReportEntry, PendingAction, PendingActionStatus,
-    PersistedSessionEvent, ProviderCallReport, RestorePoint, Session, SessionEvent, SessionStatus,
-    ToolCall, WorkspaceConfig,
+    PersistedSessionEvent, ProviderCallReport, RestorePoint, Session, SessionEvent,
+    SessionMessagePage, SessionMessagePreview, SessionStatus, ToolCall, WorkspaceConfig,
 };
+
+const TOOL_OUTPUT_ATTACHMENT_THRESHOLD: usize = 256 * 1024;
+const TOOL_OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
+const SESSION_MESSAGE_PAGE_SIZE: usize = 50;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -25,12 +31,15 @@ pub enum StoreError {
     Timestamp(#[from] chrono::ParseError),
     #[error("invalid stored identifier: {0}")]
     Identifier(#[from] uuid::Error),
+    #[error("file operation failed: {0}")]
+    Io(#[from] std::io::Error),
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }
 
 pub struct SessionStore {
     connection: Connection,
+    attachment_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -79,6 +88,75 @@ fn title_from_message(message: &str) -> String {
     out
 }
 
+fn attachment_dir_for_database(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("xcoding");
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}.tool-outputs"))
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), StoreError> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&source_path, &destination_path)?;
+        } else {
+            fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn tool_output_preview(bytes: &[u8]) -> String {
+    let end = bytes.len().min(TOOL_OUTPUT_PREVIEW_BYTES);
+    let prefix = String::from_utf8_lossy(&bytes[..end]);
+    format!("{prefix}\n\n[XCoding saved the full tool output as a local attachment.]")
+}
+
+fn write_attachment_atomically(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let temporary = path.with_extension(format!("redact-{}", Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(StoreError::Io(error));
+    }
+    Ok(())
+}
+
+fn preview_to_message(preview: SessionMessagePreview) -> Message {
+    Message {
+        id: preview.id,
+        session_id: preview.session_id,
+        role: preview.role,
+        content: preview.content,
+        created_at: preview.created_at,
+    }
+}
+
+fn remove_files(paths: Vec<PathBuf>) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
 impl SessionStore {
     fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
         // Multi-session desktop runs open one CoreService/connection per agent worker.
@@ -92,15 +170,22 @@ impl SessionStore {
     pub fn in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
         Self::configure_connection(&connection)?;
-        let store = Self { connection };
+        let store = Self {
+            connection,
+            attachment_dir: None,
+        };
         store.migrate()?;
         Ok(store)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
         let connection = Connection::open(path)?;
         Self::configure_connection(&connection)?;
-        let store = Self { connection };
+        let store = Self {
+            connection,
+            attachment_dir: Some(attachment_dir_for_database(path)),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -113,9 +198,21 @@ impl SessionStore {
                 path.display()
             )));
         }
-        let path = path.to_string_lossy().replace('\'', "''");
+        let attachment_destination = attachment_dir_for_database(path);
+        if self.attachment_dir.as_ref().is_some_and(|dir| dir.exists())
+            && attachment_destination.exists()
+        {
+            return Err(StoreError::InvalidInput(format!(
+                "backup attachment directory already exists: {}",
+                attachment_destination.display()
+            )));
+        }
+        let backup_path = path.to_string_lossy().replace('\'', "''");
         self.connection
-            .execute_batch(&format!("VACUUM INTO '{}'", path))?;
+            .execute_batch(&format!("VACUUM INTO '{}'", backup_path))?;
+        if let Some(source) = self.attachment_dir.as_ref().filter(|dir| dir.exists()) {
+            copy_dir_all(source, &attachment_destination)?;
+        }
         Ok(())
     }
 
@@ -125,6 +222,7 @@ impl SessionStore {
     ) -> Result<RedactionReport, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
         let mut report = RedactionReport::default();
+        let mut redacted_message_ids = BTreeSet::new();
 
         {
             let mut statement = transaction.prepare("SELECT id, content FROM messages")?;
@@ -140,6 +238,39 @@ impl SessionStore {
                         "UPDATE messages SET content = ?1 WHERE id = ?2",
                         params![redacted, id],
                     )?;
+                    report.messages_redacted += 1;
+                    redacted_message_ids.insert(id);
+                }
+            }
+        }
+
+        if let Some(root) = self.attachment_dir.as_ref() {
+            let attachments = {
+                let mut statement = transaction.prepare(
+                    "SELECT message_id, relative_path, byte_length FROM tool_output_attachments",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for (message_id, relative_path, _) in attachments {
+                let path = root.join(relative_path);
+                let content = fs::read_to_string(&path)?;
+                let redacted = redact(&content);
+                if redacted == content {
+                    continue;
+                }
+                write_attachment_atomically(&path, redacted.as_bytes())?;
+                transaction.execute(
+                    "UPDATE tool_output_attachments SET byte_length = ?1 WHERE message_id = ?2",
+                    params![redacted.len() as i64, message_id],
+                )?;
+                if redacted_message_ids.insert(message_id) {
                     report.messages_redacted += 1;
                 }
             }
@@ -320,8 +451,13 @@ impl SessionStore {
 
     pub fn delete_session(&self, id: Uuid) -> Result<bool, StoreError> {
         let id = id.to_string();
+        let attachment_paths = self.attachment_paths_for_session_text(&id)?;
         self.connection.execute(
             "DELETE FROM context_windows WHERE session_id = ?1",
+            params![id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM tool_output_attachments WHERE session_id = ?1",
             params![id],
         )?;
         self.connection
@@ -347,6 +483,7 @@ impl SessionStore {
         let deleted = self
             .connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        remove_files(attachment_paths);
         Ok(deleted > 0)
     }
 
@@ -371,6 +508,13 @@ impl SessionStore {
                 })
                 .collect::<Vec<_>>()
         };
+        let attachment_paths = session_ids
+            .iter()
+            .map(|id| self.attachment_paths_for_session_text(id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
 
         for id in &session_ids {
             transaction.execute(
@@ -378,6 +522,10 @@ impl SessionStore {
                 params![id],
             )?;
             transaction.execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
+            transaction.execute(
+                "DELETE FROM tool_output_attachments WHERE session_id = ?1",
+                params![id],
+            )?;
             transaction.execute(
                 "DELETE FROM pending_actions WHERE session_id = ?1",
                 params![id],
@@ -415,7 +563,26 @@ impl SessionStore {
         }
 
         transaction.commit()?;
+        remove_files(attachment_paths);
         Ok(session_ids.len())
+    }
+
+    fn attachment_paths_for_session_text(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PathBuf>, StoreError> {
+        let Some(root) = self.attachment_dir.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut statement = self
+            .connection
+            .prepare("SELECT relative_path FROM tool_output_attachments WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|relative| root.join(relative))
+            .collect())
     }
 
     pub fn append_message(
@@ -424,15 +591,28 @@ impl SessionStore {
         role: MessageRole,
         content: impl Into<String>,
     ) -> Result<Message, StoreError> {
-        let message = Message {
+        let content = content.into();
+        let mut message = Message {
             id: Uuid::new_v4(),
             session_id,
             role,
-            content: content.into(),
+            content: content.clone(),
             created_at: Utc::now(),
         };
 
-        self.connection.execute(
+        let attachment_path = if message.role == MessageRole::Tool
+            && content.len() > TOOL_OUTPUT_ATTACHMENT_THRESHOLD
+            && self.attachment_dir.is_some()
+        {
+            let path =
+                self.write_tool_output_attachment(session_id, message.id, content.as_bytes())?;
+            message.content = tool_output_preview(content.as_bytes());
+            Some(path)
+        } else {
+            None
+        };
+
+        if let Err(error) = self.connection.execute(
             "INSERT INTO messages (id, session_id, role, content, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -442,19 +622,338 @@ impl SessionStore {
                 message.content,
                 message.created_at.to_rfc3339(),
             ],
-        )?;
+        ) {
+            if let Some(path) = attachment_path.as_ref() {
+                let _ = fs::remove_file(path);
+            }
+            return Err(StoreError::Database(error));
+        }
+        if let Some(path) = attachment_path {
+            let relative_path = self.relative_attachment_path(session_id, message.id)?;
+            if let Err(error) = self.connection.execute(
+                "INSERT INTO tool_output_attachments (message_id, session_id, relative_path, byte_length)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![message.id.to_string(), session_id.to_string(), relative_path, content.len() as i64],
+            ) {
+                let _ = fs::remove_file(path);
+                let _ = self.connection.execute("DELETE FROM messages WHERE id = ?1", [message.id.to_string()]);
+                return Err(StoreError::Database(error));
+            }
+        }
 
         Ok(message)
     }
 
     pub fn list_messages(&self, session_id: Uuid) -> Result<Vec<Message>, StoreError> {
+        let total = self.count_messages(session_id)?;
+        let mut messages = Vec::with_capacity(total);
+        for offset in (0..total).step_by(SESSION_MESSAGE_PAGE_SIZE) {
+            let page =
+                self.list_message_previews_page(session_id, offset, SESSION_MESSAGE_PAGE_SIZE)?;
+            messages.extend(page.messages.into_iter().map(preview_to_message));
+        }
+        Ok(messages)
+    }
+
+    pub fn list_message_previews_page(
+        &self,
+        session_id: Uuid,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SessionMessagePage, StoreError> {
+        validate_context_tool_page(offset, limit)?;
+        let total_messages = self.count_messages(session_id)?;
         let mut statement = self.connection.prepare(
-            "SELECT id, session_id, role, content, created_at
-             FROM messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
+            "SELECT rowid, id, session_id, role, created_at
+             FROM messages WHERE session_id = ?1
+             ORDER BY created_at ASC, rowid ASC LIMIT ?2 OFFSET ?3",
         )?;
-        let rows = statement.query_map([session_id.to_string()], Self::row_to_message)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        let rows = statement.query_map(
+            params![session_id.to_string(), limit as i64, offset as i64],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut messages = Vec::with_capacity(rows.len());
+        for (rowid, id, session_id, role, created_at) in rows {
+            let id = Uuid::parse_str(&id)?;
+            let session_id = Uuid::parse_str(&session_id)?;
+            let role: MessageRole = serde_json::from_str(&role)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc);
+            messages.push(self.message_preview(rowid, id, session_id, role, created_at)?);
+        }
+        Ok(SessionMessagePage {
+            messages,
+            offset,
+            total_messages,
+            has_older_messages: offset > 0,
+        })
+    }
+
+    pub fn open_tool_output_attachment(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<PathBuf, StoreError> {
+        if let Some(path) = self.find_tool_output_attachment(session_id, message_id)? {
+            return Ok(path);
+        }
+        let rowid: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT rowid FROM messages WHERE session_id = ?1 AND id = ?2 AND role = ?3",
+                params![
+                    session_id.to_string(),
+                    message_id.to_string(),
+                    serde_json::to_string(&MessageRole::Tool)?
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let rowid = rowid.ok_or_else(|| {
+            StoreError::InvalidInput("tool output attachment not found".to_owned())
+        })?;
+        self.migrate_legacy_tool_output(rowid, session_id, message_id)?;
+        self.find_tool_output_attachment(session_id, message_id)?
+            .ok_or_else(|| {
+                StoreError::InvalidInput("tool output is too small to export".to_owned())
+            })
+    }
+
+    fn message_preview(
+        &self,
+        rowid: i64,
+        id: Uuid,
+        session_id: Uuid,
+        role: MessageRole,
+        created_at: DateTime<Utc>,
+    ) -> Result<SessionMessagePreview, StoreError> {
+        if let Some((path, byte_length)) =
+            self.find_tool_output_attachment_with_size(session_id, id)?
+        {
+            let content: String = self.connection.query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?;
+            let _ = path;
+            return Ok(SessionMessagePreview {
+                id,
+                session_id,
+                role,
+                content,
+                created_at,
+                content_bytes: byte_length,
+                full_output_available: true,
+            });
+        }
+
+        let mut blob = self
+            .connection
+            .blob_open(MAIN_DB, "messages", "content", rowid, true)?;
+        let byte_length = blob.len();
+        if role == MessageRole::Tool && byte_length > TOOL_OUTPUT_ATTACHMENT_THRESHOLD {
+            drop(blob);
+            self.migrate_legacy_tool_output(rowid, session_id, id)?;
+            let content: String = self.connection.query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?;
+            return Ok(SessionMessagePreview {
+                id,
+                session_id,
+                role,
+                content,
+                created_at,
+                content_bytes: byte_length as u64,
+                full_output_available: true,
+            });
+        }
+
+        let preview_size = byte_length.min(TOOL_OUTPUT_PREVIEW_BYTES);
+        let mut bytes = vec![0; preview_size];
+        blob.read_exact(&mut bytes)?;
+        let content = if byte_length > TOOL_OUTPUT_PREVIEW_BYTES {
+            format!(
+                "{}\n\n[Message preview truncated.]",
+                String::from_utf8_lossy(&bytes)
+            )
+        } else {
+            String::from_utf8(bytes).map_err(|error| StoreError::InvalidInput(error.to_string()))?
+        };
+        Ok(SessionMessagePreview {
+            id,
+            session_id,
+            role,
+            content,
+            created_at,
+            content_bytes: byte_length as u64,
+            full_output_available: false,
+        })
+    }
+
+    fn migrate_legacy_tool_output(
+        &self,
+        rowid: i64,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<(), StoreError> {
+        if self
+            .find_tool_output_attachment(session_id, message_id)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let Some(_) = self.attachment_dir else {
+            return Ok(());
+        };
+        let (path, byte_length, prefix) =
+            self.write_tool_output_from_blob(rowid, session_id, message_id)?;
+        if byte_length <= TOOL_OUTPUT_ATTACHMENT_THRESHOLD as u64 {
+            let _ = fs::remove_file(path);
+            return Ok(());
+        }
+        let content = tool_output_preview(&prefix);
+        let relative_path = self.relative_attachment_path(session_id, message_id)?;
+        let persisted = (|| -> Result<(), StoreError> {
+            let transaction = self.connection.unchecked_transaction()?;
+            transaction.execute(
+                "INSERT INTO tool_output_attachments (message_id, session_id, relative_path, byte_length)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![message_id.to_string(), session_id.to_string(), relative_path, byte_length as i64],
+            )?;
+            transaction.execute(
+                "UPDATE messages SET content = ?1 WHERE id = ?2",
+                params![content, message_id.to_string()],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        if let Err(error) = persisted {
+            let _ = fs::remove_file(path);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn write_tool_output_attachment(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+        bytes: &[u8],
+    ) -> Result<PathBuf, StoreError> {
+        let final_path = self.attachment_path(session_id, message_id)?;
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| StoreError::InvalidInput("attachment path has no parent".to_owned()))?;
+        fs::create_dir_all(parent)?;
+        let temp_path = final_path.with_extension(format!("txt.tmp-{}", Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp_path, &final_path)?;
+        Ok(final_path)
+    }
+
+    fn write_tool_output_from_blob(
+        &self,
+        rowid: i64,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<(PathBuf, u64, Vec<u8>), StoreError> {
+        let final_path = self.attachment_path(session_id, message_id)?;
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| StoreError::InvalidInput("attachment path has no parent".to_owned()))?;
+        fs::create_dir_all(parent)?;
+        let temp_path = final_path.with_extension(format!("txt.tmp-{}", Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        let mut blob = self
+            .connection
+            .blob_open(MAIN_DB, "messages", "content", rowid, true)?;
+        let byte_length = blob.len() as u64;
+        let mut prefix = Vec::with_capacity(TOOL_OUTPUT_PREVIEW_BYTES);
+        let mut buffer = vec![0; 1024 * 1024];
+        loop {
+            let read = blob.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read])?;
+            let needed = TOOL_OUTPUT_PREVIEW_BYTES
+                .saturating_sub(prefix.len())
+                .min(read);
+            prefix.extend_from_slice(&buffer[..needed]);
+        }
+        drop(blob);
+        file.sync_all()?;
+        fs::rename(&temp_path, &final_path)?;
+        Ok((final_path, byte_length, prefix))
+    }
+
+    fn attachment_path(&self, session_id: Uuid, message_id: Uuid) -> Result<PathBuf, StoreError> {
+        let root = self.attachment_dir.as_ref().ok_or_else(|| {
+            StoreError::InvalidInput(
+                "attachments are unavailable for an in-memory store".to_owned(),
+            )
+        })?;
+        Ok(root
+            .join(session_id.to_string())
+            .join(format!("{message_id}.txt")))
+    }
+
+    fn relative_attachment_path(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<String, StoreError> {
+        Ok(format!("{session_id}/{message_id}.txt"))
+    }
+
+    fn find_tool_output_attachment(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<Option<PathBuf>, StoreError> {
+        Ok(self
+            .find_tool_output_attachment_with_size(session_id, message_id)?
+            .map(|(path, _)| path))
+    }
+
+    fn find_tool_output_attachment_with_size(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<Option<(PathBuf, u64)>, StoreError> {
+        let entry: Option<(String, i64)> = self.connection.query_row(
+            "SELECT relative_path, byte_length FROM tool_output_attachments WHERE session_id = ?1 AND message_id = ?2",
+            params![session_id.to_string(), message_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        entry
+            .map(|(relative, length)| {
+                let root = self.attachment_dir.as_ref().ok_or_else(|| {
+                    StoreError::InvalidInput(
+                        "attachments are unavailable for an in-memory store".to_owned(),
+                    )
+                })?;
+                Ok((root.join(relative), u64::try_from(length).unwrap_or(0)))
+            })
+            .transpose()
     }
 
     pub fn count_messages(&self, session_id: Uuid) -> Result<usize, StoreError> {
@@ -564,18 +1063,12 @@ impl SessionStore {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<Message>, StoreError> {
-        validate_context_tool_page(offset, limit)?;
-        let mut statement = self.connection.prepare(
-            "SELECT id, session_id, role, content, created_at
-             FROM messages WHERE session_id = ?1
-             ORDER BY created_at ASC, rowid ASC LIMIT ?2 OFFSET ?3",
-        )?;
-        let rows = statement.query_map(
-            params![session_id.to_string(), limit as i64, offset as i64],
-            Self::row_to_message,
-        )?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        Ok(self
+            .list_message_previews_page(session_id, offset, limit)?
+            .messages
+            .into_iter()
+            .map(preview_to_message)
+            .collect())
     }
 
     pub fn get_session_message(
@@ -583,15 +1076,65 @@ impl SessionStore {
         session_id: Uuid,
         message_id: Uuid,
     ) -> Result<Option<Message>, StoreError> {
-        self.connection
+        let row: Option<(i64, String, String, String, String)> = self
+            .connection
             .query_row(
-                "SELECT id, session_id, role, content, created_at
-                 FROM messages WHERE session_id = ?1 AND id = ?2",
+                "SELECT rowid, id, session_id, role, created_at
+             FROM messages WHERE session_id = ?1 AND id = ?2",
                 params![session_id.to_string(), message_id.to_string()],
-                Self::row_to_message,
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
-            .optional()
-            .map_err(StoreError::from)
+            .optional()?;
+        let Some((rowid, id, session_id_text, role_text, created_at_text)) = row else {
+            return Ok(None);
+        };
+        let id = Uuid::parse_str(&id)?;
+        let session_id = Uuid::parse_str(&session_id_text)?;
+        let role: MessageRole = serde_json::from_str(&role_text)?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at_text)?.with_timezone(&Utc);
+        let content = if let Some(path) = self.find_tool_output_attachment(session_id, id)? {
+            fs::read_to_string(path)?
+        } else {
+            let blob = self
+                .connection
+                .blob_open(MAIN_DB, "messages", "content", rowid, true)?;
+            if role == MessageRole::Tool
+                && blob.len() > TOOL_OUTPUT_ATTACHMENT_THRESHOLD
+                && self.attachment_dir.is_some()
+            {
+                drop(blob);
+                self.migrate_legacy_tool_output(rowid, session_id, id)?;
+                if let Some(path) = self.find_tool_output_attachment(session_id, id)? {
+                    fs::read_to_string(path)?
+                } else {
+                    return Err(StoreError::InvalidInput(
+                        "tool output attachment could not be created".to_owned(),
+                    ));
+                }
+            } else {
+                drop(blob);
+                self.connection.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )?
+            }
+        };
+        Ok(Some(Message {
+            id,
+            session_id,
+            role,
+            content,
+            created_at,
+        }))
     }
 
     pub fn search_session_messages(
@@ -610,17 +1153,34 @@ impl SessionStore {
         validate_context_tool_page(offset, limit)?;
         let pattern = format!("%{}%", escape_like_pattern(query));
         let mut statement = self.connection.prepare(
-            "SELECT id, session_id, role, content, created_at
+            "SELECT rowid, id, session_id, role, created_at
              FROM messages
              WHERE session_id = ?1 AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE
              ORDER BY created_at ASC, rowid ASC LIMIT ?3 OFFSET ?4",
         )?;
         let rows = statement.query_map(
             params![session_id.to_string(), pattern, limit as i64, offset as i64],
-            Self::row_to_message,
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
         )?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(rowid, id, session_id, role, created_at)| {
+                let id = Uuid::parse_str(&id)?;
+                let session_id = Uuid::parse_str(&session_id)?;
+                let role: MessageRole = serde_json::from_str(&role)?;
+                let created_at = DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc);
+                self.message_preview(rowid, id, session_id, role, created_at)
+                    .map(preview_to_message)
+            })
+            .collect()
     }
 
     pub fn list_context_windows(&self, session_id: Uuid) -> Result<Vec<ContextWindow>, StoreError> {
@@ -1501,6 +2061,20 @@ impl SessionStore {
                 updated_at TEXT NOT NULL
             );",
         )?;
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tool_output_attachments (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                byte_length INTEGER NOT NULL,
+                FOREIGN KEY (message_id) REFERENCES messages(id),
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_session_created
+                ON messages(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_tool_output_attachments_session
+                ON tool_output_attachments(session_id);",
+        )?;
         self.ensure_column("restore_points", "applied_text", "TEXT")?;
         // Added after the first release of the description cache: the delegate
         // model moved out of the cache key so text edits stop invalidating it,
@@ -1516,6 +2090,20 @@ impl SessionStore {
                 status TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );",
+        )?;
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tool_output_attachments (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                byte_length INTEGER NOT NULL,
+                FOREIGN KEY (message_id) REFERENCES messages(id),
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_session_created
+                ON messages(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_tool_output_attachments_session
+                ON tool_output_attachments(session_id);",
         )?;
 
         Ok(())
@@ -1842,6 +2430,145 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
 mod tests {
     use super::*;
     use xcoding_protocol::{Mode, ToolName};
+
+    fn test_session(store: &SessionStore) -> Session {
+        store
+            .create_session(CreateSessionParams {
+                workspace_root: "D:/work/attachments".to_owned(),
+                mode: Mode::Ask,
+                provider: "openai".to_owned(),
+                model: "test-model".to_owned(),
+                title: Some("attachment test".to_owned()),
+            })
+            .expect("session creates")
+    }
+
+    fn temporary_store_path() -> (PathBuf, PathBuf) {
+        let directory = std::env::temp_dir().join(format!("xcoding-store-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("temporary directory creates");
+        let database = directory.join("xcoding.db");
+        (directory, database)
+    }
+
+    #[test]
+    fn oversized_tool_outputs_use_local_attachments_and_keep_explicit_full_read() {
+        let (directory, database) = temporary_store_path();
+        let store = SessionStore::open(&database).expect("persistent store opens");
+        let session = test_session(&store);
+        let content = "tool-output-".repeat(30_000);
+
+        let message = store
+            .append_message(session.id, MessageRole::Tool, content.clone())
+            .expect("large tool output saves");
+        assert!(message.content.len() < TOOL_OUTPUT_ATTACHMENT_THRESHOLD);
+        let page = store
+            .list_message_previews_page(session.id, 0, 50)
+            .expect("preview page loads");
+        let preview = &page.messages[0];
+        assert!(preview.full_output_available);
+        assert_eq!(preview.content_bytes, content.len() as u64);
+        assert!(preview.content.len() < TOOL_OUTPUT_ATTACHMENT_THRESHOLD);
+        assert!(
+            store
+                .list_messages(session.id)
+                .expect("context history stays compact")[0]
+                .content
+                .len()
+                < TOOL_OUTPUT_ATTACHMENT_THRESHOLD
+        );
+
+        let attachment = store
+            .open_tool_output_attachment(session.id, message.id)
+            .expect("attachment path resolves");
+        assert_eq!(
+            fs::read_to_string(&attachment).expect("attachment reads"),
+            content
+        );
+        assert_eq!(
+            store
+                .get_session_message(session.id, message.id)
+                .expect("history read succeeds")
+                .unwrap()
+                .content,
+            content
+        );
+
+        assert!(store.delete_session(session.id).expect("session deletes"));
+        assert!(
+            !attachment.exists(),
+            "session deletion removes its attachment"
+        );
+        drop(store);
+        fs::remove_dir_all(directory).expect("temporary files clean up");
+    }
+
+    #[test]
+    fn legacy_oversized_tool_output_is_streamed_to_an_attachment_on_page_load() {
+        let (directory, database) = temporary_store_path();
+        let store = SessionStore::open(&database).expect("persistent store opens");
+        let session = test_session(&store);
+        let message_id = Uuid::new_v4();
+        let content = "legacy-tool-output-".repeat(24_000);
+        store.connection.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![message_id.to_string(), session.id.to_string(), serde_json::to_string(&MessageRole::Tool).unwrap(), content, Utc::now().to_rfc3339()],
+        ).expect("legacy message inserts");
+
+        let page = store
+            .list_message_previews_page(session.id, 0, 50)
+            .expect("legacy preview page loads");
+        assert!(page.messages[0].full_output_available);
+        assert!(page.messages[0].content.len() < TOOL_OUTPUT_ATTACHMENT_THRESHOLD);
+        let attachment = store
+            .open_tool_output_attachment(session.id, message_id)
+            .expect("legacy output migrates incrementally");
+        assert_eq!(
+            fs::read_to_string(&attachment).expect("legacy file reads"),
+            content
+        );
+        drop(store);
+        fs::remove_dir_all(directory).expect("temporary files clean up");
+    }
+
+    #[test]
+    fn attachments_are_backed_up_and_included_in_historical_secret_redaction() {
+        let (directory, database) = temporary_store_path();
+        let store = SessionStore::open(&database).expect("persistent store opens");
+        let session = test_session(&store);
+        let content = format!("api_key=secret-value {}", "safe-output-".repeat(30_000));
+        let message = store
+            .append_message(session.id, MessageRole::Tool, content)
+            .expect("redacted-path tool output saves");
+        let attachment = store
+            .open_tool_output_attachment(session.id, message.id)
+            .expect("attachment resolves");
+        let backup = directory.join("backup.db");
+        store
+            .backup_to(&backup)
+            .expect("database and attachments back up");
+        let backup_attachment = attachment_dir_for_database(&backup)
+            .join(session.id.to_string())
+            .join(format!("{}.txt", message.id));
+        assert!(backup_attachment.is_file());
+
+        let report = store
+            .redact_historical_secrets(&|value| value.replace("secret-value", "[REDACTED]"))
+            .expect("attachment redaction succeeds");
+        assert_eq!(report.messages_redacted, 1);
+        assert!(
+            !fs::read_to_string(attachment)
+                .expect("redacted attachment reads")
+                .contains("secret-value")
+        );
+        assert!(
+            fs::read_to_string(backup_attachment)
+                .expect("backup attachment reads")
+                .contains("secret-value")
+        );
+
+        drop(store);
+        fs::remove_dir_all(directory).expect("temporary files clean up");
+    }
 
     fn insert_model_call_event(
         store: &SessionStore,

@@ -551,6 +551,26 @@ export interface SessionDetail {
   events: PersistedSessionEvent[];
 }
 
+export interface SessionMessagePreview extends Message {
+  content_bytes: number;
+  full_output_available: boolean;
+}
+
+export interface SessionMessagePage {
+  messages: SessionMessagePreview[];
+  offset: number;
+  total_messages: number;
+  has_older_messages: boolean;
+}
+
+export interface SessionDisplayDetail {
+  session: Session;
+  page: SessionMessagePage;
+  pending_actions: PendingAction[];
+  restore_points: RestorePoint[];
+  events: PersistedSessionEvent[];
+}
+
 export type PlanStepStatus = "pending" | "in_progress" | "done";
 
 export interface PlanStep {

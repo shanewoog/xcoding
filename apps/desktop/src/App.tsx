@@ -22,10 +22,12 @@ import type {
   ResolveActionResult,
   RestorePoint,
   ReplaySessionResult,
+  SessionDisplayDetail,
+  SessionMessagePage,
+  SessionMessagePreview,
   ReplayStep,
   RollbackRestorePointResult,
   Session,
-  SessionDetail,
   SessionEvent,
   TaskSummary,
   CreateProjectResult,
@@ -576,11 +578,13 @@ function splitInlineActivityByMessage(
 }
 
 type ConversationEntry =
-  | { kind: "message"; message: Message }
-  | { kind: "tool-group"; id: string; messages: Message[] };
+  | { kind: "message"; message: ConversationMessage }
+  | { kind: "tool-group"; id: string; messages: ConversationMessage[] };
+
+type ConversationMessage = Message & Partial<Pick<SessionMessagePreview, "content_bytes" | "full_output_available">>;
 
 // Codex-style: consecutive read-only tool results share one collapsed card.
-function groupConversationMessages(messages: Message[]): ConversationEntry[] {
+function groupConversationMessages(messages: ConversationMessage[]): ConversationEntry[] {
   const entries: ConversationEntry[] = [];
   for (const message of messages) {
     if (message.role !== "tool") {
@@ -1137,7 +1141,7 @@ function fileChangeLabel(kind: string, locale: Locale): string {
   return t(locale, "file.modified");
 }
 
-function mergeMessage(messages: Message[], message: Message): Message[] {
+function mergeMessage(messages: ConversationMessage[], message: Message): ConversationMessage[] {
   return messages.some((current) => current.id === message.id) ? messages : [...messages, message];
 }
 
@@ -1154,6 +1158,12 @@ function formatDurationSeconds(seconds: number): string {
   const minutes = Math.floor(wholeSeconds / 60);
   const remainder = wholeSeconds % 60;
   return minutes > 0 ? `${minutes}m ${remainder}s` : `${wholeSeconds}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function isComposerTextFile(file: File): boolean {
@@ -1739,7 +1749,10 @@ export function App() {
     workspaceRootRef.current = normalized;
     setWorkspaceRoot(normalized);
   }, []);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [messagePageOffset, setMessagePageOffset] = useState(0);
+  const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
+  const olderMessagesLoadingRef = useRef(false);
   const [streamedText, setStreamedText] = useState("");
   const [streamedTextBySession, setStreamedTextBySession] = useState<Record<string, string>>({});
   const [plan, setPlan] = useState<PlanStep[]>([]);
@@ -1798,6 +1811,7 @@ export function App() {
   const conversationRef = useRef<HTMLDivElement | null>(null);
   const conversationAtBottomRef = useRef(true);
   const pendingConversationScrollTopRef = useRef<number | null>(null);
+  const pendingHistoryPrependRef = useRef<{ scrollTop: number; scrollHeight: number } | null>(null);
   const pendingConversationScrollToBottomRef = useRef(false);
   const envButtonRef = useRef<HTMLButtonElement | null>(null);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(false);
@@ -2655,11 +2669,12 @@ export function App() {
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
     try {
-      const detail = await invoke<SessionDetail>("session_detail", { sessionId });
+      const detail = await invoke<SessionDisplayDetail>("session_detail", { sessionId, pageSize: 50 });
       const pending = detail.session.status === "need_user"
         ? detail.pending_actions.find((action) => action.status === "pending") ?? null
         : null;
-      setMessages(detail.messages);
+      setMessages(detail.page.messages);
+      setMessagePageOffset(detail.page.offset);
       const latestCompaction = [...detail.events]
         .reverse()
         .map((item) => item.event)
@@ -2705,6 +2720,35 @@ export function App() {
     }
   }, [locale]);
 
+  const loadOlderMessages = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    const node = conversationRef.current;
+    if (!sessionId || !node || messagePageOffset <= 0 || olderMessagesLoadingRef.current) return;
+    const nextOffset = Math.max(0, messagePageOffset - 50);
+    const limit = messagePageOffset - nextOffset;
+    olderMessagesLoadingRef.current = true;
+    setOlderMessagesLoading(true);
+    try {
+      const page = await invoke<SessionMessagePage>("session_message_page", {
+        sessionId,
+        offset: nextOffset,
+        limit,
+      });
+      if (activeSessionIdRef.current !== sessionId) return;
+      pendingHistoryPrependRef.current = { scrollTop: node.scrollTop, scrollHeight: node.scrollHeight };
+      setMessages((current) => {
+        const existing = new Set(current.map((message) => message.id));
+        return [...page.messages.filter((message) => !existing.has(message.id)), ...current];
+      });
+      setMessagePageOffset(page.offset);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      olderMessagesLoadingRef.current = false;
+      setOlderMessagesLoading(false);
+    }
+  }, [messagePageOffset]);
+
   const loadModelCallLogs = useCallback(async (sessionId: string | null = activeSessionId) => {
     if (!sessionId) {
       setModelCallLogs([]);
@@ -2719,9 +2763,9 @@ export function App() {
     setModelCallLogsLoading(true);
     setModelCallLogsError(null);
     try {
-      const detail = await invoke<SessionDetail>("session_detail", { sessionId });
+      const events = await invoke<PersistedSessionEvent[]>("session_events", { sessionId });
       setModelCallLogs(
-        detail.events.filter(
+        events.filter(
           (item): item is ModelCallLog => item.event.type === "model_call",
         ).slice(-50),
       );
@@ -2763,6 +2807,7 @@ export function App() {
   useEffect(() => {
     conversationAtBottomRef.current = true;
     setConversationAtBottom(true);
+    setMessagePageOffset(0);
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -2776,6 +2821,13 @@ export function App() {
     if (view !== "workbench") return;
     const node = conversationRef.current;
     if (!node) return;
+    const historyPrepend = pendingHistoryPrependRef.current;
+    if (historyPrepend) {
+      node.scrollTop = historyPrepend.scrollTop + (node.scrollHeight - historyPrepend.scrollHeight);
+      pendingHistoryPrependRef.current = null;
+      updateConversationBottomState(node);
+      return;
+    }
     if (pendingConversationScrollToBottomRef.current) {
       node.scrollTop = node.scrollHeight;
       conversationAtBottomRef.current = true;
@@ -2790,7 +2842,7 @@ export function App() {
     node.scrollTop = Math.min(scrollTop, maxScrollTop);
     updateConversationBottomState(node);
     pendingConversationScrollTopRef.current = null;
-  }, [updateConversationBottomState, view]);
+  }, [messages, updateConversationBottomState, view]);
 
   useEffect(() => {
     if (view !== "workbench" || typeof ResizeObserver === "undefined") return;
@@ -6835,6 +6887,16 @@ export function App() {
           ref={conversationRef}
           onScroll={(event) => updateConversationBottomState(event.currentTarget)}
         >
+          {messagePageOffset > 0 ? (
+            <button
+              type="button"
+              className="history-load-older"
+              onClick={() => void loadOlderMessages()}
+              disabled={olderMessagesLoading}
+            >
+              {olderMessagesLoading ? t(locale, "history.loadingOlder") : t(locale, "history.loadOlder", { count: String(Math.min(50, messagePageOffset)) })}
+            </button>
+          ) : null}
           {groupConversationMessages(messages).map((entry) => {
             if (entry.kind === "tool-group") {
               return (
@@ -6847,6 +6909,18 @@ export function App() {
                       <section className="tool-message-item" key={message.id}>
                         <span className="message-preview">{toolCardPreview(message.content)}</span>
                         <div className="message-body">{message.content}</div>
+                        {message.full_output_available ? (
+                          <button
+                            type="button"
+                            className="tool-output-attachment"
+                            onClick={() => void invoke("show_tool_output_attachment", {
+                              sessionId: message.session_id,
+                              messageId: message.id,
+                            }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
+                          >
+                            {t(locale, "message.showToolOutput", { size: formatBytes(message.content_bytes ?? 0) })}
+                          </button>
+                        ) : null}
                       </section>
                     ))}
                   </div>

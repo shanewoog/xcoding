@@ -444,6 +444,34 @@ pub struct SessionDetail {
     pub events: Vec<PersistedSessionEvent>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SessionMessagePreview {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub role: MessageRole,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub content_bytes: u64,
+    pub full_output_available: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SessionMessagePage {
+    pub messages: Vec<SessionMessagePreview>,
+    pub offset: usize,
+    pub total_messages: usize,
+    pub has_older_messages: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SessionDisplayDetail {
+    pub session: Session,
+    pub page: SessionMessagePage,
+    pub pending_actions: Vec<PendingAction>,
+    pub restore_points: Vec<RestorePoint>,
+    pub events: Vec<PersistedSessionEvent>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProviderCallReport {
     pub date: String,
