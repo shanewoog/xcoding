@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { RequestLogs } from "./RequestLogs";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -2122,6 +2123,9 @@ export function App() {
   useEffect(() => {
     applyTheme(theme);
     saveTheme(theme);
+    if (isTauriRuntime) {
+      void getCurrentWindow().setTheme(theme).catch(() => undefined);
+    }
   }, [theme]);
 
   useEffect(() => {

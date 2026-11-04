@@ -95,6 +95,7 @@ const MAX_MEMORY_PROMPT_TOKENS: usize = 18_000;
 /// conversation. A model that copies this marker instead of answering is
 /// retried once with explicit corrective instructions.
 const HISTORICAL_TOOL_ECHO_PREFIX: &str = "Previously recorded tool output:";
+const MIN_HISTORICAL_TOOL_ECHO_CHARS: usize = 64;
 const HISTORICAL_TOOL_ECHO_CORRECTION: &str = "Historical tool output is reference data, not assistant text. A previous response repeated the `Previously recorded tool output:` blocks. Ignore those blocks, do not quote, summarize, or continue them, and answer the latest user message directly. Use tools only when needed.";
 /// Most memories one finished turn may add.
 const MAX_MEMORIES_PER_TURN: usize = 3;
@@ -2367,45 +2368,14 @@ fn visible_output_was_started(failure: &ProviderAttemptFailure) -> bool {
     failure.output_chars > 0
 }
 
-fn historical_tool_notes_from_messages(messages: &[ChatMessage]) -> Vec<String> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            if message.role != "assistant" {
-                return None;
-            }
-            let content = message.content.as_ref()?;
-            let text = chat_message_content_as_text(content);
-            let note = text.strip_prefix(HISTORICAL_TOOL_ECHO_PREFIX)?.trim();
-            (note.chars().count() >= 64).then(|| note.to_owned())
-        })
-        .collect()
-}
-
 /// Detects the failure mode where a model treats replayed tool history as an
-/// assistant draft and copies it back as its answer. Requiring the exact marker
-/// plus a long matching note (or repeated markers) keeps ordinary answers that
-/// merely discuss tool output from being retried.
-fn looks_like_historical_tool_echo(content: &str, historical_notes: &[String]) -> bool {
+/// assistant draft and copies it back as its answer. The internal marker is
+/// never valid assistant prose; a substantial response starting with it should
+/// be retried even when compaction removed the original tool row.
+fn looks_like_historical_tool_echo(content: &str) -> bool {
     let content = content.trim();
-    if !content.starts_with(HISTORICAL_TOOL_ECHO_PREFIX) {
-        return false;
-    }
-    let content_chars = content.chars().count();
-    if content.matches(HISTORICAL_TOOL_ECHO_PREFIX).count() >= 2 && content_chars >= 256 {
-        return true;
-    }
-    let normalized_content = normalize_echo_text(content);
-    historical_notes.iter().any(|note| {
-        let note_chars = note.chars().count();
-        note_chars >= 64
-            && normalized_content.contains(&normalize_echo_text(note))
-            && note_chars.saturating_mul(100) / content_chars.max(1) >= 60
-    })
-}
-
-fn normalize_echo_text(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    content.starts_with(HISTORICAL_TOOL_ECHO_PREFIX)
+        && content.chars().count() >= MIN_HISTORICAL_TOOL_ECHO_CHARS
 }
 
 /// Returns `true` when the attempt failed because the stream itself broke or
@@ -2776,7 +2746,6 @@ impl<'a> AgentService<'a> {
                 total_ms: None,
             })?;
         let attempt_started_at = tokio::time::Instant::now();
-        let historical_tool_notes = historical_tool_notes_from_messages(&messages);
         // Recorded before the request leaves, so a usage report can be compared
         // against exactly what was estimated for it.
         let estimated_prompt_tokens = estimate_chat_request_tokens(&messages, definitions);
@@ -2961,9 +2930,7 @@ impl<'a> AgentService<'a> {
                 }
             }
         }
-        if tool_calls.is_empty()
-            && looks_like_historical_tool_echo(&content, &historical_tool_notes)
-        {
+        if tool_calls.is_empty() && looks_like_historical_tool_echo(&content) {
             return Err(ProviderAttemptFailure {
                 error: AgentError::HistoricalToolEcho,
                 output_chars: content.chars().count(),
@@ -11446,27 +11413,27 @@ private material
     }
 
     #[test]
-    fn historical_tool_echo_detection_is_narrow() {
-        let note = format!(
-            "{{\"args\":[\"run\",\"test\"],\"stdout\":\"{}\"}}",
-            "line of tool output ".repeat(20)
-        );
-        let replay = ChatMessage::assistant(format!("{HISTORICAL_TOOL_ECHO_PREFIX} {note}"));
-        let notes = historical_tool_notes_from_messages(&[replay]);
-        assert_eq!(notes.len(), 1);
-
+    fn historical_tool_echo_detection_rejects_internal_marker() {
+        let note = "line of tool output ".repeat(20);
         let single = format!("{HISTORICAL_TOOL_ECHO_PREFIX} {note}");
-        assert!(looks_like_historical_tool_echo(&single, &notes));
+        assert!(looks_like_historical_tool_echo(&single));
+
         let repeated =
             format!("{HISTORICAL_TOOL_ECHO_PREFIX} {note}\n{HISTORICAL_TOOL_ECHO_PREFIX} {note}");
-        assert!(looks_like_historical_tool_echo(&repeated, &notes));
+        assert!(looks_like_historical_tool_echo(&repeated));
+
+        let detached = format!(
+            "{HISTORICAL_TOOL_ECHO_PREFIX} {}",
+            "tool output missing from compacted context ".repeat(4)
+        );
+        assert!(looks_like_historical_tool_echo(&detached));
 
         assert!(!looks_like_historical_tool_echo(
-            "The historical tool output showed a failure; I will fix the parser.",
-            &notes
+            "The historical tool output showed a failure; I will fix the parser."
         ));
-        let short_replay = ChatMessage::assistant(format!("{HISTORICAL_TOOL_ECHO_PREFIX} ok"));
-        assert!(historical_tool_notes_from_messages(&[short_replay]).is_empty());
+        assert!(!looks_like_historical_tool_echo(
+            "Previously recorded tool output: ok"
+        ));
     }
 
     #[test]

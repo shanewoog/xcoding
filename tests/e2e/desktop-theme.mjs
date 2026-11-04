@@ -6,12 +6,13 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 async function main() {
-  const [appearanceSource, appSource, cssSource, indexSource, i18nSource] = await Promise.all([
+  const [appearanceSource, appSource, cssSource, indexSource, i18nSource, capabilitySource] = await Promise.all([
     readFile(resolve(repositoryRoot, "apps/desktop/src/appearance.ts"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/index.html"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8"),
+    readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/capabilities/default.json"), "utf8"),
   ]);
 
   // Two themes, dark stays the default so an existing install looks unchanged.
@@ -33,6 +34,14 @@ async function main() {
   assert.ok(
     appSource.includes("applyTheme(theme);") && appSource.includes("saveTheme(theme);"),
     "changing the theme must apply and persist it",
+  );
+  assert.ok(
+    appSource.includes('from "@tauri-apps/api/window"') && appSource.includes(".setTheme(theme)"),
+    "the selected theme must also be applied to the native window title bar",
+  );
+  assert.ok(
+    capabilitySource.includes('"core:window:allow-set-theme"'),
+    "the main window capability must allow native theme changes",
   );
   assert.ok(
     i18nSource.includes('"settings.theme.dark"') && i18nSource.includes('"settings.theme.light"'),
