@@ -204,6 +204,17 @@ async function main() {
     conversationSource.indexOf("activeFollowUps.map") < conversationSource.indexOf("<RunPlanProgress"),
     "the current-step hint must follow the tool activity and queued follow-ups",
   );
+  const queuedFollowUpStart = conversationSource.indexOf("activeFollowUps.map");
+  const queuedFollowUpEnd = conversationSource.indexOf("<RunPlanProgress", queuedFollowUpStart);
+  const queuedFollowUpSource = conversationSource.slice(queuedFollowUpStart, queuedFollowUpEnd);
+  assert.ok(
+    queuedFollowUpSource.includes("encodeLocalUserContent(item.text, item.images)"),
+    "queued follow-ups must render their image attachments",
+  );
+  assert.ok(
+    queuedFollowUpSource.includes("item.textFiles"),
+    "queued follow-ups must preserve their text-file attachments",
+  );
   const runPlanProgressStart = appSource.indexOf("function RunPlanProgress(");
   assert.ok(runPlanProgressStart >= 0, "App missing RunPlanProgress component");
   const runPlanProgressSource = appSource.slice(runPlanProgressStart, appSource.indexOf("\n}\n", runPlanProgressStart));

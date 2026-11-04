@@ -6918,12 +6918,10 @@ export function App() {
             <article className="message message-user message-queued" key={item.id}>
               <div className="message-bubble">
                 <UserMessageBody
-                  content={
-                    messageWithComposerTextFiles(
-                      item.text || (item.images.length > 0 ? t(locale, "message.imageCount", { count: String(item.images.length) }) : ""),
-                      item.textFiles,
-                    )
-                  }
+                  content={messageWithComposerTextFiles(
+                    encodeLocalUserContent(item.text, item.images),
+                    item.textFiles,
+                  )}
                 />
               </div>
               <div className="message-meta">
