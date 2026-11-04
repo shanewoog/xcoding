@@ -484,6 +484,10 @@ impl SessionStore {
             .connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         remove_files(attachment_paths);
+        if deleted > 0 {
+            // VACUUM rewrites the SQLite file so deleting a large session also reclaims disk space.
+            self.connection.execute_batch("VACUUM")?;
+        }
         Ok(deleted > 0)
     }
 
@@ -3404,6 +3408,33 @@ mod tests {
                 .is_empty()
         );
         assert!(!store.delete_session(session.id).expect("second delete"));
+    }
+
+    #[test]
+    fn deleting_session_reclaims_database_file_space() {
+        let (directory, database) = temporary_store_path();
+        let store = SessionStore::open(&database).expect("persistent store opens");
+        let session = test_session(&store);
+        store
+            .append_message(session.id, MessageRole::User, "x".repeat(8 * 1024 * 1024))
+            .expect("large session content saves");
+        drop(store);
+
+        let size_before = fs::metadata(&database)
+            .expect("database metadata loads")
+            .len();
+        let store = SessionStore::open(&database).expect("persistent store reopens");
+        assert!(store.delete_session(session.id).expect("session deletes"));
+        drop(store);
+        let size_after = fs::metadata(&database)
+            .expect("compacted database metadata loads")
+            .len();
+
+        assert!(
+            size_after < size_before / 2,
+            "session deletion should reclaim database space: {size_before} -> {size_after}"
+        );
+        fs::remove_dir_all(directory).expect("temporary files clean up");
     }
 
     #[test]

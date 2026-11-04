@@ -2794,7 +2794,8 @@ export function App() {
     const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight <= 48;
     conversationAtBottomRef.current = atBottom;
     setConversationAtBottom(atBottom);
-  }, []);
+    if (node.scrollTop <= 48) void loadOlderMessages();
+  }, [loadOlderMessages]);
 
   const scrollConversationToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const node = conversationRef.current;
@@ -6887,15 +6888,10 @@ export function App() {
           ref={conversationRef}
           onScroll={(event) => updateConversationBottomState(event.currentTarget)}
         >
-          {messagePageOffset > 0 ? (
-            <button
-              type="button"
-              className="history-load-older"
-              onClick={() => void loadOlderMessages()}
-              disabled={olderMessagesLoading}
-            >
-              {olderMessagesLoading ? t(locale, "history.loadingOlder") : t(locale, "history.loadOlder", { count: String(Math.min(50, messagePageOffset)) })}
-            </button>
+          {olderMessagesLoading ? (
+            <div className="history-loading-older" role="status">
+              {t(locale, "history.loadingOlder")}
+            </div>
           ) : null}
           {groupConversationMessages(messages).map((entry) => {
             if (entry.kind === "tool-group") {

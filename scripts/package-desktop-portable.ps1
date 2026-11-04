@@ -294,6 +294,7 @@ $releaseGitPaths = @(
   "docs/model-request-logs.md",
   "apps/desktop/src/activity.ts",
   "apps/desktop/src/styles.css",
+  "tests/e2e/desktop-history-auto-load.mjs",
   "tests/e2e/desktop-layout.mjs",
   "tests/e2e/desktop-project-collapse.mjs",
   "tests/e2e/desktop-file-viewer.mjs",
