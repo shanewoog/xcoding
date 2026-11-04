@@ -1329,6 +1329,11 @@ pub enum SessionEvent {
         /// True when the historical budget was reached and at least one earlier
         /// description was clipped or omitted.
         truncated: bool,
+        /// True when the event describes compact cards for images from earlier
+        /// turns rather than the attachment the user just sent. Defaults to
+        /// false so events persisted before this field stay readable.
+        #[serde(default)]
+        historical: bool,
     },
     /// The early history prefix represented by the saved compaction summary.
     ContextCompacted {
@@ -1642,7 +1647,11 @@ mod tests {
         assert!(!default_config.tool_output_compression_enabled);
         let default_json =
             serde_json::to_value(&default_config).expect("default config serializes");
-        assert!(default_json.get("tool_output_compression_enabled").is_none());
+        assert!(
+            default_json
+                .get("tool_output_compression_enabled")
+                .is_none()
+        );
 
         let enabled = UserConfig {
             tool_output_compression_enabled: true,

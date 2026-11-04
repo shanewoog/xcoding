@@ -17,8 +17,8 @@ use xcoding_protocol::{
     JsonRpcRequest, JsonRpcResponse, ListSessionsParams, ListSessionsResult, LocalMemory, Message,
     MessageRole, ModelCallReport, PendingAction, PendingActionStatus, PersistedSessionEvent,
     PingResult, ReplaySessionParams, ReplaySessionResult, ReplayStep, RestorePoint, RpcError,
-    Session, SessionDetail, SessionEvent, SessionStatus, SetConfigParams, SetConfigResult, TaskSummary,
-    ToolCall, ToolName, WorkspaceConfig,
+    Session, SessionDetail, SessionEvent, SessionStatus, SetConfigParams, SetConfigResult,
+    TaskSummary, ToolCall, ToolName, WorkspaceConfig,
 };
 pub use xcoding_store::{RedactionReport, StoredVisionDescription};
 use xcoding_store::{SessionStore, StoreError};

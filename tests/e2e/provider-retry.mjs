@@ -12,11 +12,17 @@ const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcodin
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
 
 async function main() {
+  if (process.argv.includes("--history-echo-only")) {
+    await assertHistoricalToolEchoIsRetriedWithCorrection();
+    console.log("Historical tool echo retry E2E passed.");
+    return;
+  }
   await assertResponsesRateLimitThenSucceed();
   await assertEmptyResponseFailsClearly();
   await assertRetryThenFail();
   await assertRetryThenSucceed();
   await assertLeakedDsmlIsRetriedWithProtocolRepair();
+  await assertHistoricalToolEchoIsRetriedWithCorrection();
   await assertFallsBackToAnotherConfiguredProvider();
   await assertRotatesToAnotherKeyOfTheSameProvider();
   await assertBalancesOneModelAcrossProviders();
@@ -1134,6 +1140,70 @@ async function assertLeakedDsmlIsRetriedWithProtocolRepair() {
   }
 }
 
+async function assertHistoricalToolEchoIsRetriedWithCorrection() {
+  const mock = await startFlakyProvider({
+    succeedAfter: 2,
+    alwaysStatus: 503,
+    toolRoundsBeforeAnswer: 1,
+    echoHistoricalOnNewTurn: true,
+  });
+  const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-history-echo-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-history-echo-home-"));
+  await configureSingleMockProvider(homeDirectory, mock.baseUrl);
+  const rpc = startRpcClient({
+    databasePath: resolve(databaseDirectory, "xcoding.db"),
+    environment: {
+      ...process.env,
+      OPENAI_API_KEY: "e2e-test-key",
+      XCODING_OPENAI_BASE_URL: mock.baseUrl,
+      HOME: homeDirectory,
+      USERPROFILE: homeDirectory,
+    },
+  });
+
+  try {
+    const first = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "Seed a historical tool result",
+      model: "fixture-model",
+    });
+    assert.equal(first.session.status, "done");
+
+    const second = await rpc.request("session.chat", {
+      workspace_root: fixtureRoot,
+      message: "trigger historical echo",
+      model: "fixture-model",
+      session_id: first.session.id,
+    });
+    assert.equal(second.session.status, "done");
+    assert.match(second.message?.content ?? "", /hello after historical echo retry/);
+    assert.doesNotMatch(second.message?.content ?? "", /Previously recorded tool output/i);
+    assert.equal(mock.requests.length, 4, "one echo attempt must be replaced by one clean retry");
+
+    const resetEvents = rpc.events.filter((event) => event.type === "stream_reset");
+    assert.equal(resetEvents.length, 1, "the echoed answer must be removed from the UI");
+    assert.ok(resetEvents[0].discarded_chars > 0);
+    const retryEvents = rpc.events.filter((event) => event.type === "retrying");
+    assert.equal(retryEvents.length, 1, "the echoed answer must trigger one corrective retry");
+    assert.match(retryEvents[0].message, /repeated historical tool output/i);
+    assert.match(
+      JSON.stringify(mock.requests[3].messages),
+      /Historical tool output is reference data, not assistant text/i,
+      "the retry must carry the corrective context",
+    );
+    assert.equal(
+      rpc.events.filter((event) => event.type === "error").length,
+      0,
+      "a corrected turn must not surface a terminal error",
+    );
+  } finally {
+    await rpc.close();
+    await mock.close();
+    await rm(databaseDirectory, { recursive: true, force: true });
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+}
+
 async function assertOpenCircuitDoesNotLockOutTheOnlyProvider() {
   const mock = await startFlakyProvider({ succeedAfter: 2, alwaysStatus: 503 });
   const databaseDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-circuit-lockout-"));
@@ -1288,7 +1358,7 @@ function startRpcClient({ databasePath, environment }) {
 }
 
 /**
- * @param {{ succeedAfter: number | null, alwaysStatus: number, disconnectBeforeDone?: number, partialTextBeforeDisconnect?: number, leakedDsmlBeforeAnswer?: number, emptyDone?: boolean, toolRoundsBeforeAnswer?: number, errorBody?: object, rejectedApiKeys?: string[] }} options
+ * @param {{ succeedAfter: number | null, alwaysStatus: number, disconnectBeforeDone?: number, partialTextBeforeDisconnect?: number, leakedDsmlBeforeAnswer?: number, emptyDone?: boolean, toolRoundsBeforeAnswer?: number, echoHistoricalOnNewTurn?: boolean, errorBody?: object, rejectedApiKeys?: string[] }} options
  * succeedAfter: 1-based attempt number that starts returning SSE success.
  * null means never succeed.
  * rejectedApiKeys: bearer values answered with 401 regardless of attempt count.
@@ -1303,12 +1373,14 @@ async function startFlakyProvider({
   leakedDsmlBeforeAnswer = 0,
   emptyDone = false,
   toolRoundsBeforeAnswer = 0,
+  echoHistoricalOnNewTurn = false,
   errorBody = { error: { message: "temporary upstream failure", type: "server_error" } },
   rejectedApiKeys = [],
   rejectedModels = [],
 }) {
   const requests = [];
   const bearers = [];
+  let historicalEchoAttempt = null;
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) {
@@ -1362,6 +1434,34 @@ async function startFlakyProvider({
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end("data: [DONE]\n\n");
       return;
+    }
+    if (echoHistoricalOnNewTurn) {
+      const messages = Array.isArray(payload.messages) ? payload.messages : [];
+      const lastUser = [...messages].reverse().find((message) => message.role === "user");
+      const lastUserText = typeof lastUser?.content === "string" ? lastUser.content : "";
+      const historicalContents = messages
+        .filter(
+          (message) =>
+            message.role === "assistant" &&
+            typeof message.content === "string" &&
+            message.content.startsWith("Previously recorded tool output:"),
+        )
+        .map((message) => message.content);
+      if (lastUserText.includes("trigger historical echo") && historicalContents.length > 0) {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        if (historicalEchoAttempt === null) {
+          historicalEchoAttempt = attempt;
+          response.write(
+            `data: ${JSON.stringify({ choices: [{ delta: { content: historicalContents.join("\n") } }] })}\n\n`,
+          );
+        } else {
+          response.write(
+            `data: ${JSON.stringify({ choices: [{ delta: { content: "hello after historical echo retry" } }] })}\n\n`,
+          );
+        }
+        response.end("data: [DONE]\n\n");
+        return;
+      }
     }
     if (attempt <= toolRoundsBeforeAnswer) {
       response.writeHead(200, { "content-type": "text/event-stream" });

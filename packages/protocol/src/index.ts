@@ -687,6 +687,8 @@ export type SessionEvent =
       historical_chars: number;
       /** True when an earlier description was clipped or omitted for budget. */
       truncated: boolean;
+      /** True when this event describes historical image cards. */
+      historical?: boolean;
     }
   | {
       type: "context_compacted";

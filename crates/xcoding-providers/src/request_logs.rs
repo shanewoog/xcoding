@@ -343,9 +343,8 @@ impl RequestLog {
     /// Logging may use a parsed copy, but the caller keeps ownership of and
     /// sends the original byte sequence unchanged.
     pub(crate) fn start_raw(endpoint: &str, body: &[u8], api_key: &str) -> Self {
-        let value = serde_json::from_slice::<Value>(body).unwrap_or_else(|_| {
-            Value::String(String::from_utf8_lossy(body).into_owned())
-        });
+        let value = serde_json::from_slice::<Value>(body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()));
         Self::start(endpoint, &value, api_key)
     }
 

@@ -84,6 +84,7 @@ async function assertDelegateReplacesImagesAndCachesTheDescription() {
       "the newest attachment must not be charged against the historical budget",
     );
     assert.equal(applied[0].truncated, false);
+    assert.equal(applied[0].historical, false);
 
     const started = context.rpc.events.filter((event) => event.type === "vision_delegate_start");
     const succeeded = context.rpc.events.filter((event) => event.type === "vision_delegate_success");
@@ -402,11 +403,21 @@ async function assertHistoricalAttachmentIsLabelledAsSuch() {
     const applied = context.rpc.events.filter(
       (event) => event.type === "vision_descriptions_applied",
     );
-    assert.equal(applied.length, 1);
+    assert.equal(applied.length, 1, "the post-restart turn should report its image projection");
+    const historicalApplied = applied.find((event) => event.historical === true);
+    assert.ok(historicalApplied, "the cached historical image should be a card event");
     assert.ok(
-      applied[0].historical_chars > 0,
+      historicalApplied.historical_chars > 0,
       "an earlier attachment must be charged against the historical budget",
     );
+    const historicalRequest = session.requests.at(-1);
+    assertNoImagePartsReachedTheSessionModel(historicalRequest);
+    const historicalRequestText = historicalRequest.messages
+      .map((message) => contentText(message))
+      .join("\n");
+    assert.match(historicalRequestText, /<image_card>/);
+    assert.match(historicalRequestText, /image_ref=img_/);
+    assert.match(historicalRequestText, /INVALID_API_KEY/);
   } finally {
     await context.close();
     await vision.close();
@@ -464,7 +475,7 @@ async function assertCompactionSummaryCarriesTheDescription() {
     const body = contentText(compaction.messages.at(-1));
     assert.match(
       body,
-      /\[1 image attachment\(s\), described earlier as:\]/,
+      /\[image_ref=img_[0-9a-f]+ message_id=[0-9a-f-]+; 1 image attachment\(s\), described earlier as:\]/,
       "the summary prompt should announce the described attachment",
     );
     assert.match(body, /INVALID_API_KEY/, "the summary prompt should carry the description text");

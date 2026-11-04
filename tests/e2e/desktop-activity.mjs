@@ -261,11 +261,29 @@ async function main() {
     "historical image description should be localized in Chinese",
   );
 
-  // A routine description injection stays silent; only the budget cut surfaces.
+  // Current-turn injections stay silent. Historical cards surface so the user
+  // knows the compact projection is active and the full description remains
+  // recoverable through history_read.
   assert.ok(
     activitySource.includes('event.type === "vision_descriptions_applied"') &&
-      activitySource.includes("if (!event.truncated) return null;"),
-    "applied descriptions should only surface when the historical budget trimmed them",
+      activitySource.includes("if (!event.truncated && !historical) return null;"),
+    "historical cards and budget cuts should surface while current attachments stay silent",
+  );
+  assert.ok(
+    i18nSource.includes(
+      '"activity.visionDescriptionsHistorical": "Historical image cards applied"',
+    ) &&
+      i18nSource.includes(
+        '"activity.visionDescriptionsHistoricalDetail": "{count} image(s), {chars} chars; full descriptions are available through history_read."',
+      ),
+    "historical image cards should be localized in English",
+  );
+  assert.ok(
+    i18nSource.includes('"activity.visionDescriptionsHistorical": "已应用历史图片卡片"') &&
+      i18nSource.includes(
+        '"activity.visionDescriptionsHistoricalDetail": "{count} 张图片，{chars} 字；可通过 history_read 查看完整描述。"',
+      ),
+    "historical image cards should be localized in Chinese",
   );
   assert.ok(
     i18nSource.includes(

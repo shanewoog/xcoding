@@ -388,17 +388,14 @@ mod tests {
     #[test]
     fn compresses_successful_run_command() {
         let content = long_run_output();
-        let result = compress_tool_output(
-            "run_command",
-            &content,
-            "message-1",
-            &options(10, 1),
-        );
+        let result = compress_tool_output("run_command", &content, "message-1", &options(10, 1));
         assert!(result.compressed);
         assert_eq!(result.strategy, Some("run_command"));
-        assert!(result
-            .content
-            .starts_with("[XCoding compressed tool output;"));
+        assert!(
+            result
+                .content
+                .starts_with("[XCoding compressed tool output;")
+        );
         assert!(result.content.contains("strategy=run_command"));
         assert!(!result.content.contains("compressed_chars"));
         let compacted = result.content.split_once('\n').expect("header").1;
@@ -432,12 +429,8 @@ mod tests {
         });
         for value in [failed, timed_out, contradictory_success] {
             let content = serde_json::to_string(&value).expect("json");
-            let result = compress_tool_output(
-                "run_command",
-                &content,
-                "message-1",
-                &options(10, 1),
-            );
+            let result =
+                compress_tool_output("run_command", &content, "message-1", &options(10, 1));
             assert!(!result.compressed);
             assert_eq!(result.content, content);
         }
@@ -446,12 +439,7 @@ mod tests {
     #[test]
     fn compresses_search_code_and_removes_context_arrays() {
         let content = long_search_output();
-        let result = compress_tool_output(
-            "search_code",
-            &content,
-            "message-2",
-            &options(10, 1),
-        );
+        let result = compress_tool_output("search_code", &content, "message-2", &options(10, 1));
         assert!(result.compressed);
         assert!(result.content.contains("strategy=search_code"));
         let compacted: Value =
@@ -465,8 +453,7 @@ mod tests {
     #[test]
     fn compresses_stored_search_code_output() {
         let content = long_search_output();
-        let result =
-            compress_stored_tool_output(&content, "message-2", &options(10, 1));
+        let result = compress_stored_tool_output(&content, "message-2", &options(10, 1));
         assert!(result.compressed);
         assert_eq!(result.strategy, Some("search_code"));
         assert!(result.content.contains("message_id=message-2"));
@@ -482,12 +469,8 @@ mod tests {
 
         for value in [failed, timed_out] {
             let content = serde_json::to_string(&value).expect("json");
-            let result = compress_tool_output(
-                "search_code",
-                &content,
-                "message-2",
-                &options(10, 1),
-            );
+            let result =
+                compress_tool_output("search_code", &content, "message-2", &options(10, 1));
             assert!(!result.compressed);
             assert_eq!(result.content, content);
         }
@@ -518,12 +501,8 @@ mod tests {
             wrong_context_type,
         ] {
             let content = serde_json::to_string(&value).expect("json");
-            let result = compress_tool_output(
-                "search_code",
-                &content,
-                "message-2",
-                &options(10, 1),
-            );
+            let result =
+                compress_tool_output("search_code", &content, "message-2", &options(10, 1));
             assert!(!result.compressed);
             assert_eq!(result.content, content);
         }
@@ -550,12 +529,8 @@ mod tests {
         );
         assert!(!below_min.compressed);
 
-        let high_savings = compress_tool_output(
-            "run_command",
-            &content,
-            "message-1",
-            &options(10, 99),
-        );
+        let high_savings =
+            compress_tool_output("run_command", &content, "message-1", &options(10, 99));
         assert!(!high_savings.compressed);
         assert_eq!(high_savings.content, content);
     }
@@ -575,20 +550,10 @@ mod tests {
     #[test]
     fn malformed_or_unknown_output_is_unchanged() {
         let content = "not json ".repeat(1_000);
-        let result = compress_tool_output(
-            "run_command",
-            &content,
-            "message-1",
-            &options(10, 1),
-        );
+        let result = compress_tool_output("run_command", &content, "message-1", &options(10, 1));
         assert!(!result.compressed);
         assert_eq!(result.content, content);
-        let unknown = compress_tool_output(
-            "read_file",
-            &content,
-            "message-1",
-            &options(10, 1),
-        );
+        let unknown = compress_tool_output("read_file", &content, "message-1", &options(10, 1));
         assert!(!unknown.compressed);
     }
 
@@ -601,16 +566,13 @@ mod tests {
             "stdout": "汉字\n".repeat(2_000),
         }))
         .expect("json");
-        let result = compress_tool_output(
-            "run_command",
-            &content,
-            "message-1",
-            &options(10, 1),
-        );
+        let result = compress_tool_output("run_command", &content, "message-1", &options(10, 1));
         assert!(result.compressed);
         let expected = content.chars().count();
-        assert!(result
-            .content
-            .contains(&format!("original_chars={expected};")));
+        assert!(
+            result
+                .content
+                .contains(&format!("original_chars={expected};"))
+        );
     }
 }

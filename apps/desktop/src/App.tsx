@@ -1638,10 +1638,19 @@ export function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   const [hiddenProjectPaths, setHiddenProjectPaths] = useState<string[]>([]);
   const [projectMenu, setProjectMenu] = useState<{ root: string; x: number; y: number } | null>(null);
+  const [composerContextMenu, setComposerContextMenu] = useState<{
+    x: number;
+    y: number;
+    selectionStart: number;
+    selectionEnd: number;
+    hasSelection: boolean;
+  } | null>(null);
   const [composerDraftBySession, setComposerDraftBySession] = useState<Record<string, ComposerDraft>>(() => ({
     [DRAFT_SESSION_KEY]: createEmptyComposerDraft(),
   }));
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState("");
   const [reasoningEffortsText, setReasoningEffortsText] = useState(DEFAULT_REASONING_EFFORTS.join("\n"));
@@ -3344,10 +3353,108 @@ export function App() {
     };
   }, [sessionMenu, projectMenu]);
 
+  useEffect(() => {
+    if (!composerContextMenu) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target || !composerContextMenuRef.current?.contains(target)) {
+        setComposerContextMenu(null);
+      }
+    };
+    const closeMenu = () => setComposerContextMenu(null);
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMenu();
+        composerTextareaRef.current?.focus();
+      }
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    window.addEventListener("blur", closeMenu);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+      window.removeEventListener("blur", closeMenu);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [composerContextMenu]);
+
+  function openComposerContextMenu(event: ReactMouseEvent<HTMLTextAreaElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const textarea = event.currentTarget;
+    const menuWidth = 168;
+    const menuHeight = 128;
+    const margin = 8;
+    setSessionMenu(null);
+    setProjectMenu(null);
+    setComposerContextMenu({
+      x: Math.max(margin, Math.min(event.clientX, window.innerWidth - menuWidth - margin)),
+      y: Math.max(margin, Math.min(event.clientY, window.innerHeight - menuHeight - margin)),
+      selectionStart: textarea.selectionStart,
+      selectionEnd: textarea.selectionEnd,
+      hasSelection: textarea.selectionEnd > textarea.selectionStart,
+    });
+  }
+
+  function selectAllComposer(): void {
+    const textarea = composerTextareaRef.current;
+    setComposerContextMenu(null);
+    if (!textarea) return;
+    textarea.focus();
+    textarea.select();
+  }
+
+  async function copyComposerSelection(): Promise<void> {
+    const textarea = composerTextareaRef.current;
+    const start = composerContextMenu?.selectionStart;
+    const end = composerContextMenu?.selectionEnd;
+    setComposerContextMenu(null);
+    if (!textarea || start === undefined || end === undefined || end <= start) {
+      textarea?.focus();
+      return;
+    }
+    const selection = textarea.value.slice(start, end);
+    try {
+      await navigator.clipboard.writeText(selection);
+    } catch {
+      // Clipboard access can be unavailable when the WebView is not focused.
+    }
+    textarea.focus();
+    textarea.setSelectionRange(start, end);
+  }
+
+  async function pasteComposerSelection(): Promise<void> {
+    const textarea = composerTextareaRef.current;
+    const start = composerContextMenu?.selectionStart;
+    const end = composerContextMenu?.selectionEnd;
+    setComposerContextMenu(null);
+    if (!textarea || start === undefined || end === undefined) {
+      textarea?.focus();
+      return;
+    }
+    try {
+      const pastedText = await navigator.clipboard.readText();
+      const nextPrompt = textarea.value.slice(0, start) + pastedText + textarea.value.slice(end);
+      setPrompt(nextPrompt);
+      const cursor = start + pastedText.length;
+      window.requestAnimationFrame(() => {
+        composerTextareaRef.current?.focus();
+        composerTextareaRef.current?.setSelectionRange(cursor, cursor);
+      });
+    } catch {
+      textarea.focus();
+      textarea.setSelectionRange(start, end);
+    }
+  }
+
   function openSessionMenu(event: ReactMouseEvent, sessionId: string): void {
     event.preventDefault();
     event.stopPropagation();
     setProjectMenu(null);
+    setComposerContextMenu(null);
     setSessionMenu({ sessionId, x: event.clientX, y: event.clientY });
   }
 
@@ -6658,6 +6765,32 @@ export function App() {
             </button>
           </div>
         ) : null}
+        {composerContextMenu ? (
+          <div
+            ref={composerContextMenuRef}
+            className="session-context-menu composer-context-menu"
+            style={{ left: composerContextMenu.x, top: composerContextMenu.y }}
+            role="menu"
+            aria-label={t(locale, "composer.contextMenu")}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button type="button" role="menuitem" onClick={selectAllComposer}>
+              {t(locale, "action.selectAll")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!composerContextMenu.hasSelection}
+              onClick={() => void copyComposerSelection()}
+            >
+              {t(locale, "action.copy")}
+            </button>
+            <button type="button" role="menuitem" onClick={() => void pasteComposerSelection()}>
+              {t(locale, "action.paste")}
+            </button>
+          </div>
+        ) : null}
       </aside>
 
       <section className={`chat-panel${bottomPanelOpen ? " has-bottom-panel" : ""}`} aria-label={t(locale, "aria.conversation")}>
@@ -7036,10 +7169,12 @@ export function App() {
             </div>
           ) : null}
           <textarea
+            ref={composerTextareaRef}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={onComposerKeyDown}
             onPaste={(event) => void onComposerPaste(event)}
+            onContextMenu={openComposerContextMenu}
             placeholder={
               queueMode
                 ? t(locale, "composer.queuePlaceholder")

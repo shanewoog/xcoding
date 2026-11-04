@@ -215,7 +215,10 @@ async fn records_wire_requests_and_responses_without_changing_them() {
             let wire_request = worker.join().unwrap();
             let wire_body: serde_json::Value =
                 serde_json::from_str(wire_request.split_once("\r\n\r\n").unwrap().1).unwrap();
-            assert_eq!(wire_body["prompt_cache_key"], request_session_id.to_string());
+            assert_eq!(
+                wire_body["prompt_cache_key"],
+                request_session_id.to_string()
+            );
             assert_eq!(wire_body["include"], json!(["reasoning.encrypted_content"]));
             let page = query_request_logs(&RequestLogQuery::default()).unwrap();
             let detail = request_log_detail(&page.items[0].id).unwrap();

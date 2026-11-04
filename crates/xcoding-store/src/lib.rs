@@ -10,9 +10,9 @@ use uuid::Uuid;
 use xcoding_protocol::{
     ContextCompaction, ContextWindow, CreateSessionParams, KeyCallReport, LocalMemory,
     MAX_CONTEXT_TOOL_LIMIT, MAX_LOCAL_MEMORY_CHARS, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole,
-    ModelCallReport, ModelCallReportEntry, PendingAction,
-    PendingActionStatus, PersistedSessionEvent, ProviderCallReport, RestorePoint, Session,
-    SessionEvent, SessionStatus, ToolCall, WorkspaceConfig,
+    ModelCallReport, ModelCallReportEntry, PendingAction, PendingActionStatus,
+    PersistedSessionEvent, ProviderCallReport, RestorePoint, Session, SessionEvent, SessionStatus,
+    ToolCall, WorkspaceConfig,
 };
 
 #[derive(Debug, Error)]
@@ -898,10 +898,7 @@ impl SessionStore {
 
     /// Returns the persisted vision-route status for a provider route key,
     /// or `None` when the provider has not been probed yet.
-    pub fn get_vision_route_status(
-        &self,
-        route_key: &str,
-    ) -> Result<Option<String>, StoreError> {
+    pub fn get_vision_route_status(&self, route_key: &str) -> Result<Option<String>, StoreError> {
         self.connection
             .query_row(
                 "SELECT status FROM vision_routes WHERE route_key = ?1",
@@ -1191,21 +1188,26 @@ impl SessionStore {
             providers: providers
                 .into_iter()
                 .rev()
-                .map(|((date, provider_id), (provider_name, success_count, failure_count))| {
-                    ProviderCallReport {
-                        date,
-                        provider_id,
-                        provider_name,
-                        success_count,
-                        failure_count,
-                    }
-                })
+                .map(
+                    |((date, provider_id), (provider_name, success_count, failure_count))| {
+                        ProviderCallReport {
+                            date,
+                            provider_id,
+                            provider_name,
+                            success_count,
+                            failure_count,
+                        }
+                    },
+                )
                 .collect(),
             keys: keys
                 .into_iter()
                 .rev()
                 .map(
-                    |((date, provider_id, key_id), (provider_name, key_hint, success_count, failure_count))| {
+                    |(
+                        (date, provider_id, key_id),
+                        (provider_name, key_hint, success_count, failure_count),
+                    )| {
                         KeyCallReport {
                             date,
                             provider_id,
@@ -1221,12 +1223,14 @@ impl SessionStore {
             models: models
                 .into_iter()
                 .rev()
-                .map(|((date, model), (success_count, failure_count))| ModelCallReportEntry {
-                    date,
-                    model,
-                    success_count,
-                    failure_count,
-                })
+                .map(
+                    |((date, model), (success_count, failure_count))| ModelCallReportEntry {
+                        date,
+                        model,
+                        success_count,
+                        failure_count,
+                    },
+                )
                 .collect(),
         })
     }
@@ -2876,18 +2880,24 @@ mod tests {
             .model_call_report(8 * 60)
             .expect("model call report loads");
 
-        assert!(report
-            .providers
-            .windows(2)
-            .all(|rows| rows[0].date >= rows[1].date));
-        assert!(report
-            .keys
-            .windows(2)
-            .all(|rows| rows[0].date >= rows[1].date));
-        assert!(report
-            .models
-            .windows(2)
-            .all(|rows| rows[0].date >= rows[1].date));
+        assert!(
+            report
+                .providers
+                .windows(2)
+                .all(|rows| rows[0].date >= rows[1].date)
+        );
+        assert!(
+            report
+                .keys
+                .windows(2)
+                .all(|rows| rows[0].date >= rows[1].date)
+        );
+        assert!(
+            report
+                .models
+                .windows(2)
+                .all(|rows| rows[0].date >= rows[1].date)
+        );
 
         assert_eq!(report.providers.len(), 4);
         let provider_a_day_one = report
@@ -2937,7 +2947,12 @@ mod tests {
             .expect("key B report row");
         assert_eq!(key_b.success_count, 1);
         assert_eq!(key_b.failure_count, 0);
-        assert!(report.keys.iter().all(|row| !row.key_id.starts_with("legacy")));
+        assert!(
+            report
+                .keys
+                .iter()
+                .all(|row| !row.key_id.starts_with("legacy"))
+        );
 
         assert_eq!(report.models.len(), 4);
         let model_x = report

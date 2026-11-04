@@ -1035,7 +1035,7 @@ Output:
 
 XCoding defaults `lossy_context_compaction_enabled` to `false`. Near the context threshold, `new_context` opens a window at the current user message while exact older messages remain stored. Setting the flag to `true` additionally permits automatic summaries, hard history truncation, and tool-output truncation.
 
-All schemas reject additional properties. List and search calls accept optional `offset` (minimum `0`) and `limit` (`1..100`). History is restricted to the current session; notes are restricted to the normalized current workspace.
+All schemas reject additional properties. List and search calls accept optional `offset` (minimum `0`) and `limit` (`1..100`). History is restricted to the current session; notes are restricted to the normalized current workspace. Image-bearing history results expose `image_ref` plus any cached visual description, never the stored base64 payload.
 
 | Tool | Required input | Purpose |
 |---|---|---|

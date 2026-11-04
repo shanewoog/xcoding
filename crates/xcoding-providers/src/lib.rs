@@ -19,7 +19,12 @@ fn log_to_file(msg: &str) {
         .append(true)
         .open(std::env::temp_dir().join("xcoding-http-debug.log"))
     {
-        let _ = writeln!(f, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
+        let _ = writeln!(
+            f,
+            "[{}] {}",
+            chrono::Local::now().format("%H:%M:%S%.3f"),
+            msg
+        );
     }
 }
 
@@ -44,19 +49,18 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use xcoding_protocol::{
     CloudProviderConfig, DEFAULT_LOCAL_RELAY_PORT, HttpProxyMode, ListModelsResult,
-    MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
-    MAX_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_MIN_REQUEST_COUNT,
-    MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MAX_CIRCUIT_RECOVERY_WAIT_SECS,
-    MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_WINDOW_TOKENS, MAX_MAX_PROVIDER_RETRIES,
-    MAX_MAX_TOOL_ROUNDS, MAX_NON_STREAM_TIMEOUT_SECS, MAX_PROVIDER_KEY_WEIGHT,
-    MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS,
-    MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_FAILURE_THRESHOLD,
-    MIN_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
-    MIN_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
-    MAX_LOCAL_RELAY_PORT, MIN_CONTEXT_WINDOW_TOKENS, MIN_LOCAL_RELAY_PORT,
-    MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
-    MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS,
-    ModelRoute, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
+    MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_FAILURE_THRESHOLD,
+    MAX_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
+    MAX_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+    MAX_CONTEXT_WINDOW_TOKENS, MAX_LOCAL_RELAY_PORT, MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS,
+    MAX_NON_STREAM_TIMEOUT_SECS, MAX_PROVIDER_KEY_WEIGHT, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
+    MAX_STREAM_IDLE_TIMEOUT_SECS, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
+    MIN_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_MIN_REQUEST_COUNT,
+    MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
+    MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_WINDOW_TOKENS, MIN_LOCAL_RELAY_PORT,
+    MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS, MIN_NON_STREAM_TIMEOUT_SECS,
+    MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, ModelRoute,
+    ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
 
 pub type ProviderEventStream =
@@ -327,8 +331,7 @@ impl ProviderError {
     pub fn is_transient_channel_rejection(&self) -> bool {
         match self {
             Self::HttpStatus { status, body, .. } => {
-                *status == StatusCode::FORBIDDEN
-                    && body_indicates_transient_channel_rejection(body)
+                *status == StatusCode::FORBIDDEN && body_indicates_transient_channel_rejection(body)
             }
             _ => false,
         }
@@ -1541,22 +1544,44 @@ impl OpenAiCompatibleProvider {
         let request_log = request_logs::RequestLog::start(&url, body, &self.api_key);
         let body_size = serde_json::to_string(body).map(|s| s.len()).unwrap_or(0);
         let proxy = resolve_http_proxy();
-        log_to_file(&format!("[XCoding HTTP] POST {} body={}bytes proxy={:?}", url, body_size, proxy));
+        log_to_file(&format!(
+            "[XCoding HTTP] POST {} body={}bytes proxy={:?}",
+            url, body_size, proxy
+        ));
         // Log key request body fields for debugging large-request issues
         {
             let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("?");
-            let tool_count = body.get("tools").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-            let input_count = body.get("input").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-            let instructions_len = body.get("instructions").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
-            let tool_names: Vec<&str> = body.get("tools")
+            let tool_count = body
+                .get("tools")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter()
-                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-                    .collect())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let input_count = body
+                .get("input")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let instructions_len = body
+                .get("instructions")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len())
+                .unwrap_or(0);
+            let tool_names: Vec<&str> = body
+                .get("tools")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                        .collect()
+                })
                 .unwrap_or_default();
             log_to_file(&format!(
                 "[XCoding HTTP] body summary: model={} tools={}({}) inputs={} instructions_len={}",
-                model, tool_count, tool_names.join(","), input_count, instructions_len
+                model,
+                tool_count,
+                tool_names.join(","),
+                input_count,
+                instructions_len
             ));
         }
         let start = Instant::now();
@@ -1579,11 +1604,19 @@ impl OpenAiCompatibleProvider {
         request_log.request(&request);
         let response = self.client.execute(request).await.map_err(|e| {
             request_log.finish(Some(&e.to_string()));
-            log_to_file(&format!("[XCoding HTTP] request failed after {:?}: {}", start.elapsed(), e));
+            log_to_file(&format!(
+                "[XCoding HTTP] request failed after {:?}: {}",
+                start.elapsed(),
+                e
+            ));
             ProviderError::from(e)
         })?;
         request_log.response(&response);
-        log_to_file(&format!("[XCoding HTTP] response status={} elapsed={:?}", response.status(), start.elapsed()));
+        log_to_file(&format!(
+            "[XCoding HTTP] response status={} elapsed={:?}",
+            response.status(),
+            start.elapsed()
+        ));
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1649,9 +1682,10 @@ impl OpenAiCompatibleProvider {
         }
         let request = match wire_api {
             ProviderWireApi::AnthropicMessages => {
-                let request = request
-                    .header("x-api-key", &self.api_key)
-                    .header("anthropic-version", anthropic_version.unwrap_or("2023-06-01"));
+                let request = request.header("x-api-key", &self.api_key).header(
+                    "anthropic-version",
+                    anthropic_version.unwrap_or("2023-06-01"),
+                );
                 match anthropic_beta {
                     Some(beta) => request.header("anthropic-beta", beta),
                     None => request,
@@ -2359,9 +2393,8 @@ pub fn recover_leaked_dsml_tool_calls(
         let invoke_start = cursor + invoke_start;
         let invoke_body_start = cursor + invoke_body_start;
         let after_open = &block_body[invoke_body_start..];
-        let (invoke_close_start, invoke_close_end) =
-            find_dsml_tag(after_open, "invoke", true)
-                .ok_or_else(|| "DSML invoke block is missing its closing tag".to_owned())?;
+        let (invoke_close_start, invoke_close_end) = find_dsml_tag(after_open, "invoke", true)
+            .ok_or_else(|| "DSML invoke block is missing its closing tag".to_owned())?;
         let header = &block_body[invoke_start..invoke_body_start];
         let name = dsml_attribute(header, "name")
             .ok_or_else(|| "DSML invoke is missing a name attribute".to_owned())?;
@@ -2377,9 +2410,8 @@ pub fn recover_leaked_dsml_tool_calls(
                 break;
             }
             let (parameter_start, parameter_body_start) =
-                find_dsml_tag(&invoke_body[parameter_cursor..], "parameter", false).ok_or_else(
-                    || "DSML invoke contains text outside parameter tags".to_owned(),
-                )?;
+                find_dsml_tag(&invoke_body[parameter_cursor..], "parameter", false)
+                    .ok_or_else(|| "DSML invoke contains text outside parameter tags".to_owned())?;
             let parameter_start = parameter_cursor + parameter_start;
             let parameter_body_start = parameter_cursor + parameter_body_start;
             let after_parameter_open = &invoke_body[parameter_body_start..];
@@ -4219,7 +4251,10 @@ mod tests {
             }
             .to_string();
             assert!(
-                message.contains(&format!("Upstream gateway error (HTTP {})", status.as_u16())),
+                message.contains(&format!(
+                    "Upstream gateway error (HTTP {})",
+                    status.as_u16()
+                )),
                 "unexpected message for {status}: {message}"
             );
             assert!(
@@ -4468,7 +4503,7 @@ mod tests {
                 trust_level: xcoding_protocol::ProviderTrustLevel::Official,
                 api_key: Some("sk-official".to_owned()),
                 api_keys: Vec::new(),
-            note: None,
+                note: None,
             },
             CloudProviderConfig {
                 id: "relay".to_owned(),
@@ -4478,7 +4513,7 @@ mod tests {
                 trust_level: xcoding_protocol::ProviderTrustLevel::Relay,
                 api_key: Some("sk-relay".to_owned()),
                 api_keys: Vec::new(),
-            note: None,
+                note: None,
             },
         ];
         config.active_provider_id = Some("official".to_owned());
@@ -4597,4 +4632,3 @@ mod tests {
         let _ = fs::remove_dir_all(&temp);
     }
 }
-

@@ -1124,7 +1124,11 @@ mod tests {
                 CommandPolicyCode::DeniedShellDestructiveDelete,
             ),
             ("format", vec!["D:"], CommandPolicyCode::DeniedExecutable),
-            ("dd", vec!["of=/dev/sda"], CommandPolicyCode::DeniedDestructiveDisk),
+            (
+                "dd",
+                vec!["of=/dev/sda"],
+                CommandPolicyCode::DeniedDestructiveDisk,
+            ),
             (
                 "rm",
                 vec!["-rf", "/"],
@@ -1155,7 +1159,11 @@ mod tests {
                 vec!["worktree", "remove", "--force", "../other"],
                 CommandPolicyCode::DeniedGitForcedWorktreeDelete,
             ),
-            ("git", vec!["clean", "-fd"], CommandPolicyCode::DeniedGitClean),
+            (
+                "git",
+                vec!["clean", "-fd"],
+                CommandPolicyCode::DeniedGitClean,
+            ),
             (
                 "git",
                 vec!["push", "--mirror"],

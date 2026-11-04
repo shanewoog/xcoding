@@ -3,9 +3,11 @@
 # Usage:
 #   .\scripts\package-desktop-portable.ps1
 #   .\scripts\package-desktop-portable.ps1 -SkipBuild
+#   .\scripts\package-desktop-portable.ps1 -TestVersionRule
 
 param(
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  [switch]$TestVersionRule
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +43,70 @@ $version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') {
   throw "Invalid version in ${versionFile}: $version"
 }
+
+function Get-NormalizedVersion([string]$Value) {
+  if ($Value -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+    throw "Invalid version: $Value"
+  }
+  $major = [int]$matches[1]
+  $minor = [int]$matches[2]
+  $patch = [int]$matches[3]
+  $carry = [int][math]::Floor($patch / 100)
+  if ($carry -eq 0) {
+    return $Value
+  }
+  $minor += $carry
+  $patch = $patch % 100
+  return "$major.$minor.$patch"
+}
+
+function Get-NextVersion([string]$Value) {
+  if ($Value -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+    throw "Invalid version: $Value"
+  }
+  $parts = $Value.Split('.')
+  $major = [int]$parts[0]
+  $minor = [int]$parts[1]
+  $patch = [int]$parts[2]
+  if ($patch -ge 99) {
+    $minor += 1
+    $patch = 0
+  } else {
+    $patch += 1
+  }
+  return "$major.$minor.$patch"
+}
+
+if ($TestVersionRule) {
+  $cases = @(
+    @{ Input = "1.0.100"; Normalized = "1.1.0" },
+    @{ Input = "1.0.102"; Normalized = "1.1.2" },
+    @{ Input = "1.2.100"; Normalized = "1.3.0" }
+  )
+  foreach ($case in $cases) {
+    $actual = Get-NormalizedVersion $case.Input
+    if ($actual -ne $case.Normalized) {
+      throw "Version normalization failed: $($case.Input) -> $actual, expected $($case.Normalized)"
+    }
+  }
+  $nextCases = @(
+    @{ Input = "1.0.98"; Next = "1.0.99" },
+    @{ Input = "1.0.99"; Next = "1.1.0" },
+    @{ Input = "1.0.100"; Next = "1.1.0" },
+    @{ Input = "1.1.0"; Next = "1.1.1" },
+    @{ Input = "1.1.99"; Next = "1.2.0" }
+  )
+  foreach ($case in $nextCases) {
+    $actual = Get-NextVersion $case.Input
+    if ($actual -ne $case.Next) {
+      throw "Next-version rule failed: $($case.Input) -> $actual, expected $($case.Next)"
+    }
+  }
+  Write-Host "Version rule self-test passed."
+  return
+}
+
+$version = Get-NormalizedVersion $version
 
 function Update-VersionField([string]$Path, [string]$Pattern, [string]$Version) {
   $content = [System.IO.File]::ReadAllText($Path)
@@ -169,8 +235,7 @@ Write-Host "  $destExe"
 Write-Host "  Version: $version"
 Get-Item $destExe | Format-List Name, Length, FullName
 
-$parts = $version.Split('.')
-$nextVersion = "{0}.{1}.{2}" -f $parts[0], $parts[1], ([int]$parts[2] + 1)
+$nextVersion = Get-NextVersion $version
 [System.IO.File]::WriteAllText($versionFile, "$nextVersion`n", [System.Text.UTF8Encoding]::new($false))
 Write-Host "  Next release version: $nextVersion"
 

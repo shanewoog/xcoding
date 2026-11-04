@@ -194,14 +194,18 @@ export function eventActivity(
       policy: "failed",
     };
   }
-  // Injecting descriptions is routine and stays silent. Only the budget cut is
-  // reported, because dropping an earlier image is a loss the user should see.
+  // Current-turn descriptions stay silent unless a historical description was
+  // trimmed. Historical cards get a compact marker so the user can see that the
+  // original description is still available through history_read.
   if (event.type === "vision_descriptions_applied") {
-    if (!event.truncated) return null;
+    const historical = event.historical === true;
+    if (!event.truncated && !historical) return null;
     return {
-      id: "vision-descriptions-truncated",
-      label: t(locale, "activity.visionDescriptionsTruncated"),
-      detail: t(locale, "activity.visionDelegateDetail", {
+      id: event.truncated ? "vision-descriptions-truncated" : "vision-descriptions-historical",
+      label: event.truncated
+        ? t(locale, "activity.visionDescriptionsTruncated")
+        : t(locale, "activity.visionDescriptionsHistorical"),
+      detail: t(locale, historical ? "activity.visionDescriptionsHistoricalDetail" : "activity.visionDelegateDetail", {
         count: event.image_count,
         chars: event.historical_chars,
       }),

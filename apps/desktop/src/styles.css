@@ -585,6 +585,13 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 .session-context-menu button:hover {
   background: var(--bg-hover);
 }
+.session-context-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.session-context-menu button:disabled:hover {
+  background: transparent;
+}
 .session-context-menu button.danger {
   color: var(--danger-text);
 }
