@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -133,6 +134,60 @@ async function main() {
 
   assert.match(cssSource, /\.assistant-message-link\s*\{[\s\S]*text-decoration:\s*underline;/, "assistant links must be visibly underlined");
   assert.match(cssSource, /\.assistant-code-block\s*\{[\s\S]*overflow-x:\s*auto;/, "assistant code blocks must scroll horizontally when needed");
+const replyConstantsStart = appSource.indexOf("const REPLY_BEGIN");
+  const replyConstantsEnd = appSource.indexOf("const MAX_COMPOSER_ATTACHMENTS");
+  const replyHelpersStart = appSource.indexOf("function truncateReplyTargetContent");
+  const replyHelpersEnd = appSource.indexOf("function fileToComposerImage");
+  assert.ok(
+    replyConstantsStart >= 0 && replyConstantsEnd > replyConstantsStart &&
+      replyHelpersStart >= 0 && replyHelpersEnd > replyHelpersStart,
+    "reply target helpers must be available for round-trip testing",
+  );
+  const replyModuleSource = `
+${appSource.slice(replyConstantsStart, replyConstantsEnd)}
+${appSource.slice(replyHelpersStart, replyHelpersEnd)}
+export { formatReplyTargetMessage, parseReplyTarget };
+`;
+  const compiledReplyModule = ts.transpileModule(replyModuleSource, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2020,
+    },
+  }).outputText;
+  const replyExports = {};
+  const replyModule = { exports: replyExports };
+  new Function("exports", "module", compiledReplyModule)(replyExports, replyModule);
+  const replyTarget = {
+    messageId: "11111111-2222-3333-4444-555555555555",
+    content: "第一段回答\n\n第二段回答",
+    createdAt: "2026-11-05T02:30:00.000Z",
+  };
+  const replyMessage = replyModule.exports.formatReplyTargetMessage("请继续分析这一点", replyTarget);
+  const parsedReply = replyModule.exports.parseReplyTarget(replyMessage);
+  assert.equal(parsedReply?.target.messageId, replyTarget.messageId);
+  assert.equal(parsedReply?.target.createdAt, replyTarget.createdAt);
+  assert.equal(parsedReply?.quote, replyTarget.content);
+  assert.equal(parsedReply?.text, "请继续分析这一点");
+  assert.ok(replyMessage.includes("authoritative target"), "the model must be told which response is authoritative");
+  assert.ok(appSource.includes("type ReplyTarget ="), "desktop messages must define a reply target");
+  assert.ok(appSource.includes("function formatReplyTargetMessage"), "reply targets must be encoded into outbound messages");
+  assert.ok(
+    appSource.includes("function parseReplyTarget") &&
+      appSource.includes("REPLY_CONTEXT_INSTRUCTION"),
+    "reply targets must be parsed back into visible context with model guidance",
+  );
+  assert.ok(appSource.includes("beginReplyToMessage(message)"), "assistant messages must expose a reply action");
+  assert.ok(
+    appSource.includes('className="composer-reply-target"') &&
+      cssSource.includes(".composer-reply-target"),
+    "the composer must show the active reply target",
+  );
+  assert.ok(
+    appSource.includes("const outgoingMessage = replyTo")
+      && appSource.includes("formatReplyTargetMessage(message, replyTo)"),
+    "composer sends must include the selected reply target",
+  );
+
   console.log("Desktop assistant link checks passed.");
 }
 

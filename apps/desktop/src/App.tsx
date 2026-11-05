@@ -618,20 +618,28 @@ type ComposerTextFile = {
   language: string;
 };
 
+type ReplyTarget = {
+  messageId: string;
+  content: string;
+  createdAt: string;
+};
+
 type ComposerDraft = {
   prompt: string;
   images: ComposerImage[];
   textFiles: ComposerTextFile[];
+  replyTo: ReplyTarget | null;
 };
 
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = {
   prompt: "",
   images: [],
   textFiles: [],
+  replyTo: null,
 };
 
 function createEmptyComposerDraft(): ComposerDraft {
-  return { prompt: "", images: [], textFiles: [] };
+  return { prompt: "", images: [], textFiles: [], replyTo: null };
 }
 
 type QueuedFollowUp = {
@@ -644,6 +652,12 @@ type QueuedFollowUp = {
 
 const IMAGE_BEGIN = "<!-- xcoding-images";
 const IMAGE_END = "xcoding-images -->";
+const REPLY_BEGIN = "<!-- xcoding-reply:";
+const REPLY_END = "xcoding-reply -->";
+const REPLY_INSTRUCTION_BEGIN = "<!-- xcoding-reply-instruction:";
+const REPLY_INSTRUCTION_END = "xcoding-reply-instruction -->";
+const REPLY_CONTEXT_INSTRUCTION = "Continue from the quoted assistant response as the authoritative target. Treat later unrelated messages as session history.";
+const MAX_REPLY_QUOTE_CHARS = 12_000;
 const MAX_COMPOSER_ATTACHMENTS = 4;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_TEXT_FILE_BYTES = 1 * 1024 * 1024;
@@ -876,30 +890,107 @@ function encodeLocalUserContent(message: string, images: ChatImageAttachment[]):
   return text ? `${text}\n\n${marker}` : marker;
 }
 
-function parseStoredUserMessage(content: string): { text: string; images: Array<{ mime_type: string; data_base64: string }> } {
+function parseStoredUserMessage(content: string): {
+  text: string;
+  images: Array<{ mime_type: string; data_base64: string }>;
+  reply: ParsedReplyTarget | null;
+} {
   const start = content.indexOf(IMAGE_BEGIN);
-  if (start < 0) return { text: content, images: [] };
-  const endRel = content.indexOf(IMAGE_END, start);
-  if (endRel < 0) return { text: content, images: [] };
-  const end = endRel + IMAGE_END.length;
-  const block = content.slice(start, end);
-  const text = `${content.slice(0, start)}${content.slice(end)}`.trim();
-  const payload = block
-    .replace(IMAGE_BEGIN, "")
-    .replace(IMAGE_END, "")
-    .replace(/^:\s*/, "")
-    .trim();
+  let text = content;
   const images: Array<{ mime_type: string; data_base64: string }> = [];
-  for (const item of payload.split(";")) {
-    const [mime, data] = item.split("|");
-    if (!mime || !data) continue;
-    const mimeType = mime.trim().toLowerCase();
-    const dataBase64 = data.trim();
-    if (mimeType.startsWith("image/") && dataBase64) {
-      images.push({ mime_type: mimeType === "image/jpg" ? "image/jpeg" : mimeType, data_base64: dataBase64 });
+  if (start >= 0) {
+    const endRel = content.indexOf(IMAGE_END, start);
+    if (endRel >= 0) {
+      const end = endRel + IMAGE_END.length;
+      const block = content.slice(start, end);
+      text = `${content.slice(0, start)}${content.slice(end)}`.trim();
+      const payload = block
+        .replace(IMAGE_BEGIN, "")
+        .replace(IMAGE_END, "")
+        .replace(/^:\s*/, "")
+        .trim();
+      for (const item of payload.split(";")) {
+        const [mime, data] = item.split("|");
+        if (!mime || !data) continue;
+        const mimeType = mime.trim().toLowerCase();
+        const dataBase64 = data.trim();
+        if (mimeType.startsWith("image/") && dataBase64) {
+          images.push({ mime_type: mimeType === "image/jpg" ? "image/jpeg" : mimeType, data_base64: dataBase64 });
+        }
+      }
     }
   }
-  return { text, images };
+  const reply = parseReplyTarget(text);
+  return { text: reply?.text ?? text, images, reply };
+}
+
+function truncateReplyTargetContent(content: string): string {
+  const trimmed = content.trim();
+  const chars = Array.from(trimmed);
+  return chars.length <= MAX_REPLY_QUOTE_CHARS
+    ? trimmed
+    : `${chars.slice(0, MAX_REPLY_QUOTE_CHARS).join("")}\n…`;
+}
+
+function formatReplyTargetMessage(message: string, target: ReplyTarget): string {
+  const marker = `${REPLY_BEGIN}${target.messageId}|${encodeURIComponent(target.createdAt)} ${REPLY_END}`;
+  const instruction = `${REPLY_INSTRUCTION_BEGIN}${REPLY_CONTEXT_INSTRUCTION} ${REPLY_INSTRUCTION_END}`;
+  const quoted = truncateReplyTargetContent(target.content)
+    .split("\n")
+    .map((line) => (line ? `> ${line}` : ">"))
+    .join("\n");
+  const text = message.trim();
+  return `${marker}\n${instruction}\n${quoted}\n\n${text}`;
+}
+
+type ParsedReplyTarget = {
+  target: ReplyTarget;
+  quote: string;
+  text: string;
+};
+
+function parseReplyTarget(content: string): ParsedReplyTarget | null {
+  const start = content.indexOf(REPLY_BEGIN);
+  if (start < 0) return null;
+  const markerEndRelative = content.indexOf(REPLY_END, start);
+  if (markerEndRelative < 0) return null;
+  const markerEnd = markerEndRelative + REPLY_END.length;
+  const payload = content
+    .slice(start + REPLY_BEGIN.length, markerEndRelative)
+    .trim();
+  const separator = payload.indexOf("|");
+  const messageId = (separator >= 0 ? payload.slice(0, separator) : payload).trim();
+  if (!messageId) return null;
+  let createdAt = "";
+  if (separator >= 0) {
+    try {
+      createdAt = decodeURIComponent(payload.slice(separator + 1).trim());
+    } catch {
+      createdAt = "";
+    }
+  }
+  let body = content.slice(markerEnd).trimStart();
+  if (body.startsWith(REPLY_INSTRUCTION_BEGIN)) {
+    const instructionEndRelative = body.indexOf(REPLY_INSTRUCTION_END);
+    if (instructionEndRelative >= 0) {
+      body = body.slice(instructionEndRelative + REPLY_INSTRUCTION_END.length).trimStart();
+    }
+  }
+  const divider = body.indexOf("\n\n");
+  if (divider < 0) return null;
+  const quoteBlock = body.slice(0, divider).trim();
+  if (!quoteBlock.startsWith(">")) return null;
+  const quote = quoteBlock
+    .split("\n")
+    .map((line) => line.replace(/^>\s?/, ""))
+    .join("\n")
+    .trim();
+  const text = body.slice(divider + 2).trim();
+  return {
+    target: { messageId, content: quote, createdAt },
+    quote,
+    text,
+  };
 }
 
 function fileToComposerImage(file: File): Promise<ComposerImage> {
@@ -936,10 +1027,21 @@ function fileToComposerImage(file: File): Promise<ComposerImage> {
   });
 }
 
-function UserMessageBody({ content }: { content: string }) {
+function UserMessageBody({ content, locale }: { content: string; locale: Locale }) {
   const parsed = parseStoredUserMessage(content);
+  const replyTime = parsed.reply ? formatMessageTime(parsed.reply.target.createdAt) : "";
   return (
     <div className="message-body">
+      {parsed.reply ? (
+        <div className="message-reply-context">
+          <span className="message-reply-label">
+            {t(locale, "message.replyTarget", {
+              time: replyTime || parsed.reply.target.messageId.slice(0, 8),
+            })}
+          </span>
+          <span className="message-reply-quote">{parsed.reply.quote}</span>
+        </div>
+      ) : null}
       {parsed.text ? <div className="message-text">{parsed.text}</div> : null}
       {parsed.images.length > 0 ? (
         <div className="message-images">
@@ -1040,7 +1142,15 @@ function EditIcon() {
       <path d="M9.6 3.6l2.8 2.8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
     </svg>
   );
+}function ReplyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M6.5 4 2.8 7.7l3.7 3.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3.2 7.7h5.2c2.8 0 4.4 1.4 4.4 4.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
 }
+
 
 function SettingsIcon() {
   return (
@@ -1879,6 +1989,7 @@ export function App() {
   const prompt = activeComposerDraft.prompt;
   const composerImages = activeComposerDraft.images;
   const composerTextFiles = activeComposerDraft.textFiles;
+  const activeReplyTarget = activeComposerDraft.replyTo;
 
   function updateComposerDraft(
     sessionKey: string,
@@ -1900,6 +2011,20 @@ export function App() {
       prompt: typeof value === "function" ? value(draft.prompt) : value,
     }));
   }
+
+  function setComposerReplyTarget(replyTo: ReplyTarget | null): void {
+    updateComposerDraft(activeSessionStateKey, (draft) => ({ ...draft, replyTo }));
+  }
+
+  function beginReplyToMessage(message: Message): void {
+    setComposerReplyTarget({
+      messageId: message.id,
+      content: message.content,
+      createdAt: message.created_at,
+    });
+    requestAnimationFrame(() => composerTextareaRef.current?.focus());
+  }
+
 
   function setComposerImages(
     value: ComposerImage[] | ((current: ComposerImage[]) => ComposerImage[]),
@@ -3352,7 +3477,9 @@ export function App() {
     const item = followUpQueueRef.current.find((entry) => entry.id === id) || followUpQueue.find((entry) => entry.id === id);
     if (!item) return;
     removeFollowUp(id);
-    setPrompt(item.text);
+    const parsed = parseStoredUserMessage(item.text);
+    setPrompt(parsed.text);
+    setComposerReplyTarget(parsed.reply?.target ?? null);
     setComposerImages(
       item.images.map((image, index) => ({
         id: `edit-${Date.now()}-${index}`,
@@ -3369,6 +3496,7 @@ export function App() {
   function editSentUserMessage(content: string): void {
     const parsed = parseStoredUserMessage(content);
     setPrompt(parsed.text);
+    setComposerReplyTarget(parsed.reply?.target ?? null);
     setComposerImages(
       parsed.images.map((image, index) => ({
         id: `edit-sent-${Date.now()}-${index}`,
@@ -4102,6 +4230,7 @@ export function App() {
     images: ChatImageAttachment[],
     textFiles: ComposerTextFile[] = [],
     sessionKey: string = activeSessionStateKey,
+    replyTo: ReplyTarget | null = null,
   ): void {
     setComposerDraftBySession((current) => {
       const draft = current[sessionKey] ?? createEmptyComposerDraft();
@@ -4118,6 +4247,7 @@ export function App() {
                 previewUrl: `data:${image.mime_type};base64,${image.data_base64}`,
               })),
         textFiles: draft.textFiles.length > 0 ? draft.textFiles : textFiles,
+        replyTo: draft.replyTo ?? replyTo,
       };
       return { ...current, [sessionKey]: restored };
     });
@@ -4137,10 +4267,14 @@ export function App() {
       name,
     }));
     const textFiles = composerTextFiles;
+    const replyTo = activeReplyTarget;
     if (!message && images.length === 0 && textFiles.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return;
     }
+    const outgoingMessage = replyTo
+      ? formatReplyTargetMessage(message, replyTo)
+      : message;
 
     // While a turn is in flight or waiting for approval, default to queue; optional steer.
     if (isRunning || activeSession?.status === "running" || activeSession?.status === "need_user") {
@@ -4150,20 +4284,20 @@ export function App() {
       }
       if (composerSendMode === "steer") {
         clearComposerDraft(composerSessionKey);
-        const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images, textFiles });
-        if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);
+        const sent = await sendChatMessage(outgoingMessage, { steer: true, sessionId: activeSessionId, images, textFiles });
+        if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey, replyTo);
         setComposerSendMode("queue");
         return;
       }
-      enqueueFollowUp(activeSessionId, message, images, textFiles);
+      enqueueFollowUp(activeSessionId, outgoingMessage, images, textFiles);
       clearComposerDraft(composerSessionKey);
       setError(null);
       return;
     }
 
     clearComposerDraft(composerSessionKey);
-    const sent = await sendChatMessage(message, { images, textFiles });
-    if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);
+    const sent = await sendChatMessage(outgoingMessage, { images, textFiles });
+    if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey, replyTo);
   }
 
   async function steerCurrentRun(): Promise<void> {
@@ -4175,17 +4309,21 @@ export function App() {
       name,
     }));
     const textFiles = composerTextFiles;
+    const replyTo = activeReplyTarget;
     if (!message && images.length === 0 && textFiles.length === 0) {
       setError(t(locale, "error.needPrompt"));
       return;
     }
+    const outgoingMessage = replyTo
+      ? formatReplyTargetMessage(message, replyTo)
+      : message;
     if (!activeSessionId) {
       setError(t(locale, "composer.needActiveSession"));
       return;
     }
     clearComposerDraft(composerSessionKey);
-    const sent = await sendChatMessage(message, { steer: true, sessionId: activeSessionId, images, textFiles });
-    if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);
+    const sent = await sendChatMessage(outgoingMessage, { steer: true, sessionId: activeSessionId, images, textFiles });
+    if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey, replyTo);
   }
 
   async function resolveAction(approved: boolean): Promise<void> {
@@ -6933,7 +7071,7 @@ export function App() {
             return message.role === "user" ? (
               <article className={`message message-${message.role}`} key={message.id}>
                 <div className="message-bubble">
-                  <UserMessageBody content={message.content} />
+                  <UserMessageBody content={message.content} locale={locale} />
                 </div>
                 <div className="message-meta">
                   {formatMessageTime(message.created_at) ? (
@@ -6982,6 +7120,15 @@ export function App() {
                     >
                       <CopyIcon />
                     </button>
+                    <button
+                      type="button"
+                      className="message-meta-button"
+                      onClick={() => beginReplyToMessage(message)}
+                      title={t(locale, "action.reply")}
+                      aria-label={t(locale, "action.reply")}
+                    >
+                      <ReplyIcon />
+                    </button>
                   </div>
                 ) : null}
               </article>
@@ -6996,6 +7143,7 @@ export function App() {
                     encodeLocalUserContent(item.text, item.images),
                     item.textFiles,
                   )}
+                  locale={locale}
                 />
               </div>
               <div className="message-meta">
@@ -7203,6 +7351,30 @@ export function App() {
             >
               <span aria-hidden="true">↓</span>
             </button>
+          ) : null}
+          {activeReplyTarget ? (
+            <div className="composer-reply-target">
+              <div className="composer-reply-target-header">
+                <ReplyIcon />
+                <span>
+                  {t(locale, "composer.replyTarget", {
+                    time: formatMessageTime(activeReplyTarget.createdAt) || activeReplyTarget.messageId.slice(0, 8),
+                  })}
+                </span>
+                <button
+                  type="button"
+                  className="composer-reply-target-remove"
+                  onClick={() => setComposerReplyTarget(null)}
+                  title={t(locale, "composer.replyRemove")}
+                  aria-label={t(locale, "composer.replyRemove")}
+                >
+                  ×
+                </button>
+              </div>
+              <div className="composer-reply-target-quote">
+                {truncateReplyTargetContent(activeReplyTarget.content)}
+              </div>
+            </div>
           ) : null}
           {composerImages.length > 0 ? (
             <div className="composer-images" aria-label={t(locale, "composer.imagesLabel")}>
