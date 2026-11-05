@@ -11446,6 +11446,13 @@ private material
         });
 
         assert!(!is_retryable_provider_attempt(&error));
+
+        let chinese_error = AgentError::Provider(ProviderError::HttpStatus {
+            status: xcoding_providers::StatusCode::TOO_MANY_REQUESTS,
+            body: r#"{"error":{"message":"{\"code\":6004,\"msg\":\"您的使用量已超出频率限制，将在 2026-11-05 16:36:20 UTC+8 重置，您也可以切换其他模型继续使用。\"}","type":"api_error"}}"#.to_owned(),
+            retry_after_secs: None,
+        });
+        assert!(!is_retryable_provider_attempt(&chinese_error));
     }
 
     #[test]

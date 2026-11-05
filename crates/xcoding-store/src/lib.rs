@@ -782,10 +782,15 @@ impl SessionStore {
             });
         }
 
-        let preview_size = byte_length.min(TOOL_OUTPUT_PREVIEW_BYTES);
+        let truncate = role == MessageRole::Tool && byte_length > TOOL_OUTPUT_PREVIEW_BYTES;
+        let preview_size = if truncate {
+            TOOL_OUTPUT_PREVIEW_BYTES
+        } else {
+            byte_length
+        };
         let mut bytes = vec![0; preview_size];
         blob.read_exact(&mut bytes)?;
-        let content = if byte_length > TOOL_OUTPUT_PREVIEW_BYTES {
+        let content = if truncate {
             format!(
                 "{}\n\n[Message preview truncated.]",
                 String::from_utf8_lossy(&bytes)
@@ -2452,6 +2457,31 @@ mod tests {
         fs::create_dir_all(&directory).expect("temporary directory creates");
         let database = directory.join("xcoding.db");
         (directory, database)
+    }
+
+    #[test]
+    fn long_user_messages_are_not_truncated_in_history_pages() {
+        let store = SessionStore::in_memory().expect("store starts");
+        let session = test_session(&store);
+        let content = format!(
+            "Review this screenshot\n\n<!-- xcoding-images:image/png|{} xcoding-images -->",
+            "A".repeat(TOOL_OUTPUT_PREVIEW_BYTES + 1)
+        );
+        store
+            .append_message(session.id, MessageRole::User, content.clone())
+            .expect("long user message saves");
+
+        let page = store
+            .list_message_previews_page(session.id, 0, 50)
+            .expect("preview page loads");
+        assert_eq!(page.messages[0].content.len(), content.len());
+        assert_eq!(page.messages[0].content, content);
+        assert!(
+            !page.messages[0]
+                .content
+                .contains("[Message preview truncated.]")
+        );
+        assert!(!page.messages[0].full_output_available);
     }
 
     #[test]

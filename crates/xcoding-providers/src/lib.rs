@@ -731,7 +731,7 @@ fn body_indicates_context_overflow(body: &str) -> bool {
 /// Treat it as terminal instead of spending the bounded retry budget.
 fn body_indicates_scheduled_quota_reset(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    ["will reset at", "resets at"].iter().any(|marker| {
+    ["will reset at", "resets at", "将在"].iter().any(|marker| {
         lower.find(marker).is_some_and(|index| {
             lower[index + marker.len()..]
                 .trim_start()
@@ -4071,6 +4071,17 @@ mod tests {
         };
 
         assert!(!error.is_retryable());
+
+        let chinese_body = r#"{"error":{"message":"{\"code\":6004,\"msg\":\"您的使用量已超出频率限制，将在 2026-11-05 16:36:20 UTC+8 重置，您也可以切换其他模型继续使用。\",\"requestId\":\"89567cd9bcac2866c5afb2d191010370\"}","type":"api_error","code":null,"gateway_hint":"rate limited by upstream; retry after reset"}}"#;
+        assert!(
+            !ProviderError::HttpStatus {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: chinese_body.to_owned(),
+                retry_after_secs: None,
+            }
+            .is_retryable()
+        );
+
         // A 429 without a reset time keeps the existing bounded retry.
         assert!(
             ProviderError::HttpStatus {
