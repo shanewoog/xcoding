@@ -10,6 +10,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const fixtureSource = resolve(repositoryRoot, "tests/e2e/fixtures/write-loop-agent");
 const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcoding-server";
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
+const historicalToolCardPrefix = "[XCoding historical tool output card;";
 
 const INITIAL_CALC = `export function add(a, b) {
   return a + b;
@@ -377,7 +378,9 @@ function collectToolContents(messages) {
       contents.push(content);
       continue;
     }
-    if (message.role === "assistant" && content.startsWith("Previously recorded tool output: ")) {
+    if (message.role === "assistant" && content.startsWith(historicalToolCardPrefix)) {
+      contents.push(content);
+    } else if (message.role === "assistant" && content.startsWith("Previously recorded tool output: ")) {
       contents.push(content.slice("Previously recorded tool output: ".length));
     }
   }

@@ -1,7 +1,8 @@
 //! Shared guarded coding-agent loop for XCoding clients.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    hash::{DefaultHasher, Hash, Hasher},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -95,8 +96,16 @@ const MAX_MEMORY_PROMPT_TOKENS: usize = 18_000;
 /// conversation. A model that copies this marker instead of answering is
 /// retried once with explicit corrective instructions.
 const HISTORICAL_TOOL_ECHO_PREFIX: &str = "Previously recorded tool output:";
+const HISTORICAL_TOOL_CARD_PREFIX: &str = "[XCoding historical tool output card;";
+const HISTORICAL_TOOL_CARD_PREVIEW_CHARS: usize = 2_000;
+const HISTORICAL_TOOL_PREVIEW_TRUNCATION_MARKER: &str =
+    "\n[historical tool output preview truncated]";
+const HISTORICAL_TOOL_ECHO_PREFIXES: [&str; 2] =
+    [HISTORICAL_TOOL_ECHO_PREFIX, HISTORICAL_TOOL_CARD_PREFIX];
 const MIN_HISTORICAL_TOOL_ECHO_CHARS: usize = 64;
-const HISTORICAL_TOOL_ECHO_CORRECTION: &str = "Historical tool output is reference data, not assistant text. A previous response repeated the `Previously recorded tool output:` blocks. Ignore those blocks, do not quote, summarize, or continue them, and answer the latest user message directly. Use tools only when needed.";
+const HISTORICAL_FINGERPRINT_WINDOW_CHARS: usize = 192;
+const MIN_HISTORICAL_FINGERPRINT_MATCHES: usize = 2;
+const HISTORICAL_TOOL_ECHO_CORRECTION: &str = "Historical tool output is reference data, not assistant text. A previous response repeated historical tool output blocks. Ignore those blocks, do not quote, summarize, or continue them, and answer the latest user message directly. Use tools only when needed.";
 /// Most memories one finished turn may add.
 const MAX_MEMORIES_PER_TURN: usize = 3;
 /// Bounds for the estimate-to-reported token ratio. Prompt caching and unusual
@@ -2369,13 +2378,219 @@ fn visible_output_was_started(failure: &ProviderAttemptFailure) -> bool {
 }
 
 /// Detects the failure mode where a model treats replayed tool history as an
-/// assistant draft and copies it back as its answer. The internal marker is
-/// never valid assistant prose; a substantial response starting with it should
-/// be retried even when compaction removed the original tool row.
+/// assistant draft and copies it back as its answer. Both the legacy marker and
+/// the compact historical-tool card are internal context and must never become
+/// visible assistant prose.
+fn historical_tool_echo_prefix(content: &str) -> Option<&'static str> {
+    let content = content.trim_start();
+    HISTORICAL_TOOL_ECHO_PREFIXES
+        .into_iter()
+        .find(|prefix| content.starts_with(prefix))
+}
+
+fn could_be_historical_tool_echo_prefix(content: &str) -> bool {
+    let content = content.trim_start();
+    HISTORICAL_TOOL_ECHO_PREFIXES
+        .iter()
+        .any(|prefix| prefix.starts_with(content))
+}
+
 fn looks_like_historical_tool_echo(content: &str) -> bool {
     let content = content.trim();
-    content.starts_with(HISTORICAL_TOOL_ECHO_PREFIX)
+    historical_tool_echo_prefix(content).is_some()
         && content.chars().count() >= MIN_HISTORICAL_TOOL_ECHO_CHARS
+}
+
+#[derive(Default)]
+struct HistoricalToolEchoStreamGuard {
+    pending: String,
+    emitting: bool,
+    suppressing: bool,
+    fingerprints: HistoricalContentFingerprints,
+    fingerprint_matched: bool,
+}
+
+enum HistoricalToolEchoStreamAction {
+    Buffered,
+    Emit(String),
+    Suppress,
+}
+
+impl HistoricalToolEchoStreamGuard {
+    fn with_fingerprints(fingerprints: HistoricalContentFingerprints) -> Self {
+        Self {
+            fingerprints,
+            ..Self::default()
+        }
+    }
+
+    fn matched(&self) -> bool {
+        self.fingerprint_matched
+    }
+
+    fn push(&mut self, delta: &str) -> HistoricalToolEchoStreamAction {
+        if self.suppressing {
+            return HistoricalToolEchoStreamAction::Suppress;
+        }
+        if self.fingerprints.observe(delta) {
+            self.fingerprint_matched = true;
+            self.suppressing = true;
+            self.pending.clear();
+            return HistoricalToolEchoStreamAction::Suppress;
+        }
+        if self.emitting {
+            return HistoricalToolEchoStreamAction::Emit(delta.to_owned());
+        }
+        self.pending.push_str(delta);
+        let content = self.pending.trim_start();
+        if content.is_empty() || could_be_historical_tool_echo_prefix(content) {
+            return HistoricalToolEchoStreamAction::Buffered;
+        }
+        if historical_tool_echo_prefix(content).is_some() {
+            if content.chars().count() >= MIN_HISTORICAL_TOOL_ECHO_CHARS {
+                self.suppressing = true;
+                self.pending.clear();
+                return HistoricalToolEchoStreamAction::Suppress;
+            }
+            return HistoricalToolEchoStreamAction::Buffered;
+        }
+        self.emitting = true;
+        HistoricalToolEchoStreamAction::Emit(std::mem::take(&mut self.pending))
+    }
+
+    fn finish(&mut self) -> Option<String> {
+        if self.emitting || self.suppressing || self.pending.is_empty() {
+            return None;
+        }
+        self.emitting = true;
+        Some(std::mem::take(&mut self.pending))
+    }
+}
+
+fn normalized_fingerprint_chars(text: &str) -> Vec<char> {
+    let mut normalized = Vec::new();
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !normalized.is_empty() {
+                pending_space = true;
+            }
+            continue;
+        }
+        if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+        normalized.push(ch);
+    }
+    normalized
+}
+
+fn hash_fingerprint_window(chars: impl IntoIterator<Item = char>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for ch in chars {
+        ch.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn historical_tool_card_preview(content: &str) -> Option<&str> {
+    let content = content.trim_start();
+    let rest = content.strip_prefix(HISTORICAL_TOOL_CARD_PREFIX)?;
+    let (_, body) = rest.split_once("]\n")?;
+    let end = body
+        .find("\n[End historical tool output card.")
+        .unwrap_or(body.len());
+    Some(&body[..end])
+}
+
+#[derive(Default)]
+struct HistoricalContentFingerprints {
+    windows: HashSet<u64>,
+    window: VecDeque<char>,
+    pending_space: bool,
+    consecutive_matches: usize,
+    matched: bool,
+}
+
+impl HistoricalContentFingerprints {
+    fn from_messages(messages: &[ChatMessage]) -> Self {
+        let mut fingerprints = Self::default();
+        for message in messages {
+            if message.role != "assistant" {
+                continue;
+            }
+            let Some(content) = message.content.as_ref() else {
+                continue;
+            };
+            let text = chat_message_content_as_text(content);
+            let Some(preview) = historical_tool_card_preview(&text) else {
+                continue;
+            };
+            let normalized = normalized_fingerprint_chars(preview);
+            if normalized.len() < HISTORICAL_FINGERPRINT_WINDOW_CHARS {
+                continue;
+            }
+            for start in 0..=normalized.len() - HISTORICAL_FINGERPRINT_WINDOW_CHARS {
+                fingerprints.windows.insert(hash_fingerprint_window(
+                    normalized[start..start + HISTORICAL_FINGERPRINT_WINDOW_CHARS]
+                        .iter()
+                        .copied(),
+                ));
+            }
+        }
+        fingerprints
+    }
+
+    fn observe(&mut self, delta: &str) -> bool {
+        if self.matched {
+            return true;
+        }
+        if self.windows.is_empty() {
+            return false;
+        }
+        for ch in delta.chars() {
+            if ch.is_whitespace() {
+                if !self.window.is_empty() {
+                    self.pending_space = true;
+                }
+                continue;
+            }
+            if self.pending_space {
+                self.pending_space = false;
+                self.push_window_char(' ');
+                if self.matched {
+                    return true;
+                }
+            }
+            self.push_window_char(ch);
+            if self.matched {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn push_window_char(&mut self, ch: char) {
+        self.window.push_back(ch);
+        if self.window.len() > HISTORICAL_FINGERPRINT_WINDOW_CHARS {
+            self.window.pop_front();
+        }
+        if self.window.len() != HISTORICAL_FINGERPRINT_WINDOW_CHARS {
+            return;
+        }
+        let matched = self
+            .windows
+            .contains(&hash_fingerprint_window(self.window.iter().copied()));
+        if matched {
+            self.consecutive_matches += 1;
+            if self.consecutive_matches >= MIN_HISTORICAL_FINGERPRINT_MATCHES {
+                self.matched = true;
+            }
+        } else {
+            self.consecutive_matches = 0;
+        }
+    }
 }
 
 /// Returns `true` when the attempt failed because the stream itself broke or
@@ -2750,6 +2965,7 @@ impl<'a> AgentService<'a> {
         // Recorded before the request leaves, so a usage report can be compared
         // against exactly what was estimated for it.
         let estimated_prompt_tokens = estimate_chat_request_tokens(&messages, definitions);
+        let historical_fingerprints = HistoricalContentFingerprints::from_messages(&messages);
         let stream_result = tokio::select! {
             biased;
             _ = self.wait_until_cancelled(session.id) => {
@@ -2796,6 +3012,8 @@ impl<'a> AgentService<'a> {
         let mut received_event = false;
         let mut first_event_at: Option<tokio::time::Instant> = None;
         let mut last_event_at = attempt_started_at;
+        let mut text_delta_guard =
+            HistoricalToolEchoStreamGuard::with_fingerprints(historical_fingerprints);
 
         loop {
             let deadline = if received_event {
@@ -2830,13 +3048,24 @@ impl<'a> AgentService<'a> {
                                 }
                                 ProviderEvent::TextDelta(delta) => {
                                     content.push_str(&delta);
-                                    self.emit(
-                                        on_event,
-                                        SessionEvent::TextDelta {
-                                            session_id: session.id,
-                                            delta,
-                                        },
-                                    );
+                                    match text_delta_guard.push(&delta) {
+                                        HistoricalToolEchoStreamAction::Buffered => {}
+                                        HistoricalToolEchoStreamAction::Emit(delta) => {
+                                            if !delta.is_empty() {
+                                                self.emit(
+                                                    on_event,
+                                                    SessionEvent::TextDelta {
+                                                        session_id: session.id,
+                                                        delta,
+                                                    },
+                                                );
+                                            }
+                                        }
+                                        // Keep draining the provider stream so a leaked
+                                        // DSML tool call can still be recovered below, but
+                                        // never expose the historical marker in the UI.
+                                        HistoricalToolEchoStreamAction::Suppress => {}
+                                    }
                                 }
                                 ProviderEvent::ToolCall(tool_call) => tool_calls.push(tool_call),
                                 // Thinking is not shown and is not stored, but
@@ -2900,6 +3129,17 @@ impl<'a> AgentService<'a> {
             }
         }
 
+        if let Some(delta) = text_delta_guard.finish() {
+            if !delta.is_empty() {
+                self.emit(
+                    on_event,
+                    SessionEvent::TextDelta {
+                        session_id: session.id,
+                        delta,
+                    },
+                );
+            }
+        }
         if let Err(error) = self.ensure_not_cancelled_preserving(session.id, &content) {
             return Err(ProviderAttemptFailure {
                 error,
@@ -2937,7 +3177,9 @@ impl<'a> AgentService<'a> {
                 }
             }
         }
-        if tool_calls.is_empty() && looks_like_historical_tool_echo(&content) {
+        if tool_calls.is_empty()
+            && (looks_like_historical_tool_echo(&content) || text_delta_guard.matched())
+        {
             return Err(ProviderAttemptFailure {
                 error: AgentError::HistoricalToolEcho,
                 output_chars: content.chars().count(),
@@ -3539,9 +3781,14 @@ impl<'a> AgentService<'a> {
                             )
                             .await;
                         let attempt_result = match attempt_result {
-                            Ok((content, tool_calls, _model_reported, _prompt_tokens, ttft_ms, total_ms))
-                                if is_transient_provider_busy_response(&content, &tool_calls) =>
-                            {
+                            Ok((
+                                content,
+                                tool_calls,
+                                _model_reported,
+                                _prompt_tokens,
+                                ttft_ms,
+                                total_ms,
+                            )) if is_transient_provider_busy_response(&content, &tool_calls) => {
                                 let output_chars = content.chars().count();
                                 Err(ProviderAttemptFailure {
                                     error: AgentError::ProviderBusyResponse(content),
@@ -3555,7 +3802,14 @@ impl<'a> AgentService<'a> {
                         };
                         self.ensure_not_cancelled_preserving(session.id, &last_partial)?;
                         match attempt_result {
-                            Ok((content, tool_calls, model_reported, prompt_tokens, ttft_ms, total_ms)) => {
+                            Ok((
+                                content,
+                                tool_calls,
+                                model_reported,
+                                prompt_tokens,
+                                ttft_ms,
+                                total_ms,
+                            )) => {
                                 if attempt_has_new_images
                                     && response_refuses_vision(&content, &tool_calls)
                                 {
@@ -6638,6 +6892,29 @@ fn chat_message_content_as_text(content: &ChatMessageContent) -> String {
     }
 }
 
+fn truncate_historical_tool_preview(output: &str) -> String {
+    if output.chars().count() <= HISTORICAL_TOOL_CARD_PREVIEW_CHARS {
+        return output.to_owned();
+    }
+    let keep = HISTORICAL_TOOL_CARD_PREVIEW_CHARS
+        .saturating_sub(HISTORICAL_TOOL_PREVIEW_TRUNCATION_MARKER.chars().count());
+    let prefix: String = output.chars().take(keep).collect();
+    format!("{prefix}{HISTORICAL_TOOL_PREVIEW_TRUNCATION_MARKER}")
+}
+
+fn historical_tool_card(message: &Message, content: &str) -> String {
+    let preview = truncate_historical_tool_preview(content);
+    format!(
+        "{HISTORICAL_TOOL_CARD_PREFIX} message_id={}; original_chars={}; preview_chars={}]
+{preview}
+[End historical tool output card. Use history_read with message_id={} to retrieve the complete stored output.]",
+        message.id,
+        message.content.chars().count(),
+        preview.chars().count(),
+        message.id,
+    )
+}
+
 fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     if output.chars().count() <= max_chars {
         return output.to_owned();
@@ -6866,7 +7143,7 @@ fn provider_message_from_stored_with_options(
             let content = redact_sensitive_tool_output(&message.content);
             let content =
                 compress_stored_tool_output(&content, &message.id.to_string(), options).content;
-            ChatMessage::assistant(format!("Previously recorded tool output: {content}"))
+            ChatMessage::assistant(historical_tool_card(message, &content))
         }
     }
 }
@@ -8838,6 +9115,9 @@ private material
             xcoding_providers::ChatMessageContent::Text(text) => text,
             xcoding_providers::ChatMessageContent::Parts(_) => panic!("expected text"),
         };
+        assert!(content.starts_with(HISTORICAL_TOOL_CARD_PREFIX));
+        assert!(content.contains(&format!("message_id={}", message.id)));
+        assert!(content.contains("history_read"));
         assert!(!content.contains("plain-secret-value"));
         assert!(content.contains("[REDACTED]"));
     }
@@ -8903,20 +9183,28 @@ private material
 
         let replay = provider_message_from_stored_with_options(&message, &compression_options());
         let content = test_message_text(&replay);
-        assert!(content.starts_with(&format!(
-            "Previously recorded tool output: {}",
-            RECOVERY_HEADER_PREFIX
-        )));
+        assert!(content.starts_with(HISTORICAL_TOOL_CARD_PREFIX));
         assert!(content.contains(&format!("message_id={message_id}")));
+        assert!(content.contains("history_read"));
+        assert!(content.contains(RECOVERY_HEADER_PREFIX));
         assert!(!content.contains("plain-secret-value"));
         assert!(content.contains("[REDACTED]"));
         assert!(!content.contains("line 100: ordinary output"));
+        assert!(
+            content.chars().count()
+                <= HISTORICAL_TOOL_CARD_PREVIEW_CHARS
+                    + HISTORICAL_TOOL_PREVIEW_TRUNCATION_MARKER.chars().count()
+                    + 512
+        );
 
         let uncompressed =
             provider_message_from_stored_with_options(&message, &CompressionOptions::default());
         let content = test_message_text(&uncompressed);
+        assert!(content.starts_with(HISTORICAL_TOOL_CARD_PREFIX));
+        assert!(content.contains(&format!("message_id={message_id}")));
         assert!(!content.contains(RECOVERY_HEADER_PREFIX));
-        assert!(content.contains("line 100: ordinary output"));
+        assert!(content.contains("line 0: ordinary output"));
+        assert!(!content.contains("line 100: ordinary output"));
         assert!(!content.contains("plain-secret-value"));
         assert!(content.contains("[REDACTED]"));
     }
@@ -8939,6 +9227,7 @@ private material
         assert_eq!(rebuilt.len(), 3);
         assert_eq!(rebuilt[0].role, "system");
         assert_eq!(rebuilt[1].role, "assistant");
+        assert!(test_message_text(&rebuilt[1]).starts_with(HISTORICAL_TOOL_CARD_PREFIX));
         assert!(test_message_text(&rebuilt[1]).contains(RECOVERY_HEADER_PREFIX));
 
         let uncompressed = rebuild_messages_for_new_context_with_options(
@@ -8947,8 +9236,9 @@ private material
             &history,
             &CompressionOptions::default(),
         );
+        assert!(test_message_text(&uncompressed[1]).starts_with(HISTORICAL_TOOL_CARD_PREFIX));
         assert!(!test_message_text(&uncompressed[1]).contains(RECOVERY_HEADER_PREFIX));
-        assert!(test_message_text(&uncompressed[1]).contains("line 100: ordinary output"));
+        assert!(!test_message_text(&uncompressed[1]).contains("line 100: ordinary output"));
     }
 
     #[test]
@@ -11494,6 +11784,96 @@ private material
         assert!(!looks_like_historical_tool_echo(
             "Previously recorded tool output: ok"
         ));
+
+        let card = format!(
+            "{HISTORICAL_TOOL_CARD_PREFIX} message_id={} original_chars=120 preview_chars=120]\n{}",
+            Uuid::new_v4(),
+            note
+        );
+        assert!(looks_like_historical_tool_echo(&card));
+    }
+
+    #[test]
+    fn historical_tool_echo_stream_guard_suppresses_prefix_until_validated() {
+        let mut normal = HistoricalToolEchoStreamGuard::default();
+        assert!(matches!(
+            normal.push("Hello"),
+            HistoricalToolEchoStreamAction::Emit(ref value) if value == "Hello"
+        ));
+
+        let mut legacy = HistoricalToolEchoStreamGuard::default();
+        assert!(matches!(
+            legacy.push("Previously recorded "),
+            HistoricalToolEchoStreamAction::Buffered
+        ));
+        assert!(matches!(
+            legacy.push(&"tool output: ".repeat(8)),
+            HistoricalToolEchoStreamAction::Suppress
+        ));
+
+        let mut card = HistoricalToolEchoStreamGuard::default();
+        assert!(matches!(
+            card.push(HISTORICAL_TOOL_CARD_PREFIX),
+            HistoricalToolEchoStreamAction::Buffered
+        ));
+        assert!(matches!(
+            card.push(&"card body ".repeat(10)),
+            HistoricalToolEchoStreamAction::Suppress
+        ));
+
+        let mut short = HistoricalToolEchoStreamGuard::default();
+        assert!(matches!(
+            short.push("Previously recorded tool output: ok"),
+            HistoricalToolEchoStreamAction::Buffered
+        ));
+        assert_eq!(
+            short.finish().as_deref(),
+            Some("Previously recorded tool output: ok")
+        );
+    }
+
+    #[test]
+    fn historical_content_fingerprint_suppresses_card_body_without_header() {
+        let body = "stable historical tool output line with enough detail ".repeat(12);
+        let card = format!(
+            "{HISTORICAL_TOOL_CARD_PREFIX} message_id={} original_chars={} preview_chars={}]\n{body}\n[End historical tool output card. Use history_read with message_id={} to retrieve the complete stored output.]",
+            Uuid::new_v4(),
+            body.chars().count(),
+            body.chars().count(),
+            Uuid::new_v4(),
+        );
+        let fingerprints =
+            HistoricalContentFingerprints::from_messages(&[ChatMessage::assistant(card)]);
+        let mut guard = HistoricalToolEchoStreamGuard::with_fingerprints(fingerprints);
+        let mut suppressed = false;
+        for chunk in body.as_bytes().chunks(23) {
+            let delta = std::str::from_utf8(chunk).expect("ASCII test data");
+            if matches!(guard.push(delta), HistoricalToolEchoStreamAction::Suppress) {
+                suppressed = true;
+                break;
+            }
+        }
+        assert!(suppressed, "card body must match by content fingerprint");
+        assert!(guard.matched());
+    }
+
+    #[test]
+    fn historical_content_fingerprint_ignores_normal_answer() {
+        let body = "stable historical tool output line with enough detail ".repeat(12);
+        let card = format!(
+            "{HISTORICAL_TOOL_CARD_PREFIX} message_id={}]\n{body}\n[End historical tool output card. Use history_read with message_id={} to retrieve the complete stored output.]",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let fingerprints =
+            HistoricalContentFingerprints::from_messages(&[ChatMessage::assistant(card)]);
+        let mut guard = HistoricalToolEchoStreamGuard::with_fingerprints(fingerprints);
+        let normal = "I reviewed the historical context and will apply the fix now. ".repeat(8);
+        assert!(matches!(
+            guard.push(&normal),
+            HistoricalToolEchoStreamAction::Emit(ref value) if value == &normal
+        ));
+        assert!(!guard.matched());
     }
 
     #[test]

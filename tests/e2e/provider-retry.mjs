@@ -10,6 +10,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const fixtureRoot = resolve(repositoryRoot, "tests/e2e/fixtures/read-only-agent");
 const binaryName = process.platform === "win32" ? "xcoding-server.exe" : "xcoding-server";
 const serverPath = resolve(repositoryRoot, "target/debug", binaryName);
+const historicalToolCardPrefix = "[XCoding historical tool output card;";
 
 async function main() {
   if (process.argv.includes("--history-echo-only")) {
@@ -1178,7 +1179,34 @@ async function assertHistoricalToolEchoIsRetriedWithCorrection() {
     assert.equal(second.session.status, "done");
     assert.match(second.message?.content ?? "", /hello after historical echo retry/);
     assert.doesNotMatch(second.message?.content ?? "", /Previously recorded tool output/i);
+    assert.doesNotMatch(second.message?.content ?? "", /historical tool output card/i);
     assert.equal(mock.requests.length, 4, "one echo attempt must be replaced by one clean retry");
+
+    const historicalCard = mock.requests[2].messages.find(
+      (message) =>
+        message.role === "assistant" &&
+        typeof message.content === "string" &&
+        message.content.startsWith(historicalToolCardPrefix),
+    );
+    assert.ok(historicalCard, "historical tool output must be replayed as a compact card");
+    assert.match(historicalCard.content, /message_id=/);
+    assert.match(historicalCard.content, /history_read/);
+    assert.ok(historicalCard.content.length < 3_000, "historical tool card must stay bounded");
+
+    const historicalBody = historicalCard.content
+      .slice(historicalCard.content.indexOf("]\n") + 2)
+      .split("\n[End historical tool output card.")[0];
+    assert.ok(historicalBody.length > 0, "historical tool card must contain a body");
+
+    const textDeltas = rpc.events.filter((event) => event.type === "text_delta");
+    assert.ok(
+      textDeltas.every((event) => !String(event.delta).includes(historicalBody.slice(0, 64))),
+      "a body-only historical echo must be suppressed by its content fingerprint",
+    );
+    assert.ok(
+      textDeltas.every((event) => !/Previously recorded tool output|historical tool output card/i.test(String(event.delta))),
+      "echoed historical tool output must be suppressed before it reaches the UI",
+    );
 
     const resetEvents = rpc.events.filter((event) => event.type === "stream_reset");
     assert.equal(resetEvents.length, 1, "the echoed answer must be removed from the UI");
@@ -1444,7 +1472,10 @@ async function startFlakyProvider({
           (message) =>
             message.role === "assistant" &&
             typeof message.content === "string" &&
-            message.content.startsWith("Previously recorded tool output:"),
+            (
+              message.content.startsWith("Previously recorded tool output:") ||
+              message.content.startsWith(historicalToolCardPrefix)
+            ),
         )
         .map((message) => message.content);
       if (lastUserText.includes("trigger historical echo") && historicalContents.length > 0) {
