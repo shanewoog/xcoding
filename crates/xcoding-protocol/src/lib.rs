@@ -470,6 +470,7 @@ pub struct SessionDisplayDetail {
     pub pending_actions: Vec<PendingAction>,
     pub restore_points: Vec<RestorePoint>,
     pub events: Vec<PersistedSessionEvent>,
+    pub follow_up_queue: Vec<FollowUpQueueEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1148,6 +1149,57 @@ pub struct ChatImageAttachment {
     pub name: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpQueueStatus {
+    Queued,
+    NotStarted,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FollowUpQueueTextFile {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    pub language: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct FollowUpQueueEntry {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub text: String,
+    pub images: Vec<ChatImageAttachment>,
+    pub text_files: Vec<FollowUpQueueTextFile>,
+    pub status: FollowUpQueueStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct QueueFollowUpParams {
+    pub session_id: Uuid,
+    pub text: String,
+    #[serde(default)]
+    pub images: Vec<ChatImageAttachment>,
+    #[serde(default)]
+    pub text_files: Vec<FollowUpQueueTextFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SetFollowUpQueueStatusParams {
+    pub session_id: Uuid,
+    pub follow_up_id: Uuid,
+    pub status: FollowUpQueueStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeleteFollowUpQueueEntryParams {
+    pub session_id: Uuid,
+    pub follow_up_id: Uuid,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ChatParams {
     pub workspace_root: String,
@@ -1321,6 +1373,9 @@ pub enum SessionEvent {
         /// Total wall-clock milliseconds for the entire provider attempt.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_ms: Option<u64>,
+        /// Provider-reported input tokens for this request, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<usize>,
     },
     /// Vision delegate started processing images.
     VisionDelegateStart {

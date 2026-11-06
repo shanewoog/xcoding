@@ -1600,6 +1600,9 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   animation: run-status-pulse 1.1s ease-in-out infinite;
   background: var(--accent);
 }
+.inline-activity-dot.cancelled {
+  background: var(--text-muted);
+}
 .inline-activity-dot.failed {
   align-items: center;
   background: var(--danger-strong);

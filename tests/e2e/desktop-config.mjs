@@ -186,7 +186,7 @@ async function main() {
   const submitEnd = appSource.indexOf("async function steerCurrentRun", submitStart);
   assert.ok(submitStart >= 0 && submitEnd > submitStart, "App missing composer submit handler");
   const submitSource = appSource.slice(submitStart, submitEnd);
-  assert.ok(submitSource.includes("enqueueFollowUp(activeSessionId, message, images, textFiles);"), "running sessions must queue follow-up input");
+  assert.ok(submitSource.includes("await enqueueFollowUp(activeSessionId, outgoingMessage, images, textFiles)"), "running sessions must persist queued follow-up input");
   const conversationStart = appSource.indexOf('className="conversation"');
   const conversationEnd = appSource.indexOf('<div className="chat-bottom">', conversationStart);
   assert.ok(conversationStart >= 0 && conversationEnd > conversationStart, "App missing conversation region");
@@ -263,7 +263,7 @@ async function main() {
   assert.ok(steerStart >= 0 && steerEnd > steerStart, "App missing steer handler");
   const steerSource = appSource.slice(steerStart, steerEnd);
   assert.ok(
-    steerSource.includes("if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey);"),
+    steerSource.includes("if (!sent) restoreComposerDraft(message, images, textFiles, composerSessionKey, replyTo);"),
     "a steer that never reaches the model must restore the full composer draft",
   );
   assert.ok(
@@ -515,8 +515,8 @@ async function main() {
     "repeated stop clicks must not cancel an already-cancelling session",
   );
   assert.ok(
-    cancelSessionSource.includes("current.filter((item) => item.sessionId !== sessionId)"),
-    "stopping a task must discard its queued follow-ups",
+    cancelSessionSource.includes("markQueuedFollowUpsNotStarted(sessionId)"),
+    "stopping a task must preserve its queued follow-ups as not started",
   );
   assert.ok(
     !cancelSessionSource.includes("drainFollowUpQueue(sessionId)"),

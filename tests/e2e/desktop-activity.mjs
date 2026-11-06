@@ -380,6 +380,26 @@ async function main() {
   assert.equal(merged.policy, "auto-apply");
   assert.equal(merged.label, "Applied patch to src/a.ts");
 
+
+  assert.match(
+    appSource,
+    /function buildInlineActivity\([\s\S]*?sessionStatus: Session\["status"\]/,
+    "inline activity must know the loaded session status",
+  );
+  assert.ok(
+    appSource.includes('sessionStatus !== "running" && sessionStatus !== "need_user"') &&
+      appSource.includes('buildInlineActivity(detail.events, locale, detail.session.status)'),
+    "a restarted finished session must not replay orphaned tool starts as running",
+  );
+  assert.ok(
+    appSource.includes('"status.cancelled"'),
+    "cancelled inline activity must have a localized status",
+  );
+  assert.ok(
+    cssSource.includes(".inline-activity-dot.cancelled"),
+    "cancelled inline activity needs a non-running dot style",
+  );
+
   console.log("Desktop activity policy UX checks passed.");
 }
 

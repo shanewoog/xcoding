@@ -13,11 +13,12 @@ use thiserror::Error;
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, ContextCompaction,
     ContextWindow, CreateSessionParams, CreateSessionResult, FileChangeKind, FileChangeSummary,
-    GetConfigParams, GetConfigResult, GetSessionDetailParams, GetSessionDetailResult,
-    JsonRpcRequest, JsonRpcResponse, ListSessionsParams, ListSessionsResult, LocalMemory, Message,
-    MessageRole, ModelCallReport, PendingAction, PendingActionStatus, PersistedSessionEvent,
-    PingResult, ReplaySessionParams, ReplaySessionResult, ReplayStep, RestorePoint, RpcError,
-    Session, SessionDetail, SessionDisplayDetail, SessionEvent, SessionMessagePage, SessionStatus,
+    FollowUpQueueEntry, FollowUpQueueStatus, GetConfigParams, GetConfigResult,
+    GetSessionDetailParams, GetSessionDetailResult, JsonRpcRequest, JsonRpcResponse,
+    ListSessionsParams, ListSessionsResult, LocalMemory, Message, MessageRole, ModelCallReport,
+    PendingAction, PendingActionStatus, PersistedSessionEvent, PingResult, QueueFollowUpParams,
+    ReplaySessionParams, ReplaySessionResult, ReplayStep, RestorePoint, RpcError, Session,
+    SessionDetail, SessionDisplayDetail, SessionEvent, SessionMessagePage, SessionStatus,
     SetConfigParams, SetConfigResult, TaskSummary, ToolCall, ToolName, WorkspaceConfig,
 };
 pub use xcoding_store::{RedactionReport, StoredVisionDescription};
@@ -447,6 +448,52 @@ impl CoreService {
             .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))
     }
 
+    pub fn list_follow_up_queue(
+        &self,
+        session_id: uuid::Uuid,
+    ) -> Result<Vec<FollowUpQueueEntry>, CoreError> {
+        self.store
+            .list_follow_up_queue(session_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn queue_follow_up(
+        &self,
+        params: QueueFollowUpParams,
+    ) -> Result<FollowUpQueueEntry, CoreError> {
+        self.store.queue_follow_up(params).map_err(CoreError::from)
+    }
+
+    pub fn set_follow_up_queue_status(
+        &self,
+        session_id: uuid::Uuid,
+        follow_up_id: uuid::Uuid,
+        status: FollowUpQueueStatus,
+    ) -> Result<Option<FollowUpQueueEntry>, CoreError> {
+        self.store
+            .set_follow_up_queue_status(session_id, follow_up_id, status)
+            .map_err(CoreError::from)
+    }
+
+    pub fn mark_queued_follow_ups_not_started(
+        &self,
+        session_id: uuid::Uuid,
+    ) -> Result<usize, CoreError> {
+        self.store
+            .mark_queued_follow_ups_not_started(session_id)
+            .map_err(CoreError::from)
+    }
+
+    pub fn delete_follow_up_queue_entry(
+        &self,
+        session_id: uuid::Uuid,
+        follow_up_id: uuid::Uuid,
+    ) -> Result<bool, CoreError> {
+        self.store
+            .delete_follow_up_queue_entry(session_id, follow_up_id)
+            .map_err(CoreError::from)
+    }
+
     pub fn messages(&self, session_id: uuid::Uuid) -> Result<Vec<Message>, CoreError> {
         self.store
             .list_messages(session_id)
@@ -681,6 +728,7 @@ impl CoreService {
             pending_actions: self.store.list_pending_actions(session_id)?,
             restore_points: self.store.list_restore_points(session_id)?,
             events: self.store.list_events(session_id)?,
+            follow_up_queue: self.store.list_follow_up_queue(session_id)?,
         })
     }
 
@@ -1802,6 +1850,23 @@ mod tests {
             .expect("large tool output is included in the earlier page");
         assert!(large_output.content.len() <= 16 * 1024 + 64);
         assert!(large_output.full_output_available);
+        core.queue_follow_up(QueueFollowUpParams {
+            session_id: session.id,
+            text: "not started yet".to_owned(),
+            images: Vec::new(),
+            text_files: Vec::new(),
+        })
+        .expect("queued follow-up saves");
+        core.mark_queued_follow_ups_not_started(session.id)
+            .expect("queued follow-up becomes not started");
+        let with_queue = core
+            .session_display_detail(session.id, None, 50)
+            .expect("display detail includes queue");
+        assert_eq!(with_queue.follow_up_queue.len(), 1);
+        assert_eq!(
+            with_queue.follow_up_queue[0].status,
+            FollowUpQueueStatus::NotStarted
+        );
         drop(core);
         let _ = std::fs::remove_file(database);
         let _ = std::fs::remove_dir_all(attachments);

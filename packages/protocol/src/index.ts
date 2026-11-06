@@ -454,6 +454,44 @@ export interface ChatImageAttachment {
   name?: string;
 }
 
+export type FollowUpQueueStatus = "queued" | "not_started" | "cancelled";
+
+export interface FollowUpQueueTextFile {
+  id: string;
+  name: string;
+  content: string;
+  language: string;
+}
+
+export interface FollowUpQueueEntry {
+  id: string;
+  session_id: string;
+  text: string;
+  images: ChatImageAttachment[];
+  text_files: FollowUpQueueTextFile[];
+  status: FollowUpQueueStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QueueFollowUpParams {
+  session_id: string;
+  text: string;
+  images?: ChatImageAttachment[];
+  text_files?: FollowUpQueueTextFile[];
+}
+
+export interface SetFollowUpQueueStatusParams {
+  session_id: string;
+  follow_up_id: string;
+  status: FollowUpQueueStatus;
+}
+
+export interface DeleteFollowUpQueueEntryParams {
+  session_id: string;
+  follow_up_id: string;
+}
+
 export interface ChatParams {
   workspace_root: string;
   message: string;
@@ -569,6 +607,7 @@ export interface SessionDisplayDetail {
   pending_actions: PendingAction[];
   restore_points: RestorePoint[];
   events: PersistedSessionEvent[];
+  follow_up_queue: FollowUpQueueEntry[];
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "done";
@@ -678,6 +717,8 @@ export type SessionEvent =
       ttft_ms?: number;
       /** Total wall-clock milliseconds for the entire provider attempt. */
       total_ms?: number;
+      /** Provider-reported input tokens for this request, when available. */
+      prompt_tokens?: number;
     }
   | {
       type: "vision_delegate_start";

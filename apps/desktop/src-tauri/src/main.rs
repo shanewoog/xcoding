@@ -16,7 +16,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
     menu::{Menu, MenuItem},
@@ -30,12 +30,13 @@ use xcoding_mcp::{
 };
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
-    CreateProjectResult, ImportProjectParams, ImportProjectResult, ListModelsResult, PingResult,
-    ModelCallReport, ModelRouteStatus, ProjectDir, ProviderAuthStatus, ProviderKeyStatus,
+    CreateProjectResult, DeleteFollowUpQueueEntryParams, FollowUpQueueEntry, ImportProjectParams,
+    ImportProjectResult, ListModelsResult, PingResult, ModelCallReport, ModelRouteStatus, ProjectDir,
+    ProviderAuthStatus, ProviderKeyStatus, QueueFollowUpParams,
     ProviderWireApi, RenameProjectParams, RenameProjectResult, ReplaySessionResult,
     ResolveActionParams, ResolveActionResult, RollbackRestorePointParams,
     RollbackRestorePointResult, Session, SessionDisplayDetail, SessionMessagePage,
-    PersistedSessionEvent, SetConfigParams, UserConfig, WorkspaceConfig,
+    PersistedSessionEvent, SetConfigParams, SetFollowUpQueueStatusParams, UserConfig, WorkspaceConfig,
 };
 use xcoding_providers::{
     apply_user_config_to_env, bootstrap_credentials, inspect_auth, list_models_with_wire_api,
@@ -323,6 +324,71 @@ fn boot_log(message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[{ts}] {message}");
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExitState {
+    pid: u32,
+    started_at_ms: u64,
+    clean: bool,
+    reason: Option<String>,
+}
+
+fn exit_state_path() -> PathBuf {
+    user_config_dir().join("desktop-exit.json")
+}
+
+fn read_exit_state() -> Option<ExitState> {
+    let raw = fs::read_to_string(exit_state_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_exit_state(state: &ExitState) {
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = fs::write(exit_state_path(), format!("{json}\n"));
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn record_startup_exit_state() {
+    if let Some(previous) = read_exit_state() {
+        if !previous.clean {
+            boot_log(&format!(
+                "previous exit was abnormal: pid={} started_at_ms={} reason={:?}",
+                previous.pid, previous.started_at_ms, previous.reason
+            ));
+        }
+    }
+    write_exit_state(&ExitState {
+        pid: std::process::id(),
+        started_at_ms: now_millis(),
+        clean: false,
+        reason: Some("running".to_owned()),
+    });
+}
+
+fn record_clean_exit(reason: &str) {
+    write_exit_state(&ExitState {
+        pid: std::process::id(),
+        started_at_ms: now_millis(),
+        clean: true,
+        reason: Some(reason.to_owned()),
+    });
+}
+
+fn record_abnormal_exit(reason: &str) {
+    write_exit_state(&ExitState {
+        pid: std::process::id(),
+        started_at_ms: now_millis(),
+        clean: false,
+        reason: Some(reason.to_owned()),
+    });
 }
 
 fn database_path() -> Result<PathBuf, String> {
@@ -631,6 +697,44 @@ fn session_detail(
 }
 
 #[tauri::command]
+fn queue_follow_up(
+    app: AppHandle,
+    params: QueueFollowUpParams,
+) -> Result<FollowUpQueueEntry, String> {
+    open_core(&app)?
+        .queue_follow_up(params)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_follow_up_queue_status(
+    app: AppHandle,
+    params: SetFollowUpQueueStatusParams,
+) -> Result<Option<FollowUpQueueEntry>, String> {
+    open_core(&app)?
+        .set_follow_up_queue_status(params.session_id, params.follow_up_id, params.status)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn mark_follow_ups_not_started(app: AppHandle, session_id: String) -> Result<usize, String> {
+    let session_id = uuid::Uuid::parse_str(&session_id).map_err(|error| error.to_string())?;
+    open_core(&app)?
+        .mark_queued_follow_ups_not_started(session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_follow_up_queue_entry(
+    app: AppHandle,
+    params: DeleteFollowUpQueueEntryParams,
+) -> Result<bool, String> {
+    open_core(&app)?
+        .delete_follow_up_queue_entry(params.session_id, params.follow_up_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn session_message_page(
     app: AppHandle,
     session_id: String,
@@ -885,8 +989,11 @@ fn main() {
         }
     };
     boot_log("single-instance mutex acquired");
+    record_startup_exit_state();
     std::panic::set_hook(Box::new(|info| {
-        boot_log(&format!("panic: {info}"));
+        let reason = format!("panic: {info}");
+        record_abnormal_exit(&reason);
+        boot_log(&reason);
     }));
 
     load_portable_dotenv();
@@ -1029,6 +1136,10 @@ fn main() {
             clear_local_memories,
             redact_historical_secrets,
             session_detail,
+            queue_follow_up,
+            set_follow_up_queue_status,
+            mark_follow_ups_not_started,
+            delete_follow_up_queue_entry,
             session_message_page,
             session_events,
             show_tool_output_attachment,
@@ -1088,8 +1199,12 @@ fn main() {
         .run(tauri::generate_context!());
 
     match result {
-        Ok(()) => boot_log("tauri run returned ok"),
+        Ok(()) => {
+            record_clean_exit("tauri_run_ok");
+            boot_log("tauri run returned ok");
+        }
         Err(error) => {
+            record_abnormal_exit(&format!("tauri_run_failed: {error}"));
             boot_log(&format!("tauri run failed: {error}"));
             panic!("failed to run XCoding Desktop: {error}");
         }
@@ -1098,7 +1213,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_project_root_key, missing_project_session_roots};
+    use super::{direct_project_root_key, missing_project_session_roots, ExitState};
     use xcoding_protocol::ProjectDir;
 
     #[cfg(windows)]
@@ -1111,6 +1226,20 @@ mod tests {
         ));
         drop(first);
         assert!(super::acquire_single_instance().is_ok());
+    }
+
+    #[test]
+    fn exit_state_preserves_abnormal_reason_for_next_startup() {
+        let state = ExitState {
+            pid: 1234,
+            started_at_ms: 42,
+            clean: false,
+            reason: Some("panic: test".to_owned()),
+        };
+        let json = serde_json::to_string(&state).expect("exit state serializes");
+        let parsed: ExitState = serde_json::from_str(&json).expect("exit state deserializes");
+        assert!(!parsed.clean);
+        assert_eq!(parsed.reason.as_deref(), Some("panic: test"));
     }
 
     #[test]

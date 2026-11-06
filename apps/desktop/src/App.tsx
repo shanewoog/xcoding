@@ -12,6 +12,8 @@ import type {
   ChatParams,
   ChatResult,
   CloudProviderConfig,
+  FollowUpQueueEntry,
+  FollowUpQueueStatus,
   HttpProxyMode,
   Message,
   ModelCapabilities,
@@ -449,7 +451,7 @@ type InlineActivityEntry = {
   label: string;
   path?: string;
   command?: string;
-  state: "running" | "done" | "failed";
+  state: "running" | "done" | "failed" | "cancelled";
   created_at: string;
   added?: number;
   removed?: number;
@@ -530,7 +532,11 @@ function upsertInlineActivity(
   return list.sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
-function buildInlineActivity(events: PersistedSessionEvent[], locale: Locale): InlineActivityEntry[] {
+function buildInlineActivity(
+  events: PersistedSessionEvent[],
+  locale: Locale,
+  sessionStatus: Session["status"],
+): InlineActivityEntry[] {
   const byId = new Map<string, InlineActivityEntry>();
   const ordered = [...events].sort((a, b) => a.created_at.localeCompare(b.created_at));
   for (const item of ordered) {
@@ -547,6 +553,21 @@ function buildInlineActivity(events: PersistedSessionEvent[], locale: Locale): I
           state: event.success ? "done" : "failed",
           summary: event.summary,
         });
+      }
+    }
+  }
+  // A process can die between tool_start and tool_end. A finished session must never
+  // replay those orphaned starts as "still running" after a restart.
+  if (sessionStatus !== "running" && sessionStatus !== "need_user") {
+    const staleState: InlineActivityEntry["state"] =
+      sessionStatus === "cancelled"
+        ? "cancelled"
+        : sessionStatus === "done"
+          ? "done"
+          : "failed";
+    for (const [id, entry] of byId) {
+      if (entry.state === "running") {
+        byId.set(id, { ...entry, state: staleState });
       }
     }
   }
@@ -656,7 +677,27 @@ type QueuedFollowUp = {
   text: string;
   images: ChatImageAttachment[];
   textFiles: ComposerTextFile[];
+  status: FollowUpQueueStatus;
+  createdAt: string;
 };
+
+function queuedFollowUpFromEntry(entry: FollowUpQueueEntry): QueuedFollowUp {
+  return {
+    id: entry.id,
+    sessionId: entry.session_id,
+    text: entry.text,
+    images: entry.images,
+    textFiles: entry.text_files,
+    status: entry.status,
+    createdAt: entry.created_at,
+  };
+}
+
+function sortFollowUpQueue(items: QueuedFollowUp[]): QueuedFollowUp[] {
+  return [...items].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+  );
+}
 
 const IMAGE_BEGIN = "<!-- xcoding-images";
 const IMAGE_END = "xcoding-images -->";
@@ -1638,10 +1679,18 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
     ? "running"
     : items.some((entry) => entry.state === "failed")
       ? "failed"
-      : "done";
+      : items.some((entry) => entry.state === "cancelled")
+        ? "cancelled"
+        : "done";
   const groupStatus = t(
     locale,
-    groupState === "running" ? "status.running" : groupState === "failed" ? "status.failed" : "status.done",
+    groupState === "running"
+      ? "status.running"
+      : groupState === "failed"
+        ? "status.failed"
+        : groupState === "cancelled"
+          ? "status.cancelled"
+          : "status.done",
   );
   return (
     <details className={`inline-activity-group ${groupState}`}>
@@ -1825,6 +1874,8 @@ export function App() {
     events_redacted: number;
     compactions_redacted: number;
     memories_redacted: number;
+    queue_entries_scanned: number;
+    queue_entries_redacted: number;
   } | null>(null);
   const [availableModels, setAvailableModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -1892,6 +1943,7 @@ export function App() {
   const [modelCallLogs, setModelCallLogs] = useState<ModelCallLog[]>([]);
   const [modelCallLogsLoading, setModelCallLogsLoading] = useState(false);
   const [modelCallLogsError, setModelCallLogsError] = useState<string | null>(null);
+  const [reportedPromptTokensBySession, setReportedPromptTokensBySession] = useState<Record<string, number>>({});
   const [runningSessionIds, setRunningSessionIds] = useState<string[]>([]);
   // Tasks that completed while the user was not looking at them; drives the sidebar green dot.
   const [completedUnseenSessionIds, setCompletedUnseenSessionIds] = useState<string[]>([]);
@@ -2211,20 +2263,26 @@ export function App() {
   );
   const contextUsage = useMemo(() => {
     const limit = contextWindowForModel(model, modelContextWindows);
-    const retainedMessages = messages.slice(Math.min(compactedMessageCount, messages.length));
-    const used = SYSTEM_CONTEXT_TOKEN_RESERVE
-      + (contextCompactionSummary ? estimateTextTokens(contextCompactionSummary) : 0)
-      + retainedMessages.reduce((total, message) => total + estimateMessageTokens(message), 0)
-      + estimateTextTokens(streamedText)
-      + estimateTextTokens(prompt)
+    const currentAdditions = estimateTextTokens(prompt)
       + composerTextFiles.reduce((total, file) => total + estimateTextTokens(file.content), 0)
       + composerImages.length * IMAGE_CONTEXT_TOKEN_ESTIMATE;
+    const reportedPromptTokens = activeSessionId
+      ? reportedPromptTokensBySession[activeSessionId]
+      : undefined;
+    const estimatedUsed = SYSTEM_CONTEXT_TOKEN_RESERVE
+      + (contextCompactionSummary ? estimateTextTokens(contextCompactionSummary) : 0)
+      + estimateTextTokens(streamedText)
+      + currentAdditions;
+    const used = reportedPromptTokens === undefined
+      ? estimatedUsed
+      : reportedPromptTokens + currentAdditions;
     return {
       limit,
       percent: Math.min(100, Math.round((used / limit) * 100)),
       used,
+      reported: reportedPromptTokens !== undefined,
     };
-  }, [compactedMessageCount, composerImages.length, composerTextFiles, contextCompactionSummary, messages, model, modelContextWindows, prompt, streamedText]);
+  }, [activeSessionId, composerImages.length, composerTextFiles, contextCompactionSummary, model, modelContextWindows, prompt, reportedPromptTokensBySession, streamedText]);
 
   const filteredPluginItems = useMemo(() => {
     const query = pluginSearch.trim().toLowerCase();
@@ -2814,12 +2872,33 @@ export function App() {
         : null;
       setMessages(detail.page.messages);
       setMessagePageOffset(detail.page.offset);
+      const persistedFollowUps = (detail.follow_up_queue ?? []).map(queuedFollowUpFromEntry);
+      setFollowUpQueue((current) => {
+        const byId = new Map(current.map((item) => [item.id, item]));
+        for (const item of persistedFollowUps) byId.set(item.id, item);
+        const next = sortFollowUpQueue(Array.from(byId.values()));
+        followUpQueueRef.current = next;
+        return next;
+      });
       const latestCompaction = [...detail.events]
         .reverse()
         .map((item) => item.event)
         .find((event): event is Extract<SessionEvent, { type: "context_compacted" }> => event.type === "context_compacted");
       setCompactedMessageCount(latestCompaction?.compacted_message_count ?? 0);
       setContextCompactionSummary(latestCompaction?.summary ?? "");
+      const latestReportedPromptTokens = [...detail.events]
+        .reverse()
+        .find((item) => (
+          item.event.type === "model_call"
+          && typeof item.event.prompt_tokens === "number"
+          && item.event.prompt_tokens > 0
+        ));
+      if (latestReportedPromptTokens?.event.type === "model_call" && latestReportedPromptTokens.event.prompt_tokens) {
+        const reported = latestReportedPromptTokens.event.prompt_tokens;
+        setReportedPromptTokensBySession((current) => current[sessionId] === reported
+          ? current
+          : { ...current, [sessionId]: reported });
+      }
       const liveStream = streamedTextBySessionRef.current.get(sessionId) ?? "";
       setStreamedText(liveStream);
       let activityEvents = detail.events;
@@ -2836,7 +2915,7 @@ export function App() {
       }
       setPlan(detail.session.status === "cancelled" ? [] : latestPlan(activityEvents));
       setActivity(buildActivity(activityEvents, locale));
-      setInlineActivityBySession((current) => ({ ...current, [sessionId]: buildInlineActivity(detail.events, locale) }));
+      setInlineActivityBySession((current) => ({ ...current, [sessionId]: buildInlineActivity(detail.events, locale, detail.session.status) }));
       setPendingAction(pending);
       setApprovalSummary(latestApprovalSummary(detail.events, pending));
       setPatchPreview(latestPatchPreview(detail.events, pending));
@@ -3098,6 +3177,11 @@ export function App() {
         patchRunStatus((current) => current?.phase === "retrying"
           ? { ...current, phase: "thinking", detail: undefined }
           : (current ?? { startedAt: Date.now(), phase: "thinking" }));
+      }
+      if (payload.type === "model_call" && payload.prompt_tokens && payload.prompt_tokens > 0) {
+        setReportedPromptTokensBySession((current) => current[sid] === payload.prompt_tokens
+          ? current
+          : { ...current, [sid]: payload.prompt_tokens! });
       }
       if (payload.type === "context_compacted" && isActive) {
         setCompactedMessageCount(payload.compacted_message_count);
@@ -3450,27 +3534,41 @@ export function App() {
     resetComposerSession();
   }
 
-  function enqueueFollowUp(
+  async function enqueueFollowUp(
     sessionId: string,
     text: string,
     images: ChatImageAttachment[] = [],
     textFiles: ComposerTextFile[] = [],
-  ): void {
-    const item = {
-      id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      sessionId,
-      text,
-      images,
-      textFiles,
-    };
-    setFollowUpQueue((current) => {
-      const next = [...current, item];
-      followUpQueueRef.current = next;
-      return next;
-    });
+  ): Promise<boolean> {
+    if (!isTauriRuntime) {
+      setError(t(locale, "error.tauriOnly"));
+      return false;
+    }
+    try {
+      const entry = await invoke<FollowUpQueueEntry>("queue_follow_up", {
+        params: {
+          session_id: sessionId,
+          text,
+          images,
+          text_files: textFiles,
+        },
+      });
+      const item = queuedFollowUpFromEntry(entry);
+      setFollowUpQueue((current) => {
+        const byId = new Map(current.map((queued) => [queued.id, queued]));
+        byId.set(item.id, item);
+        const next = sortFollowUpQueue(Array.from(byId.values()));
+        followUpQueueRef.current = next;
+        return next;
+      });
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
   }
 
-  function removeFollowUp(id: string): void {
+  function removeFollowUpFromState(id: string): void {
     setFollowUpQueue((current) => {
       const next = current.filter((item) => item.id !== id);
       followUpQueueRef.current = next;
@@ -3478,15 +3576,84 @@ export function App() {
     });
   }
 
+  function setFollowUpStatusInState(id: string, status: FollowUpQueueStatus): void {
+    setFollowUpQueue((current) => {
+      const next = current.map((item) => item.id === id ? { ...item, status } : item);
+      followUpQueueRef.current = next;
+      return next;
+    });
+  }
+
+  async function deleteFollowUp(id: string): Promise<boolean> {
+    const item = followUpQueueRef.current.find((entry) => entry.id === id)
+      || followUpQueue.find((entry) => entry.id === id);
+    if (!item) return false;
+    try {
+      await invoke<boolean>("delete_follow_up_queue_entry", {
+        params: {
+          session_id: item.sessionId,
+          follow_up_id: item.id,
+        },
+      });
+      removeFollowUpFromState(id);
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+  }
+
+  async function markQueuedFollowUpsNotStarted(sessionId: string): Promise<void> {
+    const queued = followUpQueueRef.current.filter(
+      (item) => item.sessionId === sessionId && item.status === "queued",
+    );
+    if (queued.length === 0) return;
+    setFollowUpQueue((current) => {
+      const next = current.map((item) =>
+        item.sessionId === sessionId && item.status === "queued"
+          ? { ...item, status: "not_started" as const }
+          : item,
+      );
+      followUpQueueRef.current = next;
+      return next;
+    });
+    try {
+      await invoke<number>("mark_follow_ups_not_started", { sessionId });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function cancelFollowUp(id: string): Promise<void> {
+    const item = followUpQueueRef.current.find((entry) => entry.id === id)
+      || followUpQueue.find((entry) => entry.id === id);
+    if (!item || item.status === "cancelled") return;
+    const previousStatus = item.status;
+    setFollowUpStatusInState(id, "cancelled");
+    try {
+      const updated = await invoke<FollowUpQueueEntry | null>("set_follow_up_queue_status", {
+        params: {
+          session_id: item.sessionId,
+          follow_up_id: item.id,
+          status: "cancelled",
+        },
+      });
+      if (!updated) removeFollowUpFromState(id);
+    } catch (cause) {
+      setFollowUpStatusInState(id, previousStatus);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   function visibleFollowUps(sessionId: string | null): QueuedFollowUp[] {
     if (!sessionId) return [];
     return followUpQueue.filter((item) => item.sessionId === sessionId);
   }
 
-  function editFollowUp(id: string): void {
-    const item = followUpQueueRef.current.find((entry) => entry.id === id) || followUpQueue.find((entry) => entry.id === id);
-    if (!item) return;
-    removeFollowUp(id);
+  async function editFollowUp(id: string): Promise<void> {
+    const item = followUpQueueRef.current.find((entry) => entry.id === id)
+      || followUpQueue.find((entry) => entry.id === id);
+    if (!item || !(await deleteFollowUp(id))) return;
     const parsed = parseStoredUserMessage(item.text);
     setPrompt(parsed.text);
     setComposerReplyTarget(parsed.reply?.target ?? null);
@@ -3521,12 +3688,26 @@ export function App() {
   }
 
   async function steerFollowUp(id: string): Promise<void> {
-    const item = followUpQueueRef.current.find((entry) => entry.id === id) || followUpQueue.find((entry) => entry.id === id);
+    const item = followUpQueueRef.current.find((entry) => entry.id === id)
+      || followUpQueue.find((entry) => entry.id === id);
     if (!item) return;
-    removeFollowUp(id);
     await sendChatMessage(item.text, {
       steer: true,
       sessionId: item.sessionId,
+      followUpId: item.id,
+      images: item.images,
+      textFiles: item.textFiles,
+    });
+  }
+
+  async function continueFollowUp(id: string): Promise<void> {
+    if (isRunning || activeSession?.status === "running" || activeSession?.status === "need_user") return;
+    const item = followUpQueueRef.current.find((entry) => entry.id === id)
+      || followUpQueue.find((entry) => entry.id === id);
+    if (!item) return;
+    await sendChatMessage(item.text, {
+      sessionId: item.sessionId,
+      followUpId: item.id,
       images: item.images,
       textFiles: item.textFiles,
     });
@@ -3739,6 +3920,11 @@ export function App() {
     try {
       await invoke("delete_session", { sessionId });
       setSessions((current) => current.filter((session) => session.id !== sessionId));
+      setFollowUpQueue((current) => {
+        const next = current.filter((item) => item.sessionId !== sessionId);
+        followUpQueueRef.current = next;
+        return next;
+      });
       setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, sessionId));
       setRightPanelOpenBySession((current) => dropSessionKey(current, sessionId));
       setRightPanelTabBySession((current) => dropSessionKey(current, sessionId));
@@ -3833,6 +4019,7 @@ export function App() {
       steer?: boolean;
       sessionId?: string | null;
       skipDrain?: boolean;
+      followUpId?: string;
       images?: ChatImageAttachment[];
       textFiles?: ComposerTextFile[];
     },
@@ -3886,6 +4073,9 @@ export function App() {
     }
     if (!isTauriRuntime) {
       setError(t(locale, "error.tauriOnly"));
+      return null;
+    }
+    if (options?.followUpId && !(await deleteFollowUp(options.followUpId))) {
       return null;
     }
 
@@ -3955,6 +4145,7 @@ export function App() {
       !sessionId || activeSessionIdRef.current === sessionId
     );
 
+    let turnFailed = false;
     const inFlight = (async (): Promise<string | null> => {
           let sessionForContinue =
             (targetSessionId
@@ -4123,6 +4314,7 @@ export function App() {
             if (!isCurrentGeneration()) {
               return finishedSessionId;
             }
+            turnFailed = true;
             const failMessage = cause instanceof Error ? cause.message : String(cause);
             if (touchesActive(finishedSessionId || targetSessionId)) {
               setError(failMessage);
@@ -4130,6 +4322,7 @@ export function App() {
             }
             const failSid = finishedSessionId || targetSessionId;
             if (failSid) {
+              await markQueuedFollowUpsNotStarted(failSid);
               setSessionRunStatus(failSid, {
                 startedAt: Date.now(),
                 phase: "failed",
@@ -4160,7 +4353,7 @@ export function App() {
               } else if (!targetSessionId) {
                 setDraftRunning(false);
               }
-              if (!options?.skipDrain) {
+              if (!options?.skipDrain && !turnFailed) {
                 await drainFollowUpQueue(finishedSessionId);
               }
             }
@@ -4200,24 +4393,27 @@ export function App() {
     }
 
     if (status === "need_user" || status === "running") return;
+    if (status !== "done") {
+      await markQueuedFollowUpsNotStarted(sessionId);
+      return;
+    }
 
-    const next = followUpQueueRef.current.find((item) => item.sessionId === sessionId);
+    const next = followUpQueueRef.current.find(
+      (item) => item.sessionId === sessionId && item.status === "queued",
+    );
     if (!next) return;
 
     drainFollowUpsBySessionRef.current.add(sessionId);
     try {
-      setFollowUpQueue((current) => {
-        const remaining = current.filter((item) => item.id !== next.id);
-        followUpQueueRef.current = remaining;
-        return remaining;
-      });
       // Keep the guard until this send finishes, then chain the next item explicitly.
-      await sendChatMessage(next.text, {
+      const sent = await sendChatMessage(next.text, {
         sessionId,
         skipDrain: true,
+        followUpId: next.id,
         images: next.images,
         textFiles: next.textFiles,
       });
+      if (!sent) return;
     } finally {
       drainFollowUpsBySessionRef.current.delete(sessionId);
     }
@@ -4351,7 +4547,10 @@ export function App() {
         setComposerSendMode("queue");
         return;
       }
-      enqueueFollowUp(activeSessionId, outgoingMessage, images, textFiles);
+      if (!(await enqueueFollowUp(activeSessionId, outgoingMessage, images, textFiles))) {
+        restoreComposerDraft(message, images, textFiles, composerSessionKey, replyTo);
+        return;
+      }
       clearComposerDraft(composerSessionKey);
       setError(null);
       return;
@@ -4469,11 +4668,7 @@ export function App() {
     if (cancellingSessionIdsRef.current.has(sessionId)) return;
     cancellingSessionIdsRef.current.add(sessionId);
     setError(null);
-    setFollowUpQueue((current) => {
-      const remaining = current.filter((item) => item.sessionId !== sessionId);
-      followUpQueueRef.current = remaining;
-      return remaining;
-    });
+    await markQueuedFollowUpsNotStarted(sessionId);
     setRunningSessionIds((current) => current.includes(sessionId) ? current : [...current, sessionId]);
     try {
       const partialAssistant = streamedTextBySessionRef.current.get(sessionId) ?? streamedText;
@@ -4596,6 +4791,11 @@ export function App() {
       setSessions((current) =>
         current.filter((session) => normalizeRoot(session.workspace_root) !== key),
       );
+      setFollowUpQueue((current) => {
+        const next = current.filter((item) => !removedSessionIds.has(item.sessionId));
+        followUpQueueRef.current = next;
+        return next;
+      });
       if (activeSessionId && removedSessionIds.has(activeSessionId)) {
         resetComposerSession();
       }
@@ -7232,49 +7432,78 @@ export function App() {
             );
           })}
           {pendingInlineActivity.length > 0 ? <InlineActivityList items={pendingInlineActivity} locale={locale} /> : null}
-          {activeFollowUps.map((item, index) => (
-            <article className="message message-user message-queued" key={item.id}>
-              <div className="message-bubble">
-                <UserMessageBody
-                  content={messageWithComposerTextFiles(
-                    encodeLocalUserContent(item.text, item.images),
-                    item.textFiles,
+          {activeFollowUps.map((item, index) => {
+            const statusLabel = item.status === "queued"
+              ? t(locale, "composer.queueStateQueued")
+              : item.status === "not_started"
+                ? t(locale, "composer.queueStateNotStarted")
+                : t(locale, "composer.queueStateCancelled");
+            const statusHint = item.status === "queued"
+              ? t(locale, "composer.queueHint")
+              : item.status === "not_started"
+                ? t(locale, "composer.queueNotStartedHint")
+                : t(locale, "composer.queueCancelledHint");
+            const waitingForTurn = isRunning
+              || activeSession?.status === "running"
+              || activeSession?.status === "need_user";
+            return (
+              <article className={`message message-user message-queued message-queued-${item.status}`} key={item.id}>
+                <div className="message-bubble">
+                  <UserMessageBody
+                    content={messageWithComposerTextFiles(
+                      encodeLocalUserContent(item.text, item.images),
+                      item.textFiles,
+                    )}
+                    locale={locale}
+                  />
+                </div>
+                <div className="message-meta">
+                  <span className="message-queued-state">
+                    #{index + 1} · {statusLabel} · {statusHint}
+                  </span>
+                  {item.status === "queued" ? (
+                    <button
+                      type="button"
+                      className="quiet-button message-queued-button"
+                      onClick={() => void steerFollowUp(item.id)}
+                      title={t(locale, "action.steerHelp")}
+                    >
+                      {t(locale, "action.steerMode")}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="quiet-button message-queued-button"
+                      onClick={() => void continueFollowUp(item.id)}
+                      disabled={waitingForTurn}
+                      title={t(locale, "action.continue")}
+                    >
+                      {t(locale, "action.continue")}
+                    </button>
                   )}
-                  locale={locale}
-                />
-              </div>
-              <div className="message-meta">
-                <span className="message-queued-state">
-                  #{index + 1} · {t(locale, "composer.queueHint")}
-                </span>
-                <button
-                  type="button"
-                  className="quiet-button message-queued-button"
-                  onClick={() => void steerFollowUp(item.id)}
-                  title={t(locale, "action.steerHelp")}
-                >
-                  {t(locale, "action.steerMode")}
-                </button>
-                <button
-                  type="button"
-                  className="quiet-button message-queued-button"
-                  onClick={() => editFollowUp(item.id)}
-                  title={t(locale, "action.editMessage")}
-                >
-                  {t(locale, "action.editMessage")}
-                </button>
-                <button
-                  type="button"
-                  className="quiet-button message-queued-button"
-                  onClick={() => removeFollowUp(item.id)}
-                  title={t(locale, "action.closeQueue")}
-                  aria-label={t(locale, "action.closeQueue")}
-                >
-                  {t(locale, "action.closeQueue")}
-                </button>
-              </div>
-            </article>
-          ))}
+                  <button
+                    type="button"
+                    className="quiet-button message-queued-button"
+                    onClick={() => void editFollowUp(item.id)}
+                    title={t(locale, "action.editMessage")}
+                  >
+                    {t(locale, "action.editMessage")}
+                  </button>
+                  {item.status !== "cancelled" ? (
+                    <button
+                      type="button"
+                      className="quiet-button message-queued-button"
+                      onClick={() => void cancelFollowUp(item.id)}
+                      title={t(locale, "action.cancelFollowUp")}
+                      aria-label={t(locale, "action.cancelFollowUp")}
+                    >
+                      {t(locale, "action.cancelFollowUp")}
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
           <RunPlanProgress
             plan={plan}
             currentIndex={currentPlanStepIndex}
@@ -7638,7 +7867,7 @@ export function App() {
                         limit: formatContextTokenCount(contextUsage.limit),
                       })}
                     </span>
-                    <span className="context-usage-estimate">{t(locale, "context.estimated")}</span>
+                    <span className="context-usage-estimate">{t(locale, contextUsage.reported ? "context.reportedUsage" : "context.estimated")}</span>
                   </div>
                 ) : null}
               </div>

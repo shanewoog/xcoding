@@ -24,6 +24,24 @@ assert.deepEqual(effects[0].arguments[1].elements.map((element) => element.getTe
 assert.ok(app.includes("onClick={() => setContextUsageOpen((open) => !open)}"),
   "clicking the info button must still toggle the popover manually");
 
+const contextUsageStart = app.indexOf("const contextUsage = useMemo");
+const contextUsageEnd = app.indexOf("const filteredPluginItems", contextUsageStart);
+assert.ok(contextUsageStart >= 0 && contextUsageEnd > contextUsageStart, "context usage calculation should be discoverable");
+const contextUsageSource = app.slice(contextUsageStart, contextUsageEnd);
+assert.ok(
+  app.includes("reportedPromptTokensBySession") &&
+    app.includes("payload.type === \"model_call\"") &&
+    app.includes("payload.prompt_tokens"),
+  "context usage should track provider-reported prompt tokens per session",
+);
+assert.ok(
+  contextUsageSource.includes("reportedPromptTokens") && !contextUsageSource.includes("retainedMessages"),
+  "context usage must not grow when older UI history pages are loaded",
+);
+assert.ok(
+  app.includes("context.reportedUsage"),
+  "the popover must distinguish provider-reported usage from local estimates",
+);
 mock.timers.enable({ apis: ["setTimeout"] });
 try {
   const updates = [];

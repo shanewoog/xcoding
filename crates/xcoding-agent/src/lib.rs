@@ -2729,6 +2729,7 @@ impl<'a> AgentService<'a> {
             String,
             Vec<ProviderToolCall>,
             Option<String>,
+            Option<usize>,
             Option<u64>,
             Option<u64>,
         ),
@@ -2791,6 +2792,7 @@ impl<'a> AgentService<'a> {
         let mut content = String::new();
         let mut tool_calls: Vec<ProviderToolCall> = Vec::new();
         let mut model_reported = None;
+        let mut prompt_tokens = None;
         let mut received_event = false;
         let mut first_event_at: Option<tokio::time::Instant> = None;
         let mut last_event_at = attempt_started_at;
@@ -2846,11 +2848,16 @@ impl<'a> AgentService<'a> {
                                 // Endpoints that report usage let the next
                                 // request's budget use real numbers instead of
                                 // the character heuristic.
-                                ProviderEvent::Usage(usage) => record_token_calibration(
-                                    session.id,
-                                    usage.prompt_tokens,
-                                    estimated_prompt_tokens,
-                                ),
+                                ProviderEvent::Usage(usage) => {
+                                    if usage.prompt_tokens > 0 {
+                                        prompt_tokens = Some(usage.prompt_tokens);
+                                    }
+                                    record_token_calibration(
+                                        session.id,
+                                        usage.prompt_tokens,
+                                        estimated_prompt_tokens,
+                                    );
+                                }
                             }
                         }
                         Some(Err(error)) => {
@@ -2953,6 +2960,7 @@ impl<'a> AgentService<'a> {
             content,
             tool_calls,
             model_reported,
+            prompt_tokens,
             first_event_at.map(|t| t.duration_since(attempt_started_at).as_millis() as u64),
             Some(attempt_started_at.elapsed().as_millis() as u64),
         ))
@@ -3531,7 +3539,7 @@ impl<'a> AgentService<'a> {
                             )
                             .await;
                         let attempt_result = match attempt_result {
-                            Ok((content, tool_calls, _model_reported, ttft_ms, total_ms))
+                            Ok((content, tool_calls, _model_reported, _prompt_tokens, ttft_ms, total_ms))
                                 if is_transient_provider_busy_response(&content, &tool_calls) =>
                             {
                                 let output_chars = content.chars().count();
@@ -3547,7 +3555,7 @@ impl<'a> AgentService<'a> {
                         };
                         self.ensure_not_cancelled_preserving(session.id, &last_partial)?;
                         match attempt_result {
-                            Ok((content, tool_calls, model_reported, ttft_ms, total_ms)) => {
+                            Ok((content, tool_calls, model_reported, prompt_tokens, ttft_ms, total_ms)) => {
                                 if attempt_has_new_images
                                     && response_refuses_vision(&content, &tool_calls)
                                 {
@@ -3593,6 +3601,7 @@ impl<'a> AgentService<'a> {
                                     tool_calls.len(),
                                     None,
                                     model_reported,
+                                    prompt_tokens,
                                     ttft_ms,
                                     total_ms,
                                 );
@@ -4644,6 +4653,7 @@ impl<'a> AgentService<'a> {
             tool_calls,
             error,
             None,
+            None,
             ttft_ms,
             total_ms,
         );
@@ -4665,6 +4675,7 @@ impl<'a> AgentService<'a> {
         tool_calls: usize,
         error: Option<String>,
         model_reported: Option<String>,
+        prompt_tokens: Option<usize>,
         ttft_ms: Option<u64>,
         total_ms: Option<u64>,
     ) where
@@ -4692,6 +4703,7 @@ impl<'a> AgentService<'a> {
                 tool_calls,
                 error,
                 model_reported,
+                prompt_tokens,
                 ttft_ms,
                 total_ms,
             },
@@ -7995,6 +8007,54 @@ mod tests {
         let facts = parse_extracted_memories("one\ntwo\nthree\nfour\nfive");
 
         assert_eq!(facts.len(), MAX_MEMORIES_PER_TURN);
+    }
+
+    #[test]
+    fn model_call_event_exposes_reported_prompt_tokens() {
+        let core = CoreService::in_memory().expect("in-memory core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "hello".to_owned(),
+                mode: None,
+                provider: None,
+                model: Some("test-model".to_owned()),
+                title: None,
+                session_id: None,
+                images: None,
+            })
+            .expect("session starts");
+        let agent = AgentService::new(&core);
+        let candidate = key_candidate("provider", "key", "secret");
+        let mut delivered = Vec::new();
+
+        agent.emit_model_call_with_reported(
+            &mut |event| delivered.push(event),
+            &session,
+            &candidate,
+            "test-model",
+            "https://example.test/v1/responses",
+            "chat",
+            1,
+            1,
+            1,
+            true,
+            12,
+            0,
+            None,
+            Some("test-model".to_owned()),
+            Some(12_345),
+            Some(20),
+            Some(40),
+        );
+
+        assert!(matches!(
+            delivered.as_slice(),
+            [SessionEvent::ModelCall {
+                prompt_tokens: Some(12_345),
+                ..
+            }]
+        ));
     }
 
     #[test]

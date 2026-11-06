@@ -10,10 +10,11 @@ use rusqlite::{Connection, MAIN_DB, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 use xcoding_protocol::{
-    ContextCompaction, ContextWindow, CreateSessionParams, KeyCallReport, LocalMemory,
-    MAX_CONTEXT_TOOL_LIMIT, MAX_LOCAL_MEMORY_CHARS, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole,
-    ModelCallReport, ModelCallReportEntry, PendingAction, PendingActionStatus,
-    PersistedSessionEvent, ProviderCallReport, RestorePoint, Session, SessionEvent,
+    ContextCompaction, ContextWindow, CreateSessionParams, FollowUpQueueEntry, FollowUpQueueStatus,
+    FollowUpQueueTextFile, KeyCallReport, LocalMemory, MAX_CONTEXT_TOOL_LIMIT,
+    MAX_LOCAL_MEMORY_CHARS, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole, ModelCallReport,
+    ModelCallReportEntry, PendingAction, PendingActionStatus, PersistedSessionEvent,
+    ProviderCallReport, QueueFollowUpParams, RestorePoint, Session, SessionEvent,
     SessionMessagePage, SessionMessagePreview, SessionStatus, ToolCall, WorkspaceConfig,
 };
 
@@ -49,6 +50,8 @@ pub struct RedactionReport {
     pub events_redacted: usize,
     pub compactions_redacted: usize,
     pub memories_redacted: usize,
+    pub queue_entries_scanned: usize,
+    pub queue_entries_redacted: usize,
 }
 
 /// A cached delegate description plus the delegate model that produced it.
@@ -86,6 +89,23 @@ fn title_from_message(message: &str) -> String {
         .collect();
     out.push('…');
     out
+}
+
+fn follow_up_status_key(status: FollowUpQueueStatus) -> &'static str {
+    match status {
+        FollowUpQueueStatus::Queued => "queued",
+        FollowUpQueueStatus::NotStarted => "not_started",
+        FollowUpQueueStatus::Cancelled => "cancelled",
+    }
+}
+
+fn follow_up_status_from_key(value: &str) -> Option<FollowUpQueueStatus> {
+    match value {
+        "queued" => Some(FollowUpQueueStatus::Queued),
+        "not_started" => Some(FollowUpQueueStatus::NotStarted),
+        "cancelled" => Some(FollowUpQueueStatus::Cancelled),
+        _ => None,
+    }
 }
 
 fn attachment_dir_for_database(path: &Path) -> PathBuf {
@@ -240,6 +260,43 @@ impl SessionStore {
                     )?;
                     report.messages_redacted += 1;
                     redacted_message_ids.insert(id);
+                }
+            }
+        }
+
+        {
+            let mut statement =
+                transaction.prepare("SELECT id, text, text_files FROM follow_up_queue")?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, text, text_files_json) = row?;
+                report.queue_entries_scanned += 1;
+                let mut text_files: Vec<FollowUpQueueTextFile> =
+                    serde_json::from_str(&text_files_json)?;
+                for file in &mut text_files {
+                    file.content = redact(&file.content);
+                }
+                let redacted_text = redact(&text);
+                let redacted_text_files = serde_json::to_string(&text_files)?;
+                if redacted_text != text || redacted_text_files != text_files_json {
+                    transaction.execute(
+                        "UPDATE follow_up_queue
+                         SET text = ?1, text_files = ?2, updated_at = ?3
+                         WHERE id = ?4",
+                        params![
+                            redacted_text,
+                            redacted_text_files,
+                            Utc::now().to_rfc3339(),
+                            id
+                        ],
+                    )?;
+                    report.queue_entries_redacted += 1;
                 }
             }
         }
@@ -475,6 +532,10 @@ impl SessionStore {
             params![id],
         )?;
         self.connection.execute(
+            "DELETE FROM follow_up_queue WHERE session_id = ?1",
+            params![id],
+        )?;
+        self.connection.execute(
             "DELETE FROM context_compactions WHERE session_id = ?1",
             params![id],
         )?;
@@ -543,6 +604,10 @@ impl SessionStore {
                 params![id],
             )?;
             transaction.execute(
+                "DELETE FROM follow_up_queue WHERE session_id = ?1",
+                params![id],
+            )?;
+            transaction.execute(
                 "DELETE FROM context_compactions WHERE session_id = ?1",
                 params![id],
             )?;
@@ -587,6 +652,133 @@ impl SessionStore {
             .into_iter()
             .map(|relative| root.join(relative))
             .collect())
+    }
+
+    pub fn queue_follow_up(
+        &self,
+        params: QueueFollowUpParams,
+    ) -> Result<FollowUpQueueEntry, StoreError> {
+        if params.text.trim().is_empty() && params.images.is_empty() && params.text_files.is_empty()
+        {
+            return Err(StoreError::InvalidInput(
+                "follow-up queue content must not be empty".to_owned(),
+            ));
+        }
+        if self.get_session(params.session_id)?.is_none() {
+            return Err(StoreError::InvalidInput(format!(
+                "session not found: {}",
+                params.session_id
+            )));
+        }
+
+        let now = Utc::now();
+        let entry = FollowUpQueueEntry {
+            id: Uuid::new_v4(),
+            session_id: params.session_id,
+            text: params.text,
+            images: params.images,
+            text_files: params.text_files,
+            status: FollowUpQueueStatus::Queued,
+            created_at: now,
+            updated_at: now,
+        };
+        self.connection.execute(
+            "INSERT INTO follow_up_queue (
+                id, session_id, text, images, text_files, status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.id.to_string(),
+                entry.session_id.to_string(),
+                entry.text,
+                serde_json::to_string(&entry.images)?,
+                serde_json::to_string(&entry.text_files)?,
+                follow_up_status_key(entry.status),
+                entry.created_at.to_rfc3339(),
+                entry.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(entry)
+    }
+
+    pub fn list_follow_up_queue(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<FollowUpQueueEntry>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, text, images, text_files, status, created_at, updated_at
+             FROM follow_up_queue
+             WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows =
+            statement.query_map([session_id.to_string()], Self::row_to_follow_up_queue_entry)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_follow_up_queue_status(
+        &self,
+        session_id: Uuid,
+        follow_up_id: Uuid,
+        status: FollowUpQueueStatus,
+    ) -> Result<Option<FollowUpQueueEntry>, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE follow_up_queue
+             SET status = ?1, updated_at = ?2
+             WHERE session_id = ?3 AND id = ?4",
+            params![
+                follow_up_status_key(status),
+                Utc::now().to_rfc3339(),
+                session_id.to_string(),
+                follow_up_id.to_string(),
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.connection
+            .query_row(
+                "SELECT id, session_id, text, images, text_files, status, created_at, updated_at
+                 FROM follow_up_queue
+                 WHERE session_id = ?1 AND id = ?2",
+                params![session_id.to_string(), follow_up_id.to_string()],
+                Self::row_to_follow_up_queue_entry,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn mark_queued_follow_ups_not_started(
+        &self,
+        session_id: Uuid,
+    ) -> Result<usize, StoreError> {
+        self.connection
+            .execute(
+                "UPDATE follow_up_queue
+                 SET status = ?1, updated_at = ?2
+                 WHERE session_id = ?3 AND status = ?4",
+                params![
+                    follow_up_status_key(FollowUpQueueStatus::NotStarted),
+                    Utc::now().to_rfc3339(),
+                    session_id.to_string(),
+                    follow_up_status_key(FollowUpQueueStatus::Queued),
+                ],
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn delete_follow_up_queue_entry(
+        &self,
+        session_id: Uuid,
+        follow_up_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        self.connection
+            .execute(
+                "DELETE FROM follow_up_queue WHERE session_id = ?1 AND id = ?2",
+                params![session_id.to_string(), follow_up_id.to_string()],
+            )
+            .map(|changed| changed > 0)
+            .map_err(StoreError::from)
     }
 
     pub fn append_message(
@@ -1867,12 +2059,25 @@ impl SessionStore {
     /// when we open the database belongs to a previous process and will never emit another event,
     /// so flip it to `Cancelled` — a status the UI treats as continuable.
     pub fn reconcile_interrupted_sessions(&self) -> Result<usize, StoreError> {
+        let now = Utc::now().to_rfc3339();
         let changed = self.connection.execute(
             "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE status = ?3",
             params![
                 serde_json::to_string(&SessionStatus::Cancelled)?,
-                Utc::now().to_rfc3339(),
+                now,
                 serde_json::to_string(&SessionStatus::Running)?,
+            ],
+        )?;
+        // A restart cannot resume the previous invoke. Any queue entries that were waiting
+        // automatically must be surfaced as "not started" so the user decides what to send.
+        self.connection.execute(
+            "UPDATE follow_up_queue
+             SET status = ?1, updated_at = ?2
+             WHERE status = ?3",
+            params![
+                follow_up_status_key(FollowUpQueueStatus::NotStarted),
+                Utc::now().to_rfc3339(),
+                follow_up_status_key(FollowUpQueueStatus::Queued),
             ],
         )?;
 
@@ -2030,6 +2235,20 @@ impl SessionStore {
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
 
+            CREATE TABLE IF NOT EXISTS follow_up_queue (
+                id TEXT PRIMARY KEY NOT NULL,
+                session_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                images TEXT NOT NULL,
+                text_files TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued', 'not_started', 'cancelled')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_follow_up_queue_session_created
+                ON follow_up_queue(session_id, created_at);
+
             CREATE TABLE IF NOT EXISTS workspace_configs (
                 workspace_root TEXT PRIMARY KEY NOT NULL,
                 mode TEXT NOT NULL,
@@ -2132,6 +2351,46 @@ impl SessionStore {
             ))?;
         }
         Ok(())
+    }
+
+    fn row_to_follow_up_queue_entry(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<FollowUpQueueEntry> {
+        let id: String = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let images: String = row.get(3)?;
+        let text_files: String = row.get(4)?;
+        let status: String = row.get(5)?;
+        let created_at: String = row.get(6)?;
+        let updated_at: String = row.get(7)?;
+        let parse = |error: StoreError| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        };
+        Ok(FollowUpQueueEntry {
+            id: Uuid::parse_str(&id).map_err(|error| parse(StoreError::Identifier(error)))?,
+            session_id: Uuid::parse_str(&session_id)
+                .map_err(|error| parse(StoreError::Identifier(error)))?,
+            text: row.get(2)?,
+            images: serde_json::from_str(&images)
+                .map_err(|error| parse(StoreError::InvalidData(error)))?,
+            text_files: serde_json::from_str(&text_files)
+                .map_err(|error| parse(StoreError::InvalidData(error)))?,
+            status: follow_up_status_from_key(&status).ok_or_else(|| {
+                parse(StoreError::InvalidInput(format!(
+                    "invalid stored follow-up queue status: {status}"
+                )))
+            })?,
+            created_at: DateTime::parse_from_rfc3339(&created_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|error| parse(StoreError::Timestamp(error)))?
+                .with_timezone(&Utc),
+        })
     }
 
     fn row_to_context_compaction(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextCompaction> {
@@ -2638,6 +2897,7 @@ mod tests {
             model_reported: None,
             ttft_ms: None,
             total_ms: None,
+            prompt_tokens: None,
         };
         store
             .connection
@@ -2715,6 +2975,92 @@ mod tests {
     }
 
     #[test]
+    fn persists_follow_up_queue_status_and_deletes_entries() {
+        let (directory, database) = temporary_store_path();
+        let store = SessionStore::open(&database).expect("persistent store opens");
+        let session = test_session(&store);
+        let first = store
+            .queue_follow_up(QueueFollowUpParams {
+                session_id: session.id,
+                text: "first follow-up".to_owned(),
+                images: Vec::new(),
+                text_files: vec![FollowUpQueueTextFile {
+                    id: "notes".to_owned(),
+                    name: "notes.txt".to_owned(),
+                    content: "keep this attached".to_owned(),
+                    language: "text".to_owned(),
+                }],
+            })
+            .expect("first queue entry saves");
+        let second = store
+            .queue_follow_up(QueueFollowUpParams {
+                session_id: session.id,
+                text: "second follow-up".to_owned(),
+                images: Vec::new(),
+                text_files: Vec::new(),
+            })
+            .expect("second queue entry saves");
+
+        let queued = store
+            .list_follow_up_queue(session.id)
+            .expect("queue entries load");
+        assert_eq!(queued.len(), 2);
+        let queued_first = queued
+            .iter()
+            .find(|entry| entry.id == first.id)
+            .expect("first queue entry exists");
+        assert_eq!(queued_first.status, FollowUpQueueStatus::Queued);
+        assert_eq!(queued_first.text_files[0].content, "keep this attached");
+
+        let not_started = store
+            .set_follow_up_queue_status(session.id, first.id, FollowUpQueueStatus::NotStarted)
+            .expect("status update succeeds")
+            .expect("queue entry exists");
+        assert_eq!(not_started.status, FollowUpQueueStatus::NotStarted);
+        store
+            .set_follow_up_queue_status(session.id, second.id, FollowUpQueueStatus::Cancelled)
+            .expect("cancel status update succeeds")
+            .expect("queue entry exists");
+
+        drop(store);
+        let store = SessionStore::open(&database).expect("persistent store reopens");
+        let updated = store
+            .list_follow_up_queue(session.id)
+            .expect("updated queue entries load");
+        assert_eq!(
+            updated
+                .iter()
+                .find(|entry| entry.id == first.id)
+                .expect("first queue entry remains")
+                .status,
+            FollowUpQueueStatus::NotStarted
+        );
+        assert_eq!(
+            updated
+                .iter()
+                .find(|entry| entry.id == second.id)
+                .expect("second queue entry remains")
+                .status,
+            FollowUpQueueStatus::Cancelled
+        );
+
+        assert!(
+            store
+                .delete_follow_up_queue_entry(session.id, first.id)
+                .expect("queue entry delete succeeds")
+        );
+        assert_eq!(
+            store
+                .list_follow_up_queue(session.id)
+                .expect("remaining queue entries load")
+                .len(),
+            1
+        );
+        drop(store);
+        fs::remove_dir_all(directory).expect("temporary files clean up");
+    }
+
+    #[test]
     fn reconcile_interrupted_sessions_flips_running_to_cancelled() {
         let store = SessionStore::in_memory().expect("in-memory database starts");
 
@@ -2731,6 +3077,14 @@ mod tests {
         store
             .set_session_status(zombie.id, SessionStatus::Running)
             .expect("status updates");
+        store
+            .queue_follow_up(QueueFollowUpParams {
+                session_id: zombie.id,
+                text: "must not auto-send after restart".to_owned(),
+                images: Vec::new(),
+                text_files: Vec::new(),
+            })
+            .expect("queued follow-up saves");
 
         // One session is legitimately Done — must not be touched.
         let done = store
@@ -2758,6 +3112,10 @@ mod tests {
         let after_done = sessions.iter().find(|s| s.id == done.id).unwrap();
         assert_eq!(after_zombie.status, SessionStatus::Cancelled);
         assert_eq!(after_done.status, SessionStatus::Done);
+        let queue = store
+            .list_follow_up_queue(zombie.id)
+            .expect("reconciled queue loads");
+        assert_eq!(queue[0].status, FollowUpQueueStatus::NotStarted);
     }
 
     #[test]
@@ -3642,6 +4000,7 @@ mod tests {
             model_reported: None,
             ttft_ms: None,
             total_ms: None,
+            prompt_tokens: None,
         };
         let mut legacy_json =
             serde_json::to_value(legacy_event).expect("legacy model call serializes");
@@ -3785,6 +4144,19 @@ mod tests {
                 updated_at: Utc::now(),
             })
             .expect("compaction saves");
+        store
+            .queue_follow_up(QueueFollowUpParams {
+                session_id: session.id,
+                text: "queued api_key=secret-value".to_owned(),
+                images: Vec::new(),
+                text_files: vec![FollowUpQueueTextFile {
+                    id: "credentials".to_owned(),
+                    name: "credentials.txt".to_owned(),
+                    content: "token=secret-value".to_owned(),
+                    language: "text".to_owned(),
+                }],
+            })
+            .expect("queued follow-up saves");
         let event_message = Message {
             id: Uuid::new_v4(),
             session_id: session.id,
@@ -3815,11 +4187,18 @@ mod tests {
         assert_eq!(report.events_redacted, 1);
         assert_eq!(report.compactions_redacted, 1);
         assert_eq!(report.memories_redacted, 1);
+        assert_eq!(report.queue_entries_scanned, 1);
+        assert_eq!(report.queue_entries_redacted, 1);
 
         assert_eq!(
             store.list_messages(session.id).expect("messages")[0].content,
             "api_key=[REDACTED]"
         );
+        let queued = store
+            .list_follow_up_queue(session.id)
+            .expect("queued follow-up loads");
+        assert_eq!(queued[0].text, "queued api_key=[REDACTED]");
+        assert_eq!(queued[0].text_files[0].content, "token=[REDACTED]");
         assert_eq!(
             store
                 .get_context_compaction(session.id)
@@ -3844,5 +4223,6 @@ mod tests {
         assert_eq!(second.events_redacted, 0);
         assert_eq!(second.compactions_redacted, 0);
         assert_eq!(second.memories_redacted, 0);
+        assert_eq!(second.queue_entries_redacted, 0);
     }
 }
