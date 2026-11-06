@@ -595,6 +595,13 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
 .session-context-menu button.danger {
   color: var(--danger-text);
 }
+.message-context-menu {
+  max-width: calc(100vw - 1rem);
+  min-width: 10rem;
+}
+.message-context-menu button {
+  white-space: nowrap;
+}
 
 .chat-panel {
   background: var(--bg);

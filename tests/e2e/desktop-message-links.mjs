@@ -7,13 +7,14 @@ import ts from "typescript";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 async function main() {
-  const [appSource, panelsSource, cssSource, workspaceApiSource, browserSource, mainSource] = await Promise.all([
+  const [appSource, panelsSource, cssSource, workspaceApiSource, browserSource, mainSource, i18nSource] = await Promise.all([
     readFile(resolve(repositoryRoot, "apps/desktop/src/App.tsx"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src/panels.tsx"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/src/browser.rs"), "utf8"),
     readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/src/main.rs"), "utf8"),
+    readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8"),
   ]);
 
   assert.ok(appSource.includes("const INLINE_TOKEN_PATTERN"), "assistant messages must recognize Markdown and bare HTTP(S) links");
@@ -188,6 +189,24 @@ export { formatReplyTargetMessage, parseReplyTarget };
     "composer sends must include the selected reply target",
   );
 
+  assert.ok(appSource.includes("type MessageContextMenuState"), "message context menus must keep dedicated state");
+  assert.ok(appSource.includes("function openMessageContextMenu"), "messages must expose a custom context menu");
+  assert.ok(
+    appSource.includes("window.getSelection()") && appSource.includes("event.currentTarget.contains"),
+    "message right-click must prefer text selected inside the current message",
+  );
+  assert.match(
+    appSource,
+    /onContextMenu=\{\(event\) => openMessageContextMenu\(/,
+    "user and assistant messages must open the copy menu on right-click",
+  );
+  assert.ok(appSource.includes('className="session-context-menu message-context-menu"'));
+  assert.ok(appSource.includes("void copyText(messageContextMenu.text)"));
+  assert.ok(
+    i18nSource.includes('"message.copySelection"') && i18nSource.includes('"message.copyMessage"'),
+    "message context menu labels must be localized",
+  );
+  assert.ok(cssSource.includes(".message-context-menu"), "message context menu styles must exist");
   console.log("Desktop assistant link checks passed.");
 }
 

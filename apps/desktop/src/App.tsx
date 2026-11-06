@@ -624,6 +624,14 @@ type ReplyTarget = {
   createdAt: string;
 };
 
+type MessageContextMenuState = {
+  x: number;
+  y: number;
+  text: string;
+  fromSelection: boolean;
+};
+
+
 type ComposerDraft = {
   prompt: string;
   images: ComposerImage[];
@@ -1766,12 +1774,14 @@ export function App() {
     selectionEnd: number;
     hasSelection: boolean;
   } | null>(null);
+  const [messageContextMenu, setMessageContextMenu] = useState<MessageContextMenuState | null>(null);
   const [composerDraftBySession, setComposerDraftBySession] = useState<Record<string, ComposerDraft>>(() => ({
     [DRAFT_SESSION_KEY]: createEmptyComposerDraft(),
   }));
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const messageContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<Mode>("ask");
   const [model, setModel] = useState("");
   const [reasoningEffortsText, setReasoningEffortsText] = useState(DEFAULT_REASONING_EFFORTS.join("\n"));
@@ -3565,6 +3575,29 @@ export function App() {
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [composerContextMenu]);
+  useEffect(() => {
+    if (!messageContextMenu) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target || !messageContextMenuRef.current?.contains(target)) {
+        setMessageContextMenu(null);
+      }
+    };
+    const closeMenu = () => setMessageContextMenu(null);
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    window.addEventListener("blur", closeMenu);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+      window.removeEventListener("blur", closeMenu);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [messageContextMenu]);
 
   function openComposerContextMenu(event: ReactMouseEvent<HTMLTextAreaElement>): void {
     event.preventDefault();
@@ -3575,6 +3608,7 @@ export function App() {
     const margin = 8;
     setSessionMenu(null);
     setProjectMenu(null);
+    setMessageContextMenu(null);
     setComposerContextMenu({
       x: Math.max(margin, Math.min(event.clientX, window.innerWidth - menuWidth - margin)),
       y: Math.max(margin, Math.min(event.clientY, window.innerHeight - menuHeight - margin)),
@@ -3635,11 +3669,39 @@ export function App() {
     }
   }
 
+  function openMessageContextMenu(event: ReactMouseEvent<HTMLElement>, content: string): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const selection = window.getSelection();
+    const fromSelection = Boolean(
+      selection
+      && !selection.isCollapsed
+      && selection.rangeCount > 0
+      && event.currentTarget.contains(selection.anchorNode)
+      && event.currentTarget.contains(selection.focusNode),
+    );
+    const text = (fromSelection && selection ? selection.toString() : content).trim();
+    if (!text) return;
+    const menuWidth = 190;
+    const menuHeight = 52;
+    const margin = 8;
+    setSessionMenu(null);
+    setProjectMenu(null);
+    setComposerContextMenu(null);
+    setMessageContextMenu({
+      x: Math.max(margin, Math.min(event.clientX, window.innerWidth - menuWidth - margin)),
+      y: Math.max(margin, Math.min(event.clientY, window.innerHeight - menuHeight - margin)),
+      text,
+      fromSelection,
+    });
+  }
+
   function openSessionMenu(event: ReactMouseEvent, sessionId: string): void {
     event.preventDefault();
     event.stopPropagation();
     setProjectMenu(null);
     setComposerContextMenu(null);
+    setMessageContextMenu(null);
     setSessionMenu({ sessionId, x: event.clientX, y: event.clientY });
   }
 
@@ -4553,6 +4615,8 @@ export function App() {
     event.preventDefault();
     event.stopPropagation();
     setSessionMenu(null);
+    setComposerContextMenu(null);
+    setMessageContextMenu(null);
     setProjectMenu({ root, x: event.clientX, y: event.clientY });
   }
 
@@ -6986,6 +7050,28 @@ export function App() {
             </button>
           </div>
         ) : null}
+        {messageContextMenu ? (
+          <div
+            ref={messageContextMenuRef}
+            className="session-context-menu message-context-menu"
+            style={{ left: messageContextMenu.x, top: messageContextMenu.y }}
+            role="menu"
+            aria-label={t(locale, "message.contextMenu")}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                void copyText(messageContextMenu.text);
+                setMessageContextMenu(null);
+              }}
+            >
+              {t(locale, messageContextMenu.fromSelection ? "message.copySelection" : "message.copyMessage")}
+            </button>
+          </div>
+        ) : null}
       </aside>
 
       <section className={`chat-panel${bottomPanelOpen ? " has-bottom-panel" : ""}`} aria-label={t(locale, "aria.conversation")}>
@@ -7069,7 +7155,14 @@ export function App() {
             const message = entry.message;
             const elapsed = message.role === "assistant" ? completedRunElapsed[message.id] : null;
             return message.role === "user" ? (
-              <article className={`message message-${message.role}`} key={message.id}>
+              <article
+                className={`message message-${message.role}`}
+                key={message.id}
+                onContextMenu={(event) => openMessageContextMenu(
+                  event,
+                  parseStoredUserMessage(message.content).text || message.content,
+                )}
+              >
                 <div className="message-bubble">
                   <UserMessageBody content={message.content} locale={locale} />
                 </div>
@@ -7098,7 +7191,11 @@ export function App() {
                 </div>
               </article>
             ) : (
-              <article className={`message message-${message.role}`} key={message.id}>
+              <article
+                className={`message message-${message.role}`}
+                key={message.id}
+                onContextMenu={(event) => openMessageContextMenu(event, message.content)}
+              >
                 <div className="message-bubble">
                   <div className="message-body">{message.role === "assistant" ? <AssistantMessageBody content={message.content} onOpenLink={openAssistantLink} /> : message.content}</div>
                 </div>
