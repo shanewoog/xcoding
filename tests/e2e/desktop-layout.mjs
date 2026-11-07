@@ -112,6 +112,13 @@ async function main() {
   const cssSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/styles.css"), "utf8");
   assert.ok(appSource.includes("groupConversationMessages"), "App.tsx must group consecutive tool messages");
   assert.ok(appSource.includes('className="message message-tool-group"'), "App.tsx missing collapsed tool group");
+  assert.ok(appSource.includes("function ToolMessageGroup"), "tool groups should use a lazy-rendering component");
+  assert.ok(
+    appSource.includes("onToggle={(event) => setOpen(event.currentTarget.open)}") &&
+      appSource.includes("{open ? (") &&
+      appSource.includes("entry.messages.map"),
+    "collapsed tool groups must not render their tool output internals",
+  );
   assert.ok(cssSource.includes(".message-tool-group"), "styles.css missing tool group styles");
   const layoutSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/layout.ts"), "utf8");
   const panelsSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/panels.tsx"), "utf8");

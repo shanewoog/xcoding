@@ -624,6 +624,47 @@ function groupConversationMessages(messages: ConversationMessage[]): Conversatio
   return entries;
 }
 
+function ToolMessageGroup({
+  entry,
+  locale,
+  onShowOutput,
+}: {
+  entry: Extract<ConversationEntry, { kind: "tool-group" }>;
+  locale: Locale;
+  onShowOutput: (sessionId: string, messageId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="message message-tool-group"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span>{t(locale, "role.tool")} · {entry.messages.length}</span>
+      </summary>
+      {open ? (
+        <div className="tool-message-list">
+          {entry.messages.map((message) => (
+            <section className="tool-message-item" key={message.id}>
+              <span className="message-preview">{toolCardPreview(message.content)}</span>
+              <div className="message-body">{message.content}</div>
+              {message.full_output_available ? (
+                <button
+                  type="button"
+                  className="tool-output-attachment"
+                  onClick={() => onShowOutput(message.session_id, message.id)}
+                >
+                  {t(locale, "message.showToolOutput", { size: formatBytes(message.content_bytes ?? 0) })}
+                </button>
+              ) : null}
+            </section>
+          ))}
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
 type ComposerImage = {
   id: string;
   mime_type: string;
@@ -7324,31 +7365,17 @@ export function App() {
           {groupConversationMessages(messages).map((entry) => {
             if (entry.kind === "tool-group") {
               return (
-                <details className="message message-tool-group" key={entry.id}>
-                  <summary>
-                    <span>{t(locale, "role.tool")} · {entry.messages.length}</span>
-                  </summary>
-                  <div className="tool-message-list">
-                    {entry.messages.map((message) => (
-                      <section className="tool-message-item" key={message.id}>
-                        <span className="message-preview">{toolCardPreview(message.content)}</span>
-                        <div className="message-body">{message.content}</div>
-                        {message.full_output_available ? (
-                          <button
-                            type="button"
-                            className="tool-output-attachment"
-                            onClick={() => void invoke("show_tool_output_attachment", {
-                              sessionId: message.session_id,
-                              messageId: message.id,
-                            }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}
-                          >
-                            {t(locale, "message.showToolOutput", { size: formatBytes(message.content_bytes ?? 0) })}
-                          </button>
-                        ) : null}
-                      </section>
-                    ))}
-                  </div>
-                </details>
+                <ToolMessageGroup
+                  key={entry.id}
+                  entry={entry}
+                  locale={locale}
+                  onShowOutput={(sessionId, messageId) => {
+                    void invoke("show_tool_output_attachment", {
+                      sessionId,
+                      messageId,
+                    }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+                  }}
+                />
               );
             }
 

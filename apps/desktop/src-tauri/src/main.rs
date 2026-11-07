@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -334,8 +334,19 @@ struct ExitState {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HangState {
+    pid: u32,
+    detected_at_ms: u64,
+    reason: String,
+}
+
 fn exit_state_path() -> PathBuf {
     user_config_dir().join("desktop-exit.json")
+}
+
+fn hang_state_path() -> PathBuf {
+    user_config_dir().join("desktop-hang.json")
 }
 
 fn read_exit_state() -> Option<ExitState> {
@@ -349,6 +360,26 @@ fn write_exit_state(state: &ExitState) {
     }
 }
 
+fn read_hang_state() -> Option<HangState> {
+    let raw = fs::read_to_string(hang_state_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn record_hang_state(reason: &str) {
+    let state = HangState {
+        pid: std::process::id(),
+        detected_at_ms: now_millis(),
+        reason: reason.to_owned(),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&state) {
+        let _ = fs::write(hang_state_path(), format!("{json}\n"));
+    }
+    boot_log(&format!(
+        "window hang detected: pid={} reason={reason}",
+        state.pid
+    ));
+}
+
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -357,6 +388,13 @@ fn now_millis() -> u64 {
 }
 
 fn record_startup_exit_state() {
+    if let Some(previous_hang) = read_hang_state() {
+        boot_log(&format!(
+            "previous window hang: pid={} detected_at_ms={} reason={}",
+            previous_hang.pid, previous_hang.detected_at_ms, previous_hang.reason
+        ));
+        let _ = fs::remove_file(hang_state_path());
+    }
     if let Some(previous) = read_exit_state() {
         if !previous.clean {
             boot_log(&format!(
@@ -925,6 +963,43 @@ fn restore_main_window(app: &AppHandle) {
 }
 
 #[cfg(windows)]
+fn start_hang_watchdog(window: &tauri::WebviewWindow) {
+    let hwnd = match window.hwnd() {
+        Ok(hwnd) => hwnd.0 as usize,
+        Err(error) => {
+            boot_log(&format!("window hang watchdog unavailable: {error}"));
+            return;
+        }
+    };
+    boot_log("window hang watchdog started");
+    std::thread::spawn(move || {
+        // Do not classify the hidden startup window as hung before the UI is ready.
+        std::thread::sleep(Duration::from_secs(5));
+        let mut hung_streak = 0_u8;
+        let mut reported = false;
+        loop {
+            let hung = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::IsHungAppWindow(hwnd as _)
+            } != 0;
+            if hung {
+                hung_streak = hung_streak.saturating_add(1);
+                if hung_streak >= 2 && !reported {
+                    record_hang_state("IsHungAppWindow returned true");
+                    reported = true;
+                }
+            } else {
+                hung_streak = 0;
+                reported = false;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn start_hang_watchdog(_window: &tauri::WebviewWindow) {}
+
+#[cfg(windows)]
 struct SingleInstanceGuard {
     handle: windows_sys::Win32::Foundation::HANDLE,
 }
@@ -1012,6 +1087,11 @@ fn main() {
                     boot_log(&format!("ensure_main_window failed: {error}"));
                     return Err(error.into());
                 }
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                start_hang_watchdog(&window);
+            } else {
+                boot_log("window hang watchdog skipped: main window unavailable");
             }
             let mut startup_config = load_user_config();
             if startup_config.local_relay_enabled {
@@ -1213,7 +1293,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_project_root_key, missing_project_session_roots, ExitState};
+    use super::{direct_project_root_key, missing_project_session_roots, ExitState, HangState};
     use xcoding_protocol::ProjectDir;
 
     #[cfg(windows)]
@@ -1240,6 +1320,20 @@ mod tests {
         let parsed: ExitState = serde_json::from_str(&json).expect("exit state deserializes");
         assert!(!parsed.clean);
         assert_eq!(parsed.reason.as_deref(), Some("panic: test"));
+    }
+
+    #[test]
+    fn hang_state_preserves_windows_hang_reason() {
+        let state = HangState {
+            pid: 1234,
+            detected_at_ms: 42,
+            reason: "IsHungAppWindow returned true".to_owned(),
+        };
+        let json = serde_json::to_string(&state).expect("hang state serializes");
+        let parsed: HangState = serde_json::from_str(&json).expect("hang state deserializes");
+        assert_eq!(parsed.pid, 1234);
+        assert_eq!(parsed.detected_at_ms, 42);
+        assert_eq!(parsed.reason, "IsHungAppWindow returned true");
     }
 
     #[test]

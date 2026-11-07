@@ -1,6 +1,6 @@
 [package]
 name = "xcoding-desktop"
-version = "1.1.10"
+version = "1.1.11"
 description = "XCoding Desktop shell"
 authors = ["XCoding Contributors"]
 edition = "2024"
@@ -23,6 +23,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security_Cryptography",
   "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 xcoding-agent = { path = "../../../crates/xcoding-agent" }
 xcoding-core = { path = "../../../crates/xcoding-core" }
