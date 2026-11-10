@@ -7348,6 +7348,7 @@ export function App() {
               sources={envSources}
               anchorRef={envButtonRef}
               onOpenTerminal={(seed) => openTerminalPanel(seed)}
+              onOpenWorkspace={(root) => selectProject(root)}
             />
           </div>
         </header>

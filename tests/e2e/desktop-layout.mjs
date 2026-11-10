@@ -125,6 +125,16 @@ async function main() {
   const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
   const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
 
+  for (const needle of ["git_worktrees", "create_git_worktree", "remove_git_worktree"]) {
+    assert.ok(apiSource.includes(needle), "workspaceApi.ts missing " + needle);
+  }
+  for (const needle of ["env.worktrees", "createGitWorktree", "removeGitWorktree", "onOpenWorkspace"]) {
+    assert.ok(panelsSource.includes(needle), "panels.tsx missing worktree UI " + needle);
+  }
+  for (const needle of ["env.worktrees", "env.newWorktree", "env.removeWorktree"]) {
+    assert.ok(i18nSource.includes(needle), "i18n.ts missing worktree label " + needle);
+  }
+
   for (const needle of [
     "export function formatSessionStatus",
     "export function formatMessageRole",

@@ -13,6 +13,21 @@ export type GitEnvironment = {
   root: string;
 };
 
+export type GitWorktree = {
+  path: string;
+  branch: string | null;
+  head: string | null;
+  bare: boolean;
+  detached: boolean;
+  current: boolean;
+};
+
+export type GitWorktreeList = {
+  is_repo: boolean;
+  root: string;
+  worktrees: GitWorktree[];
+};
+
 export type GitCommitEntry = {
   hash: string;
   short_hash: string;
@@ -127,6 +142,28 @@ export async function fetchGitEnvironment(
     workspaceRoot,
     includeBranches,
   });
+}
+
+export async function fetchGitWorktrees(workspaceRoot: string): Promise<GitWorktreeList> {
+  return invoke<GitWorktreeList>("git_worktrees", { workspaceRoot });
+}
+
+export async function createGitWorktree(
+  workspaceRoot: string,
+  path: string,
+  branch: string,
+  createBranch = true,
+): Promise<GitWorktree> {
+  return invoke<GitWorktree>("create_git_worktree", {
+    workspaceRoot,
+    path,
+    branch,
+    createBranch,
+  });
+}
+
+export async function removeGitWorktree(workspaceRoot: string, path: string): Promise<void> {
+  await invoke("remove_git_worktree", { workspaceRoot, path });
 }
 
 export async function fetchGitHistory(

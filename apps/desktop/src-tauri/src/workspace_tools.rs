@@ -21,6 +21,23 @@ pub struct GitEnvironment {
 }
 
 #[derive(Debug, Serialize)]
+pub struct GitWorktree {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub bare: bool,
+    pub detached: bool,
+    pub current: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitWorktreeList {
+    pub is_repo: bool,
+    pub root: String,
+    pub worktrees: Vec<GitWorktree>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DirEntryInfo {
     pub name: String,
     pub path: String,
@@ -280,6 +297,195 @@ pub async fn git_environment(
     match tokio::time::timeout(Duration::from_secs(4), worker).await {
         Ok(result) => result.map_err(|error| format!("git worker failed: {error}"))?,
         Err(_) => Err("git environment lookup timed out".to_owned()),
+    }
+}
+
+fn normalize_worktree_path(path: &Path) -> String {
+    let normalized = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_owned();
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
+fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    normalize_worktree_path(left) == normalize_worktree_path(right)
+}
+
+fn parse_worktree_list(current_root: &Path, output: &str) -> Vec<GitWorktree> {
+    let mut worktrees = Vec::new();
+    let normalized = output.replace("\r\n", "\n");
+    for block in normalized.split("\n\n") {
+        let mut path = None;
+        let mut head = None;
+        let mut branch = None;
+        let mut bare = false;
+        let mut detached = false;
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("worktree ") {
+                path = Some(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("HEAD ") {
+                head = Some(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("branch ") {
+                branch = Some(
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value)
+                        .to_owned(),
+                );
+            } else if line == "bare" {
+                bare = true;
+            } else if line == "detached" {
+                detached = true;
+            }
+        }
+        let Some(path) = path else {
+            continue;
+        };
+        worktrees.push(GitWorktree {
+            current: same_worktree_path(current_root, Path::new(&path)),
+            path,
+            branch,
+            head,
+            bare,
+            detached,
+        });
+    }
+    worktrees
+}
+
+fn git_worktree_list_sync(workspace_root: String) -> Result<GitWorktreeList, String> {
+    let root = normalize_root(&workspace_root)?;
+    let is_repo = run_git(&root, &["rev-parse", "--is-inside-work-tree"])
+        .map(|value| value == "true")
+        .unwrap_or(false);
+    if !is_repo {
+        return Ok(GitWorktreeList {
+            is_repo: false,
+            root: root.display().to_string(),
+            worktrees: Vec::new(),
+        });
+    }
+    let current_root = PathBuf::from(run_git(&root, &["rev-parse", "--show-toplevel"])?);
+    let output = run_git(&root, &["worktree", "list", "--porcelain"])?;
+    Ok(GitWorktreeList {
+        is_repo: true,
+        root: current_root.display().to_string(),
+        worktrees: parse_worktree_list(&current_root, &output),
+    })
+}
+
+fn create_git_worktree_sync(
+    workspace_root: String,
+    path: String,
+    branch: String,
+    create_branch: bool,
+) -> Result<GitWorktree, String> {
+    let root = normalize_root(&workspace_root)?;
+    let target = PathBuf::from(path.trim());
+    if path.trim().is_empty() || !target.is_absolute() {
+        return Err("worktree path must be an absolute path".to_owned());
+    }
+    if target.exists() {
+        return Err(format!("worktree path already exists: {}", target.display()));
+    }
+    let Some(parent) = target.parent() else {
+        return Err("worktree path must have a parent directory".to_owned());
+    };
+    if !parent.is_dir() {
+        return Err(format!("worktree parent directory does not exist: {}", parent.display()));
+    }
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("worktree branch is required".to_owned());
+    }
+    let path_text = path.trim();
+    let mut args = vec!["worktree", "add"];
+    if create_branch {
+        // New worktrees branch from the current HEAD unless the caller changes
+        // that behavior explicitly in the future.
+        args.extend(["-b", branch, path_text]);
+    } else {
+        args.extend([path_text, branch]);
+    }
+    run_git(&root, &args)?;
+    let list = git_worktree_list_sync(workspace_root)?;
+    list.worktrees
+        .into_iter()
+        .find(|worktree| same_worktree_path(Path::new(&worktree.path), &target))
+        .ok_or_else(|| "created worktree was not returned by git worktree list".to_owned())
+}
+
+fn remove_git_worktree_sync(workspace_root: String, path: String) -> Result<(), String> {
+    let root = normalize_root(&workspace_root)?;
+    let target = PathBuf::from(path.trim());
+    if path.trim().is_empty() || !target.is_absolute() {
+        return Err("worktree path must be an absolute path".to_owned());
+    }
+    let list = git_worktree_list_sync(workspace_root)?;
+    let Some(worktree) = list
+        .worktrees
+        .iter()
+        .find(|worktree| same_worktree_path(Path::new(&worktree.path), &target))
+    else {
+        return Err("worktree is not registered for this repository".to_owned());
+    };
+    if worktree.current {
+        return Err("the current worktree cannot be removed".to_owned());
+    }
+    // Never pass --force: Git must refuse removal when the worktree has local changes.
+    run_git(&root, &["worktree", "remove", path.trim()])?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn git_worktrees(workspace_root: String) -> Result<GitWorktreeList, String> {
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        git_worktree_list_sync(workspace_root)
+    });
+    match tokio::time::timeout(Duration::from_secs(4), worker).await {
+        Ok(result) => result.map_err(|error| format!("git worker failed: {error}"))?,
+        Err(_) => Err("git worktree lookup timed out".to_owned()),
+    }
+}
+
+#[tauri::command]
+pub async fn create_git_worktree(
+    workspace_root: String,
+    path: String,
+    branch: String,
+    create_branch: Option<bool>,
+) -> Result<GitWorktree, String> {
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        create_git_worktree_sync(workspace_root, path, branch, create_branch.unwrap_or(true))
+    });
+    match tokio::time::timeout(Duration::from_secs(60), worker).await {
+        Ok(result) => result.map_err(|error| format!("git worker failed: {error}"))?,
+        Err(_) => Err("git worktree creation timed out".to_owned()),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_git_worktree(
+    workspace_root: String,
+    path: String,
+) -> Result<(), String> {
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        remove_git_worktree_sync(workspace_root, path)
+    });
+    match tokio::time::timeout(Duration::from_secs(30), worker).await {
+        Ok(result) => result.map_err(|error| format!("git worker failed: {error}"))?,
+        Err(_) => Err("git worktree removal timed out".to_owned()),
     }
 }
 
@@ -943,6 +1149,55 @@ fn open_with_os(target: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parses_worktree_porcelain_entries() {
+        let output = "worktree C:/repo\r\nHEAD abc123\r\nbranch refs/heads/main\r\n\r\nworktree C:/repo-feature\r\nHEAD def456\r\nbranch refs/heads/codex/feature\r\n\r\nworktree C:/repo-detached\r\nHEAD 789abc\r\ndetached\r\n";
+        let worktrees = parse_worktree_list(Path::new("C:/repo"), output);
+        assert_eq!(worktrees.len(), 3);
+        assert!(worktrees[0].current);
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert!(!worktrees[1].current);
+        assert_eq!(worktrees[1].branch.as_deref(), Some("codex/feature"));
+        assert!(worktrees[2].detached);
+        assert!(worktrees[2].branch.is_none());
+    }
+
+    #[test]
+    fn creates_lists_and_removes_worktree() {
+        let root = temporary_root("worktree-main");
+        fs::create_dir_all(&root).expect("create repo root");
+        run_git(&root, &["init", "-q"]).expect("init repo");
+        run_git(&root, &["config", "user.email", "test@example.com"]).expect("set email");
+        run_git(&root, &["config", "user.name", "XCoding Test"]).expect("set name");
+        fs::write(root.join("README.md"), b"worktree test\n").expect("write readme");
+        run_git(&root, &["add", "README.md"]).expect("stage readme");
+        run_git(&root, &["commit", "-q", "-m", "initial"]).expect("commit initial");
+
+        let target = temporary_root("worktree-feature");
+        let created = create_git_worktree_sync(
+            root.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            "codex/test".to_owned(),
+            true,
+        )
+        .expect("create worktree");
+        assert!(target.is_dir());
+        assert_eq!(created.branch.as_deref(), Some("codex/test"));
+
+        let listed = git_worktree_list_sync(root.to_string_lossy().to_string())
+            .expect("list worktrees");
+        assert_eq!(listed.worktrees.len(), 2);
+        assert!(listed.worktrees.iter().any(|worktree| worktree.branch.as_deref() == Some("codex/test")));
+
+        remove_git_worktree_sync(
+            root.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+        )
+        .expect("remove worktree");
+        assert!(!target.exists());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn lists_nested_workspace_entries_as_relative_paths() {

@@ -3089,6 +3089,106 @@ input.workspace-missing {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   color: var(--text);
 }
+.env-worktrees {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0 0.25rem 0.35rem 1.5rem;
+}
+.env-worktree {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.4rem 0.5rem;
+}
+.env-worktree.current {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.env-worktree-main {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.env-worktree-branch {
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.env-worktree-path {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.env-worktree-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.env-worktree-actions button,
+.env-worktree-new,
+.env-worktree-submit {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 0.22rem 0.45rem;
+}
+.env-worktree-actions button:hover:not(:disabled),
+.env-worktree-new:hover:not(:disabled),
+.env-worktree-submit:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.env-worktree-actions button:disabled,
+.env-worktree-new:disabled,
+.env-worktree-submit:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.env-worktree-current {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.env-worktree-new {
+  text-align: left;
+  width: 100%;
+}
+.env-worktree-form {
+  display: grid;
+  gap: 0.35rem;
+}
+.env-worktree-form label {
+  color: var(--text-muted);
+  display: grid;
+  font-size: 0.72rem;
+  gap: 0.18rem;
+}
+.env-worktree-form input:not([type="checkbox"]) {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font: inherit;
+  min-width: 0;
+  padding: 0.32rem 0.4rem;
+}
+.env-worktree-form .env-worktree-check {
+  align-items: center;
+  display: flex;
+  gap: 0.35rem;
+}
+.env-worktree-form .env-worktree-check input {
+  width: auto;
+}
+.env-worktree-submit {
+  color: var(--text);
+  justify-self: start;
+}
 .env-history {
   display: grid;
   gap: 0.25rem;

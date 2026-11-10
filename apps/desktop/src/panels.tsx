@@ -33,13 +33,16 @@ import {
   browserSetUserAgent,
   browserSetZoom,
   browserShow,
+  createGitWorktree,
   fetchGitEnvironment,
   fetchGitHistory,
+  fetchGitWorktrees,
   fetchGitNexusStatus,
   fetchWorkspaceChanges,
   fetchWorkspaceFileDiff,
   formatDiffStat,
   listWorkspaceEntries,
+  removeGitWorktree,
   normalizeBrowserUrl,
   onBrowserNavigated,
   openExternalUrl,
@@ -50,6 +53,8 @@ import {
   type DirEntryInfo,
   type GitEnvironment,
   type GitCommitEntry,
+  type GitWorktree,
+  type GitWorktreeList,
   type GitHistory,
   type GitNexusCommandResult,
   type GitNexusStatus,
@@ -95,6 +100,7 @@ type EnvironmentPopoverProps = {
   workspaceRoot: string;
   sources: SourceItem[];
   onOpenTerminal: (seedCommand?: string) => void;
+  onOpenWorkspace: (root: string) => void;
   anchorRef: React.RefObject<HTMLElement | null>;
 };
 
@@ -436,6 +442,7 @@ export function EnvironmentPopover({
   workspaceRoot,
   sources,
   onOpenTerminal,
+  onOpenWorkspace,
   anchorRef,
 }: EnvironmentPopoverProps) {
   const [env, setEnv] = useState<GitEnvironment | null>(null);
@@ -443,29 +450,85 @@ export function EnvironmentPopover({
   const [error, setError] = useState<string | null>(null);
   const [changesOpen, setChangesOpen] = useState(false);
   const [branchesOpen, setBranchesOpen] = useState(false);
+  const [worktreesOpen, setWorktreesOpen] = useState(false);
+  const [worktreeFormOpen, setWorktreeFormOpen] = useState(false);
+  const [worktreePath, setWorktreePath] = useState("");
+  const [worktreeBranch, setWorktreeBranch] = useState("");
+  const [createWorktreeBranch, setCreateWorktreeBranch] = useState(true);
+  const [worktreeBusy, setWorktreeBusy] = useState(false);
+  const [worktrees, setWorktrees] = useState<GitWorktreeList | null>(null);
   const [history, setHistory] = useState<GitHistory | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const refresh = useCallback(async () => {
     if (!workspaceRoot.trim()) {
       setEnv(null);
+      setWorktrees(null);
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const [next, nextHistory] = await Promise.all([
+      const [next, nextHistory, nextWorktrees] = await Promise.all([
         fetchGitEnvironment(workspaceRoot.trim(), true),
         fetchGitHistory(workspaceRoot.trim(), 200),
+        fetchGitWorktrees(workspaceRoot.trim()),
       ]);
       setEnv(next);
       setHistory(nextHistory);
+      setWorktrees(nextWorktrees);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
   }, [workspaceRoot]);
+
+  async function submitWorktree(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    if (worktreeBusy || !workspaceRoot.trim()) return;
+    const path = worktreePath.trim();
+    const branch = worktreeBranch.trim();
+    if (!path || !branch) {
+      setError(t(locale, "env.worktreeFieldsRequired"));
+      return;
+    }
+    setWorktreeBusy(true);
+    setError(null);
+    try {
+      const created = await createGitWorktree(
+        workspaceRoot.trim(),
+        path,
+        branch,
+        createWorktreeBranch,
+      );
+      setWorktrees(await fetchGitWorktrees(workspaceRoot.trim()));
+      setWorktreeFormOpen(false);
+      setWorktreePath("");
+      setWorktreeBranch("");
+      onOpenWorkspace(created.path);
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setWorktreeBusy(false);
+    }
+  }
+
+  async function removeWorktree(worktree: GitWorktree): Promise<void> {
+    if (worktreeBusy) return;
+    if (!window.confirm(t(locale, "env.removeWorktreeConfirm", { path: worktree.path }))) return;
+    setWorktreeBusy(true);
+    setError(null);
+    try {
+      await removeGitWorktree(workspaceRoot.trim(), worktree.path);
+      setWorktrees(await fetchGitWorktrees(workspaceRoot.trim()));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setWorktreeBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -561,6 +624,104 @@ export function EnvironmentPopover({
             ))
           )}
         </div>
+      ) : null}
+
+      {env?.is_repo ? (
+        <>
+          <button type="button" className="env-row" onClick={() => setWorktreesOpen((value) => !value)}>
+            <span className="env-row-main">
+              <span className="env-row-icon" aria-hidden="true">⑂</span>
+              {t(locale, "env.worktrees")}
+            </span>
+            <span className="env-chevron">{worktreesOpen ? "▾" : "▸"}</span>
+          </button>
+          {worktreesOpen ? (
+            <div className="env-worktrees">
+              {(worktrees?.worktrees || []).length === 0 ? (
+                <p className="env-muted">{t(locale, "env.noWorktrees")}</p>
+              ) : (
+                (worktrees?.worktrees || []).map((worktree) => (
+                  <div className={`env-worktree${worktree.current ? " current" : ""}`} key={worktree.path}>
+                    <div className="env-worktree-main">
+                      <span className="env-worktree-branch">
+                        {worktree.branch || (worktree.detached ? t(locale, "env.detached") : t(locale, "env.noBranch"))}
+                      </span>
+                      <span className="env-worktree-path" title={worktree.path}>{worktree.path}</span>
+                    </div>
+                    <div className="env-worktree-actions">
+                      {worktree.current ? (
+                        <span className="env-worktree-current">{t(locale, "env.currentWorktree")}</span>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            disabled={worktreeBusy}
+                            onClick={() => {
+                              onOpenWorkspace(worktree.path);
+                              onClose();
+                            }}
+                          >
+                            {t(locale, "env.openWorktree")}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={worktreeBusy}
+                            onClick={() => void removeWorktree(worktree)}
+                          >
+                            {t(locale, "env.removeWorktree")}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+              <button
+                type="button"
+                className="env-worktree-new"
+                disabled={worktreeBusy}
+                onClick={() => {
+                  setWorktreeFormOpen((value) => !value);
+                  if (!worktreeBranch.trim()) setWorktreeBranch("codex/worktree");
+                }}
+              >
+                + {t(locale, "env.newWorktree")}
+              </button>
+              {worktreeFormOpen ? (
+                <form className="env-worktree-form" onSubmit={(event) => void submitWorktree(event)}>
+                  <label>
+                    <span>{t(locale, "env.worktreePath")}</span>
+                    <input
+                      value={worktreePath}
+                      onChange={(event) => setWorktreePath(event.target.value)}
+                      placeholder={t(locale, "env.worktreePathPlaceholder")}
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label>
+                    <span>{t(locale, "env.worktreeBranch")}</span>
+                    <input
+                      value={worktreeBranch}
+                      onChange={(event) => setWorktreeBranch(event.target.value)}
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label className="env-worktree-check">
+                    <input
+                      type="checkbox"
+                      checked={createWorktreeBranch}
+                      onChange={(event) => setCreateWorktreeBranch(event.target.checked)}
+                    />
+                    <span>{t(locale, "env.createWorktreeBranch")}</span>
+                  </label>
+                  <button type="submit" className="env-worktree-submit" disabled={worktreeBusy}>
+                    {t(locale, "env.createWorktree")}
+                  </button>
+                </form>
+              ) : null}
+            </div>
+          ) : null}
+        </>
       ) : null}
 
       <button
