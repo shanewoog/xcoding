@@ -182,6 +182,16 @@ async function main() {
     "environment credentials must remain a supported fallback",
   );
 
+  const deleteProviderStart = appSource.indexOf("function deleteProvider(id: string): void {");
+  const deleteProviderEnd = appSource.indexOf("\n  const chatSessions", deleteProviderStart);
+  assert.ok(deleteProviderStart >= 0 && deleteProviderEnd > deleteProviderStart, "App missing provider delete handler");
+  const deleteProviderSource = appSource.slice(deleteProviderStart, deleteProviderEnd);
+  assert.ok(
+    deleteProviderSource.includes('window.confirm(t(locale, "providers.deleteConfirm"))'),
+    "provider deletion must require confirmation",
+  );
+  assert.ok(i18nSource.includes('"providers.deleteConfirm"'), "i18n.ts missing provider delete confirmation");
+
   const submitStart = appSource.indexOf("async function submit(");
   const submitEnd = appSource.indexOf("async function steerCurrentRun", submitStart);
   assert.ok(submitStart >= 0 && submitEnd > submitStart, "App missing composer submit handler");

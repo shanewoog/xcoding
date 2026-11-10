@@ -1050,6 +1050,36 @@ fn acquire_single_instance() -> Result<SingleInstanceGuard, SingleInstanceError>
     Ok(SingleInstanceGuard)
 }
 
+const PROJECT_LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn start_project_log_cleanup_worker() {
+    let result = std::thread::Builder::new()
+        .name("xcoding-project-log-cleanup".to_owned())
+        .spawn(|| loop {
+            let workspace_home = load_user_config().workspace_home.unwrap_or_default();
+            if !workspace_home.trim().is_empty() {
+                match projects::cleanup_project_logs(&workspace_home) {
+                    Ok(report)
+                        if report.deleted_files > 0 || report.skipped_files > 0 =>
+                    {
+                        boot_log(&format!(
+                            "project log cleanup: deleted {} file(s), freed {} bytes, skipped {} file(s)",
+                            report.deleted_files, report.freed_bytes, report.skipped_files
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        boot_log(&format!("project log cleanup failed (non-fatal): {error}"))
+                    }
+                }
+            }
+            std::thread::sleep(PROJECT_LOG_CLEANUP_INTERVAL);
+        });
+    if let Err(error) = result {
+        boot_log(&format!("project log cleanup worker failed: {error}"));
+    }
+}
+
 fn main() {
     boot_log("main enter");
     let _single_instance = match acquire_single_instance() {
@@ -1093,6 +1123,7 @@ fn main() {
             } else {
                 boot_log("window hang watchdog skipped: main window unavailable");
             }
+            start_project_log_cleanup_worker();
             let mut startup_config = load_user_config();
             if startup_config.local_relay_enabled {
                 if startup_config

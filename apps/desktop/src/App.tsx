@@ -2246,6 +2246,7 @@ export function App() {
 
   function deleteProvider(id: string): void {
     if (providers.length <= 1) return;
+    if (!window.confirm(t(locale, "providers.deleteConfirm"))) return;
     const next = providers.filter((item) => item.id !== id);
     const fallback = next.find((item) => item.id === activeProviderId) ?? next[0];
     setProviders(next);

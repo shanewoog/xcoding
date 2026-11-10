@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pinyin::ToPinyin;
 use serde_json::json;
@@ -275,6 +276,158 @@ pub fn rename_project(params: RenameProjectParams) -> Result<RenameProjectResult
     Ok(RenameProjectResult { project })
 }
 
+const PROJECT_LOG_DIR: &str = ".xcoding/logs";
+const PROJECT_LOG_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const PROJECT_LOG_MAX_FILES: usize = 50;
+const PROJECT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProjectLogCleanupReport {
+    pub deleted_files: usize,
+    pub freed_bytes: u64,
+    pub skipped_files: usize,
+}
+
+impl ProjectLogCleanupReport {
+    fn add(&mut self, other: Self) {
+        self.deleted_files += other.deleted_files;
+        self.freed_bytes += other.freed_bytes;
+        self.skipped_files += other.skipped_files;
+    }
+}
+
+struct ProjectLogFile {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+fn cleanup_project_log_dir_with_limits(
+    dir: &Path,
+    now: SystemTime,
+    retention: Duration,
+    max_files: usize,
+    max_bytes: u64,
+) -> ProjectLogCleanupReport {
+    let mut report = ProjectLogCleanupReport::default();
+    if !dir.is_dir() {
+        return report;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            report.skipped_files = 1;
+            return report;
+        }
+    };
+    let mut logs = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                report.skipped_files += 1;
+                continue;
+            }
+        };
+        let is_file = entry.file_type().map(|kind| kind.is_file()).unwrap_or(false);
+        let is_log = entry
+            .path()
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("log"));
+        if !is_file || !is_log {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                report.skipped_files += 1;
+                continue;
+            }
+        };
+        let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+        logs.push(ProjectLogFile {
+            path: entry.path(),
+            len: metadata.len(),
+            modified,
+        });
+    }
+    if logs.is_empty() {
+        return report;
+    }
+    logs.sort_by(|left, right| {
+        left.modified
+            .cmp(&right.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let newest = logs.last().map(|log| log.path.clone());
+
+    let mut kept = Vec::new();
+    for log in logs {
+        let expired = now
+            .duration_since(log.modified)
+            .map(|age| age > retention)
+            .unwrap_or(false);
+        if expired && Some(&log.path) != newest.as_ref() {
+            match fs::remove_file(&log.path) {
+                Ok(()) => {
+                    report.deleted_files += 1;
+                    report.freed_bytes += log.len;
+                }
+                Err(_) => {
+                    report.skipped_files += 1;
+                    kept.push(log);
+                }
+            }
+        } else {
+            kept.push(log);
+        }
+    }
+
+    let mut count = kept.len();
+    let mut total_bytes = kept.iter().map(|log| log.len).sum::<u64>();
+    for log in &kept {
+        if count <= max_files && total_bytes <= max_bytes {
+            break;
+        }
+        if Some(&log.path) == newest.as_ref() {
+            continue;
+        }
+        match fs::remove_file(&log.path) {
+            Ok(()) => {
+                count = count.saturating_sub(1);
+                total_bytes = total_bytes.saturating_sub(log.len);
+                report.deleted_files += 1;
+                report.freed_bytes += log.len;
+            }
+            Err(_) => report.skipped_files += 1,
+        }
+    }
+    report
+}
+
+/// Remove old background-command logs from every project below the workspace home.
+/// Only regular `.log` files directly inside `.xcoding/logs` are considered.
+pub fn cleanup_project_logs(workspace_home: &str) -> Result<ProjectLogCleanupReport, String> {
+    if workspace_home.trim().is_empty() {
+        return Ok(ProjectLogCleanupReport::default());
+    }
+    let projects = list_projects(workspace_home)?;
+    let now = SystemTime::now();
+    let mut report = ProjectLogCleanupReport::default();
+    for project in projects {
+        let dir = Path::new(&project.path).join(PROJECT_LOG_DIR);
+        report.add(cleanup_project_log_dir_with_limits(
+            &dir,
+            now,
+            PROJECT_LOG_RETENTION,
+            PROJECT_LOG_MAX_FILES,
+            PROJECT_LOG_MAX_BYTES,
+        ));
+    }
+    Ok(report)
+}
+
 pub fn list_projects(workspace_home: &str) -> Result<Vec<ProjectDir>, String> {
     let home = PathBuf::from(workspace_home.trim());
     if workspace_home.trim().is_empty() {
@@ -398,13 +551,13 @@ pub fn pick_directory(title: Option<String>) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_dir_recursive, direct_child_project, is_within_home, list_projects, project_dir_slug,
-        rename_project, unique_destination,
+        cleanup_project_log_dir_with_limits, copy_dir_recursive, direct_child_project,
+        is_within_home, list_projects, project_dir_slug, rename_project, unique_destination,
     };
     use xcoding_protocol::RenameProjectParams;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -474,6 +627,88 @@ mod tests {
             .expect("renamed project should be listed");
         assert_eq!(found.title, "新名字");
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn project_log_cleanup_removes_expired_files_and_keeps_newest() {
+        let logs = temp_dir("project-logs-age");
+        let now = SystemTime::now();
+        let old = logs.join("old.log");
+        let fresh = logs.join("fresh.log");
+        let non_log = logs.join("keep.txt");
+        fs::write(&old, b"old").unwrap();
+        fs::write(&fresh, b"fresh").unwrap();
+        fs::write(&non_log, b"keep").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(8 * 24 * 60 * 60))
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&fresh)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(60))
+            .unwrap();
+
+        let report = cleanup_project_log_dir_with_limits(
+            &logs,
+            now,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            50,
+            10 * 1024 * 1024,
+        );
+
+        assert_eq!(report.deleted_files, 1);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(non_log.exists());
+        let _ = fs::remove_dir_all(logs);
+    }
+
+    #[test]
+    fn project_log_cleanup_enforces_count_and_size_but_keeps_newest() {
+        let logs = temp_dir("project-logs-limits");
+        let now = SystemTime::now();
+        let oldest = logs.join("oldest.log");
+        let middle = logs.join("middle.log");
+        let newest = logs.join("newest.log");
+        fs::write(&oldest, vec![0_u8; 5 * 1024 * 1024]).unwrap();
+        fs::write(&middle, vec![0_u8; 5 * 1024 * 1024]).unwrap();
+        fs::write(&newest, vec![0_u8; 5 * 1024 * 1024]).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&oldest)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(180))
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&middle)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(120))
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&newest)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(60))
+            .unwrap();
+
+        let report = cleanup_project_log_dir_with_limits(
+            &logs,
+            now,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            2,
+            10 * 1024 * 1024,
+        );
+
+        assert_eq!(report.deleted_files, 1);
+        assert!(!oldest.exists());
+        assert!(middle.exists());
+        assert!(newest.exists());
+        let _ = fs::remove_dir_all(logs);
     }
 
     #[test]
