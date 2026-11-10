@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pinyin::ToPinyin;
@@ -76,6 +77,102 @@ pub fn project_dir_slug(display_name: &str) -> Result<String, String> {
 
 fn meta_path(project_path: &Path) -> PathBuf {
     project_path.join(".xcoding").join("project-meta.json")
+}
+
+fn project_registry_path(home: &Path) -> PathBuf {
+    home.join(".xcoding").join("projects.json")
+}
+
+fn read_registered_project_paths(home: &Path) -> Vec<String> {
+    let Ok(raw) = fs::read_to_string(project_registry_path(home)) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    value
+        .get("project_paths")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_registered_project_paths(home: &Path, paths: &[String]) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(&json!({ "project_paths": paths }))
+        .map_err(|error| error.to_string())?;
+    write_text_utf8(&project_registry_path(home), &format!("{body}\n"))
+        .map_err(|error| error.to_string())
+}
+
+fn register_workspace_project(home: &Path, relative: &Path) -> Result<(), String> {
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    let key = normalize_path_key(Path::new(&normalized));
+    let mut paths = read_registered_project_paths(home);
+    if paths
+        .iter()
+        .any(|path| normalize_path_key(Path::new(path)) == key)
+    {
+        return Ok(());
+    }
+    paths.push(normalized);
+    paths.sort_by_key(|path| path.to_ascii_lowercase());
+    write_registered_project_paths(home, &paths)
+}
+
+fn safe_registered_project_path(raw: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(raw.trim());
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return None;
+    }
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part.to_string_lossy();
+                if part.is_empty() || part.starts_with('.') {
+                    return None;
+                }
+                clean.push(part.as_ref());
+            }
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!clean.as_os_str().is_empty()).then_some(clean)
+}
+
+fn relative_workspace_project_path(home: &Path, source: &Path) -> Result<PathBuf, String> {
+    if !is_within_home(home, source) {
+        return Err(format!(
+            "selected folder is not inside workspace home: {}",
+            source.display()
+        ));
+    }
+    let relative = source.strip_prefix(home).map_err(|_| {
+        format!(
+            "selected folder is not inside workspace home: {}",
+            source.display()
+        )
+    })?;
+    if relative.as_os_str().is_empty() {
+        return Err("select a project folder inside the workspace, not the workspace base".to_owned());
+    }
+    for component in relative.components() {
+        if let Component::Normal(part) = component {
+            if part.to_string_lossy().starts_with('.') {
+                return Err("hidden folders cannot be added as projects".to_owned());
+            }
+        }
+    }
+    Ok(relative.to_path_buf())
 }
 
 fn read_title(project_path: &Path, fallback: &str) -> String {
@@ -447,6 +544,30 @@ pub fn list_projects(workspace_home: &str) -> Result<Vec<ProjectDir>, String> {
             projects.push(project);
         }
     }
+    let mut seen = projects
+        .iter()
+        .map(|project| normalize_path_key(Path::new(&project.path)))
+        .collect::<HashSet<_>>();
+    if let Ok(canonical_home) = fs::canonicalize(&home) {
+        for raw in read_registered_project_paths(&home) {
+            let Some(relative) = safe_registered_project_path(&raw) else {
+                continue;
+            };
+            let candidate = home.join(relative);
+            let Ok(resolved) = fs::canonicalize(&candidate) else {
+                continue;
+            };
+            if !resolved.is_dir() || !is_within_home(&canonical_home, &resolved) {
+                continue;
+            }
+            let Some(project) = project_from_path(resolved) else {
+                continue;
+            };
+            if seen.insert(normalize_path_key(Path::new(&project.path))) {
+                projects.push(project);
+            }
+        }
+    }
     projects.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
     Ok(projects)
 }
@@ -488,7 +609,7 @@ pub fn create_project(params: CreateProjectParams) -> Result<CreateProjectResult
 }
 
 /// Add an existing folder as a project under the workspace home.
-/// - Inside workspace (top-level): reuse it; caller should ignore if already listed.
+/// - Inside workspace: reuse it; nested folders are recorded in the workspace registry.
 /// - Outside workspace: copy the folder into the workspace home.
 pub fn import_project(params: ImportProjectParams) -> Result<ImportProjectResult, String> {
     let home_raw = params.workspace_home.trim();
@@ -503,7 +624,14 @@ pub fn import_project(params: ImportProjectParams) -> Result<ImportProjectResult
     let source = resolve_existing_dir(Path::new(source_raw))?;
 
     if is_within_home(&home, &source) {
-        let project_path = direct_child_project(&home, &source)?;
+        let relative = relative_workspace_project_path(&home, &source)?;
+        let project_path = match direct_child_project(&home, &source) {
+            Ok(path) => path,
+            Err(_) => {
+                register_workspace_project(&home, &relative)?;
+                PathBuf::from(home_raw).join(relative)
+            }
+        };
         let Some(project) = project_from_path(project_path) else {
             return Err("selected folder cannot be used as a project".to_owned());
         };
@@ -552,11 +680,12 @@ pub fn pick_directory(title: Option<String>) -> Result<Option<String>, String> {
 mod tests {
     use super::{
         cleanup_project_log_dir_with_limits, copy_dir_recursive, direct_child_project,
-        is_within_home, list_projects, project_dir_slug, rename_project, unique_destination,
+        import_project, is_within_home, list_projects, normalize_path_key, project_dir_slug,
+        rename_project, unique_destination,
     };
-    use xcoding_protocol::RenameProjectParams;
+    use xcoding_protocol::{ImportProjectParams, RenameProjectParams};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -607,6 +736,41 @@ mod tests {
         assert!(direct_child_project(&home, &nested).is_err());
         assert!(direct_child_project(&home, &home).is_err());
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn imports_nested_workspace_project_without_copying() {
+        let home = temp_dir("nested-home");
+        let nested = home.join("parent").join("child");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("marker.txt"), b"keep").unwrap();
+        let params = ImportProjectParams {
+            workspace_home: home.to_string_lossy().to_string(),
+            source_path: nested.to_string_lossy().to_string(),
+        };
+
+        let imported = import_project(params.clone()).unwrap();
+        assert!(!imported.copied);
+        assert!(imported.already_existed);
+        assert_eq!(
+            normalize_path_key(Path::new(&imported.project.path)),
+            normalize_path_key(&nested)
+        );
+        assert!(nested.join("marker.txt").is_file());
+        assert!(!home.join("child").exists());
+
+        let imported_again = import_project(params).unwrap();
+        assert!(!imported_again.copied);
+        let listed = list_projects(home.to_str().unwrap()).unwrap();
+        let nested_path = normalize_path_key(&nested);
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|project| normalize_path_key(Path::new(&project.path)) == nested_path)
+                .count(),
+            1
+        );
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
