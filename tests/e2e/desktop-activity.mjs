@@ -110,6 +110,28 @@ async function main() {
   assert.ok(!appSource.includes("activity-badge"), "the removed activity badge must not be rendered");
   assert.ok(appSource.includes("run-plan-list"), "the compact run status should expose task steps when expanded");
   assert.ok(appSource.includes("currentRunPlanStep(plan, activity)"), "run status should derive the current task step");
+  const persistedRunStatusStart = appSource.indexOf("const persistedRunStatus = useMemo");
+  const persistedRunStatusEnd = appSource.indexOf("  const runStatus = activeSessionId", persistedRunStatusStart);
+  const persistedRunStatusSource = appSource.slice(persistedRunStatusStart, persistedRunStatusEnd);
+  assert.ok(
+    persistedRunStatusStart >= 0 &&
+      persistedRunStatusEnd > persistedRunStatusStart &&
+      persistedRunStatusSource.includes('activeSession.status !== "running"') &&
+      persistedRunStatusSource.includes('activeSession.status !== "need_user"') &&
+      persistedRunStatusSource.includes('phase: "thinking" as const') &&
+      appSource.includes("runStatusBySession[activeSessionId] ?? persistedRunStatus"),
+    "running and waiting sessions must retain the inline plan progress after switching or reload",
+  );
+  const selectSessionStart = appSource.indexOf("function selectSession(session: Session): void {");
+  const selectSessionEnd = appSource.indexOf("function toggleProjectCollapsed", selectSessionStart);
+  const selectSessionSource = appSource.slice(selectSessionStart, selectSessionEnd);
+  assert.ok(
+    selectSessionStart >= 0 &&
+      selectSessionEnd > selectSessionStart &&
+      selectSessionSource.includes("setPlan([])") &&
+      selectSessionSource.includes("setActivity([])"),
+    "session switches must clear the previous plan before hydrating the selected session",
+  );
   assert.ok(
     activitySource.includes('event.tool_call.name === "update_plan"'),
     "plan refreshes should render as the step list instead of an activity row",

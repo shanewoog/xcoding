@@ -46,24 +46,30 @@ assert.ok(
   "resetComposerSession must clear only the new-task composer draft",
 );
 
+const forgetDeletedSessionsBody = functionBody("forgetDeletedSessions");
+assert.ok(
+  forgetDeletedSessionsBody.includes("setComposerDraftBySession((current) =>") &&
+    forgetDeletedSessionsBody.includes("dropSessionKey(next, sessionId)"),
+  "deleting sessions must drop their composer drafts",
+);
 const deleteSessionBody = functionBody("deleteSession");
 assert.ok(
-  deleteSessionBody.includes("setComposerDraftBySession((current) => dropSessionKey(current, sessionId))"),
-  "deleting a session must drop its composer draft",
+  deleteSessionBody.includes("forgetDeletedSessions([sessionId])"),
+  "single-session deletion must use the shared deletion-state cleanup",
 );
 
 const submitComposerBody = functionBody("submitComposer");
 assert.ok(
   submitComposerBody.includes("const composerSessionKey = activeSessionStateKey") &&
-    submitComposerBody.includes("restoreComposerDraft(message, images, textFiles, composerSessionKey)"),
-  "failed sends must restore content to the session that submitted it",
+    submitComposerBody.includes("restoreComposerDraft(message, images, textFiles, composerSessionKey, replyTo)"),
+  "failed sends must restore content and the reply target to the session that submitted it",
 );
 
 const steerCurrentRunBody = functionBody("steerCurrentRun");
 assert.ok(
   steerCurrentRunBody.includes("const composerSessionKey = activeSessionStateKey") &&
-    steerCurrentRunBody.includes("restoreComposerDraft(message, images, textFiles, composerSessionKey)"),
-  "failed steering must restore content to the session that submitted it",
+    steerCurrentRunBody.includes("restoreComposerDraft(message, images, textFiles, composerSessionKey, replyTo)"),
+  "failed steering must restore content and the reply target to the session that submitted it",
 );
 
 const restoreComposerBody = functionBody("restoreComposerDraft");

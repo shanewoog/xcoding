@@ -1,6 +1,6 @@
 [package]
 name = "xcoding-desktop"
-version = "1.1.15"
+version = "1.1.16"
 description = "XCoding Desktop shell"
 authors = ["XCoding Contributors"]
 edition = "2024"

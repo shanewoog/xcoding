@@ -328,6 +328,36 @@ export interface ProjectDir {
   title: string;
 }
 
+export interface ProjectCleanupItem {
+  relative_path: string;
+  bytes: number;
+}
+
+export interface ProjectDiskUsage {
+  project: ProjectDir;
+  total_bytes: number;
+  cleanable_bytes: number;
+  skipped_entries: number;
+  cleanable_items: ProjectCleanupItem[];
+}
+
+export interface ProjectDiskUsageReport {
+  projects: ProjectDiskUsage[];
+  total_bytes: number;
+  cleanable_bytes: number;
+}
+
+export interface CleanupProjectParams {
+  workspace_home: string;
+  project_path: string;
+}
+
+export interface CleanupProjectResult {
+  removed_bytes: number;
+  removed_items: string[];
+  failed_items: string[];
+}
+
 export interface CreateProjectParams {
   workspace_home: string;
   name: string;

@@ -257,7 +257,7 @@ async function main() {
 
   assert.match(
     cssSource,
-    /\.workbench\s*\{[\s\S]*?grid-template-columns:\s*minmax\(230px,\s*280px\)\s+minmax\(0,\s*1fr\);/,
+    /\.workbench\s*\{[\s\S]*?grid-template-columns:\s*280px\s+minmax\(1060px,\s*1fr\);/,
     "workbench should be two columns without a permanent right rail",
   );
   assert.ok(cssSource.includes(".workbench.has-right-panel"), "styles should support optional right tools panel");
@@ -346,8 +346,9 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
   );
   assert.ok(appSource.includes("adoptDraftRightPanelState"), "draft right panel state must migrate to the created session");
   assert.ok(
-    appSource.includes("dropSessionKey(current, sessionId)"),
-    "deleting a session must drop its right panel state",
+    appSource.includes("setRightPanelOpenBySession((current) =>") &&
+      appSource.includes("dropSessionKey(next, sessionId)"),
+    "deleting sessions must drop their right panel state",
   );
   assert.ok(
     appSource.includes("key={sessionStateKey(activeSessionId)}"),
@@ -366,8 +367,9 @@ assert.ok(cssSource.includes(".browser-findbar") && cssSource.includes(".browser
     "draft browser state must migrate to the created session",
   );
   assert.ok(
-    appSource.includes("setBrowserStateBySession((current) => dropSessionKey(current, sessionId))"),
-    "deleting a session must drop its browser state",
+    appSource.includes("setBrowserStateBySession((current) =>") &&
+      appSource.includes("dropSessionKey(next, sessionId)"),
+    "deleting sessions must drop their browser state",
   );
   assert.ok(
     appSource.includes("browserState={browserState}") && appSource.includes("onBrowserStateChange="),

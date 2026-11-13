@@ -1014,6 +1014,41 @@ pub struct ProjectDir {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProjectCleanupItem {
+    pub relative_path: String,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProjectDiskUsage {
+    pub project: ProjectDir,
+    pub total_bytes: u64,
+    pub cleanable_bytes: u64,
+    pub skipped_entries: u64,
+    pub cleanable_items: Vec<ProjectCleanupItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProjectDiskUsageReport {
+    pub projects: Vec<ProjectDiskUsage>,
+    pub total_bytes: u64,
+    pub cleanable_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CleanupProjectParams {
+    pub workspace_home: String,
+    pub project_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CleanupProjectResult {
+    pub removed_bytes: u64,
+    pub removed_items: Vec<String>,
+    pub failed_items: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CreateProjectParams {
     pub workspace_home: String,
     pub name: String,

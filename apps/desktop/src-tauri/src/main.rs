@@ -4,6 +4,7 @@
 mod browser;
 mod gitnexus;
 mod passwords;
+mod project_cleanup;
 mod projects;
 mod relay;
 mod request_logs;
@@ -31,7 +32,8 @@ use xcoding_mcp::{
 use xcoding_protocol::{
     CancelSessionParams, CancelSessionResult, ChatParams, ChatResult, CreateProjectParams,
     CreateProjectResult, DeleteFollowUpQueueEntryParams, FollowUpQueueEntry, ImportProjectParams,
-    ImportProjectResult, ListModelsResult, PingResult, ModelCallReport, ModelRouteStatus, ProjectDir,
+    CleanupProjectParams, CleanupProjectResult, ImportProjectResult, ListModelsResult, PingResult,
+    ModelCallReport, ModelRouteStatus, ProjectDir, ProjectDiskUsageReport,
     ProviderAuthStatus, ProviderKeyStatus, QueueFollowUpParams,
     ProviderWireApi, RenameProjectParams, RenameProjectResult, ReplaySessionResult,
     ResolveActionParams, ResolveActionResult, RollbackRestorePointParams,
@@ -605,6 +607,24 @@ fn list_projects(app: AppHandle, workspace_home: String) -> Result<Vec<ProjectDi
             .map_err(|error| error.to_string())?;
     }
     Ok(projects)
+}
+
+#[tauri::command]
+async fn scan_project_usage(workspace_home: String) -> Result<ProjectDiskUsageReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        project_cleanup::scan_projects(&workspace_home)
+    })
+    .await
+    .map_err(|error| format!("project usage scan task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn cleanup_project(params: CleanupProjectParams) -> Result<CleanupProjectResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        project_cleanup::cleanup_project(&params.workspace_home, &params.project_path)
+    })
+    .await
+    .map_err(|error| format!("project cleanup task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1250,6 +1270,8 @@ fn main() {
             add_local_mcp,
             import_local_skill,
             list_projects,
+            scan_project_usage,
+            cleanup_project,
             create_project,
             rename_project,
             import_project,

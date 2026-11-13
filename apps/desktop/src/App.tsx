@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ProjectCleanup } from "./ProjectCleanup";
 import { RequestLogs } from "./RequestLogs";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -1824,7 +1825,159 @@ function MemoryCitations({ items, locale }: { items: MemoryCitation[]; locale: L
   );
 }
 
-type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults" | "reports" | "requestLogs";
+function SessionManagerPanel({
+  sessions,
+  diskProjects,
+  activeSessionId,
+  locale,
+  disabled,
+  onDelete,
+}: {
+  sessions: Session[];
+  diskProjects: ProjectDir[];
+  activeSessionId: string | null;
+  locale: Locale;
+  disabled: boolean;
+  onDelete: (sessionIds: string[]) => Promise<boolean>;
+}) {
+  const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    const liveSessionIds = new Set(sessions.map((session) => session.id));
+    setSelectedSessionIds((current) => {
+      const next = current.filter((sessionId) => liveSessionIds.has(sessionId));
+      return next.length === current.length ? current : next;
+    });
+  }, [sessions]);
+
+  const groups = useMemo(
+    () => groupSessionsByProject(sessions, diskProjects)
+      .filter((group) => group.sessions.length > 0)
+      .map((group) => ({
+        ...group,
+        displayName: isChatWorkspace(group.root) ? t(locale, "settings.sessions.chats") : group.name,
+      })),
+    [diskProjects, locale, sessions],
+  );
+  const allSessionIds = sessions.map((session) => session.id);
+  const allSelected = sessions.length > 0 && selectedSessionIds.length === sessions.length;
+  const selectionDisabled = disabled || deleting;
+
+  function toggleSession(sessionId: string): void {
+    if (selectionDisabled) return;
+    setSelectedSessionIds((current) => current.includes(sessionId)
+      ? current.filter((id) => id !== sessionId)
+      : [...current, sessionId]);
+  }
+
+  async function deleteSelectedSessions(): Promise<void> {
+    if (selectionDisabled || selectedSessionIds.length === 0) return;
+    if (!window.confirm(t(locale, "settings.sessions.deleteConfirm", { count: selectedSessionIds.length }))) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      if (await onDelete(selectedSessionIds)) setSelectedSessionIds([]);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="session-management">
+      <div className="session-management-header">
+        <div>
+          <p className="panel-title">{t(locale, "settings.sessions.title")}</p>
+          <p className="mode-help">{t(locale, "settings.sessions.subtitle")}</p>
+        </div>
+        <div className="session-management-actions">
+          <label className="session-management-select-all">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={() => setSelectedSessionIds(allSelected ? [] : allSessionIds)}
+              disabled={selectionDisabled || sessions.length === 0}
+            />
+            <span>{t(locale, "settings.sessions.selectAll")}</span>
+          </label>
+          <button
+            type="button"
+            className="quiet-button"
+            onClick={() => setSelectedSessionIds([])}
+            disabled={selectionDisabled || selectedSessionIds.length === 0}
+          >
+            {t(locale, "settings.sessions.clearSelection")}
+          </button>
+          <button
+            type="button"
+            className="danger-button"
+            onClick={() => void deleteSelectedSessions()}
+            disabled={selectionDisabled || selectedSessionIds.length === 0}
+          >
+            {deleting
+              ? t(locale, "settings.sessions.deleting")
+              : t(locale, "settings.sessions.deleteSelected")}
+          </button>
+        </div>
+      </div>
+      <p className="session-management-count" role="status">
+        {t(locale, "settings.sessions.selected", { count: selectedSessionIds.length })}
+      </p>
+      {groups.length === 0 ? (
+        <p className="session-management-empty">{t(locale, "settings.sessions.empty")}</p>
+      ) : (
+        <div className="session-management-groups">
+          {groups.map((group) => (
+            <section className="session-management-group" key={group.root} aria-label={group.displayName}>
+              <header className="session-management-group-header">
+                <div>
+                  <strong>{group.displayName}</strong>
+                  <span>{group.root}</span>
+                </div>
+                <span className="session-management-group-count">{group.sessions.length}</span>
+              </header>
+              <div className="session-management-list">
+                {group.sessions.map((session) => {
+                  const selected = selectedSessionIds.includes(session.id);
+                  const statusClass = session.status === "created" ? "status-idle" : `status-${session.status}`;
+                  return (
+                    <label
+                      className={`session-management-row${selected ? " is-selected" : ""}${session.id === activeSessionId ? " is-active" : ""}`}
+                      key={session.id}
+                      title={session.workspace_root}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleSession(session.id)}
+                        disabled={selectionDisabled}
+                      />
+                      <span className="session-management-copy">
+                        <strong className="session-management-title">{sessionTitle(session, locale)}</strong>
+                        <span className="session-management-meta">{sessionMetaLine(session, Date.now(), locale)}</span>
+                      </span>
+                      <span className="session-management-badges">
+                        {session.id === activeSessionId ? (
+                          <span className="session-management-current">{t(locale, "settings.sessions.current")}</span>
+                        ) : null}
+                        <span className={`status-badge ${statusClass}`}>
+                          {t(locale, `status.${session.status}` as MessageKey)}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults" | "sessions" | "cleanup" | "reports" | "requestLogs";
 type ModelReportTab = "providers" | "keys" | "models";
 
 // Prefer the tool call that is still running, so the hint names what is happening now rather than
@@ -2124,8 +2277,21 @@ export function App() {
   const anySessionRunning = draftRunning || runningSessionIds.length > 0;
   // Active-session aliases keep the rest of the workbench logic readable.
   const isRunning = activeSessionRunning;
+  // A session can be running or waiting for approval after a reload or while the
+  // user is viewing another task, so no live run status event may exist yet.
+  // Keep the persisted plan visible by deriving the phase from session status.
+  const persistedRunStatus = useMemo(() => {
+    if (!activeSession || (activeSession.status !== "running" && activeSession.status !== "need_user")) {
+      return null;
+    }
+    const parsedStart = Date.parse(activeSession.updated_at);
+    return {
+      startedAt: Number.isFinite(parsedStart) ? parsedStart : Date.now(),
+      phase: "thinking" as const,
+    };
+  }, [activeSession?.id, activeSession?.status, activeSession?.updated_at]);
   const runStatus = activeSessionId
-    ? (runStatusBySession[activeSessionId] ?? null)
+    ? (runStatusBySession[activeSessionId] ?? persistedRunStatus)
     : draftRunStatus;
   const { open: rightPanelOpen, tab: rightPanelTab } = rightPanelStateFor<ToolPanelTab>(
     activeSessionId,
@@ -3576,6 +3742,8 @@ export function App() {
       setOlderMessagesLoading(false);
       setMessages([]);
       setMessagePageOffset(0);
+      setPlan([]);
+      setActivity([]);
     }
     setSessionMenu(null);
     setView("workbench");
@@ -4101,6 +4269,65 @@ export function App() {
     }
   }
 
+  function forgetDeletedSessions(sessionIds: string[]): void {
+    const deletedSessionIds = Array.from(new Set(sessionIds.filter(Boolean)));
+    if (deletedSessionIds.length === 0) return;
+    const deleted = new Set(deletedSessionIds);
+    setSessions((current) => current.filter((session) => !deleted.has(session.id)));
+    setFollowUpQueue((current) => {
+      const next = current.filter((item) => !deleted.has(item.sessionId));
+      followUpQueueRef.current = next;
+      return next;
+    });
+    setCompletedUnseenSessionIds((current) => current.filter((sessionId) => !deleted.has(sessionId)));
+    setRightPanelOpenBySession((current) =>
+      deletedSessionIds.reduce((next, sessionId) => dropSessionKey(next, sessionId), current),
+    );
+    setRightPanelTabBySession((current) =>
+      deletedSessionIds.reduce((next, sessionId) => dropSessionKey(next, sessionId), current),
+    );
+    setBrowserNavigationBySession((current) =>
+      deletedSessionIds.reduce((next, sessionId) => dropSessionKey(next, sessionId), current),
+    );
+    setBrowserStateBySession((current) =>
+      deletedSessionIds.reduce((next, sessionId) => dropSessionKey(next, sessionId), current),
+    );
+    setComposerDraftBySession((current) =>
+      deletedSessionIds.reduce((next, sessionId) => dropSessionKey(next, sessionId), current),
+    );
+    // Release each deleted task's native webview so it stops holding one.
+    for (const sessionId of deletedSessionIds) {
+      void browserClose(sessionStateKey(sessionId)).catch(() => undefined);
+    }
+    if (activeSessionIdRef.current && deleted.has(activeSessionIdRef.current)) {
+      resetComposerSession();
+    }
+  }
+
+  async function deleteManagedSessions(sessionIds: string[]): Promise<boolean> {
+    if (!isTauriRuntime) return false;
+    const uniqueSessionIds = Array.from(new Set(sessionIds.filter(Boolean)));
+    if (uniqueSessionIds.length === 0) return false;
+    setError(null);
+    const deletedSessionIds: string[] = [];
+    let failedCount = 0;
+    for (const sessionId of uniqueSessionIds) {
+      try {
+        await invoke("delete_session", { sessionId });
+        deletedSessionIds.push(sessionId);
+      } catch {
+        failedCount += 1;
+      }
+    }
+    if (deletedSessionIds.length > 0) forgetDeletedSessions(deletedSessionIds);
+    await refreshSessions();
+    if (failedCount > 0) {
+      setError(t(locale, "settings.sessions.deletePartial", { count: failedCount }));
+      return false;
+    }
+    return true;
+  }
+
   async function deleteSession(sessionId: string): Promise<void> {
     if (!isTauriRuntime) return;
     const confirmed = window.confirm(t(locale, "history.deleteConfirm"));
@@ -4109,23 +4336,7 @@ export function App() {
     setError(null);
     try {
       await invoke("delete_session", { sessionId });
-      setSessions((current) => current.filter((session) => session.id !== sessionId));
-      setFollowUpQueue((current) => {
-        const next = current.filter((item) => item.sessionId !== sessionId);
-        followUpQueueRef.current = next;
-        return next;
-      });
-      setCompletedUnseenSessionIds((current) => clearSessionCompletedUnseen(current, sessionId));
-      setRightPanelOpenBySession((current) => dropSessionKey(current, sessionId));
-      setRightPanelTabBySession((current) => dropSessionKey(current, sessionId));
-      setBrowserNavigationBySession((current) => dropSessionKey(current, sessionId));
-      setBrowserStateBySession((current) => dropSessionKey(current, sessionId));
-      setComposerDraftBySession((current) => dropSessionKey(current, sessionId));
-      // Release the task's native webview so deleted tasks stop holding one.
-      void browserClose(sessionStateKey(sessionId)).catch(() => undefined);
-      if (activeSessionId === sessionId) {
-        resetComposerSession();
-      }
+      forgetDeletedSessions([sessionId]);
       await refreshSessions();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t(locale, "history.deleteFailed"));
@@ -5542,6 +5753,8 @@ export function App() {
       { id: "personalization", labelKey: "settings.tab.personalization" },
       { id: "plugins", labelKey: "settings.tab.plugins" },
       { id: "defaults", labelKey: "settings.tab.defaults" },
+      { id: "sessions", labelKey: "settings.tab.sessions" },
+      { id: "cleanup", labelKey: "settings.tab.cleanup" },
       { id: "reports", labelKey: "settings.tab.reports" },
       { id: "requestLogs", labelKey: "settings.tab.requestLogs" },
     ];
@@ -6922,6 +7135,40 @@ export function App() {
               <p className="mode-help">{t(locale, "settings.workspacePolicyHint")}</p>
             ) : null}
           </section>
+
+          <section
+            className="settings-card session-management-card"
+            role="tabpanel"
+            id="settings-panel-sessions"
+            aria-labelledby="settings-tab-sessions"
+            aria-label={t(locale, "settings.sessions.title")}
+            hidden={settingsTab !== "sessions"}
+          >
+            <SessionManagerPanel
+              sessions={sessions}
+              diskProjects={diskProjects}
+              activeSessionId={activeSessionId}
+              locale={locale}
+              disabled={!isTauriRuntime}
+              onDelete={deleteManagedSessions}
+            />
+          </section>
+
+          {settingsTab === "cleanup" ? (
+            <section
+              className="settings-card project-cleanup-card"
+              role="tabpanel"
+              id="settings-panel-cleanup"
+              aria-labelledby="settings-tab-cleanup"
+              aria-label={t(locale, "settings.cleanup.title")}
+            >
+              <ProjectCleanup
+                locale={locale}
+                workspaceHome={workspaceHome}
+                disabled={anySessionRunning}
+              />
+            </section>
+          ) : null}
 
           {settingsTab === "requestLogs" ? (
             <section className="settings-card request-logs-card" role="tabpanel" id="settings-panel-requestLogs" aria-labelledby="settings-tab-requestLogs">
