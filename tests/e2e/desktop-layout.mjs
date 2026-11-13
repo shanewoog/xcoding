@@ -121,6 +121,7 @@ async function main() {
   );
   assert.ok(cssSource.includes(".message-tool-group"), "styles.css missing tool group styles");
   const layoutSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/layout.ts"), "utf8");
+  const tauriConfigSource = await readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/tauri.conf.json"), "utf8");
   const panelsSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/panels.tsx"), "utf8");
   const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
   const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
@@ -257,10 +258,26 @@ async function main() {
 
   assert.match(
     cssSource,
-    /\.workbench\s*\{[\s\S]*?grid-template-columns:\s*280px\s+minmax\(1060px,\s*1fr\);/,
-    "workbench should be two columns without a permanent right rail",
+    /\.workbench\s*\{[\s\S]*?grid-template-columns:\s*280px\s+minmax\(1140px,\s*1fr\);/,
+    "workbench should protect the minimum width of the center column",
+  );
+  assert.ok(
+    layoutSource.includes("const MIN_CHAT_WIDTH = 1140") &&
+      tauriConfigSource.includes('"minWidth": 1420'),
+    "the window minimum width must keep the one-line composer toolbar fully visible",
+  );
+  assert.ok(
+    /\.composer-footer\s*\{[\s\S]*?flex-wrap:\s*nowrap;/.test(cssSource) &&
+      /\.composer-actions\s*\{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?min-width:\s*max-content;/.test(cssSource),
+    "composer controls must stay on one line and prevent the center column from shrinking",
   );
   assert.ok(cssSource.includes(".workbench.has-right-panel"), "styles should support optional right tools panel");
+  assert.ok(
+    /\.workbench\.has-right-panel\s*\{[\s\S]*?grid-template-columns:\s*280px\s+minmax\(1140px,\s*1fr\);/.test(cssSource) &&
+      /\.right-tools-panel\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?right:\s*0;[\s\S]*?width:\s*var\(--right-panel-width/.test(cssSource) &&
+      /@media \(max-width: 620px\)[\s\S]*?\.right-tools-panel\s*\{[\s\S]*?position:\s*relative;/.test(cssSource),
+    "the right panel must overlay without changing the center column width",
+  );
 assert.ok(panelsSource.includes("BuiltInBrowserPanel"), "right browser should be built-in panel");
 assert.ok(panelsSource.includes("browserEnsure") || apiSource.includes("browserEnsure"), "built-in browser API wiring missing");
 assert.ok(panelsSource.includes("browserEval") && apiSource.includes("browserEval"), "browser scrollbar injection wiring missing");

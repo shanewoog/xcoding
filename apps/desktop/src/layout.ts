@@ -87,8 +87,8 @@ export function hasTraceContent(input: {
 const RIGHT_PANEL_WIDTH_KEY = "xcoding.rightPanelWidth";
 export const DEFAULT_RIGHT_PANEL_WIDTH = 420;
 export const MIN_RIGHT_PANEL_WIDTH = 280;
-// Keep enough room for the composer footer controls to stay on one line.
-const MIN_CHAT_WIDTH = 1060;
+// Keep every composer tool on one line without clipping the send button.
+const MIN_CHAT_WIDTH = 1140;
 const MIN_SIDEBAR_WIDTH = 280;
 
 export function clampRightPanelWidth(
