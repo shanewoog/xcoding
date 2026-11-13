@@ -80,6 +80,12 @@ export interface LocalMemory {
   created_at: string;
 }
 
+export interface MemoryCitation {
+  id: string;
+  content: string;
+  created_at: string;
+}
+
 export interface PingResult {
   ok: boolean;
   version: string;
@@ -628,6 +634,13 @@ export type SessionEvent =
       type: "message_completed";
       session_id: string;
       message: Message;
+    }
+  | {
+      type: "memory_citations";
+      session_id: string;
+      message_id: string;
+      /** Local memories provided to the model for this assistant reply. */
+      memories: MemoryCitation[];
     }
   | {
       type: "plan";

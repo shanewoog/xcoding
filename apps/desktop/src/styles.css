@@ -1646,9 +1646,81 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   padding: 0;
   width: 1.45rem;
 }
-.message-meta-button:hover {
+.message-meta-button:hover:not(:disabled) {
   background: var(--hover-veil);
   color: var(--text-secondary);
+}
+.message-meta-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.message-meta-button.selected {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.message.branch-selected {
+  background: var(--accent-soft);
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.memory-citations {
+  align-self: flex-start;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-width: min(760px, 100%);
+  padding: 0.35rem 0.55rem;
+}
+.memory-citations summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  list-style: none;
+}
+.memory-citations summary::-webkit-details-marker {
+  display: none;
+}
+.memory-citations summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 0.35rem;
+  transition: transform 120ms ease;
+}
+.memory-citations[open] summary::before {
+  transform: rotate(90deg);
+}
+.memory-citations-list {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+  padding-top: 0.45rem;
+}
+.memory-citations-hint {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin: 0;
+}
+.memory-citation-item {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.4rem 0.5rem;
+}
+.memory-citation-meta {
+  color: var(--text-muted);
+  display: flex;
+  font-size: 0.68rem;
+  gap: 0.5rem;
+}
+.memory-citation-item p {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin: 0;
+  white-space: pre-wrap;
 }
 .message:hover .message-meta,
 .message:focus-within .message-meta {
@@ -1735,6 +1807,37 @@ button:hover:not(:disabled) { background: var(--accent); border-color: var(--acc
   gap: 0.75rem;
   min-width: 0;
   padding: 0.85rem 1.5rem 0;
+}
+
+.branch-selection-bar {
+  align-items: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  justify-content: space-between;
+  padding: 0.65rem 0.75rem;
+}
+.branch-selection-copy {
+  display: grid;
+  gap: 0.2rem;
+  min-width: min(24rem, 100%);
+}
+.branch-selection-copy strong {
+  color: var(--text);
+  font-size: 0.82rem;
+}
+.branch-selection-copy span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.branch-selection-actions {
+  display: flex;
+  flex: none;
+  gap: 0.5rem;
+  margin-left: auto;
 }
 
 .chat-bottom .composer {

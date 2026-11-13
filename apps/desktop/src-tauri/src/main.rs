@@ -670,6 +670,24 @@ fn rename_session(app: AppHandle, session_id: String, title: String) -> Result<S
 }
 
 #[tauri::command]
+fn branch_session(
+    app: AppHandle,
+    source_session_id: String,
+    through_message_ids: Vec<String>,
+    title: Option<String>,
+) -> Result<Session, String> {
+    let source_session_id =
+        uuid::Uuid::parse_str(&source_session_id).map_err(|error| error.to_string())?;
+    let through_message_ids = through_message_ids
+        .iter()
+        .map(|message_id| uuid::Uuid::parse_str(message_id).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    open_core(&app)?
+        .branch_session(source_session_id, through_message_ids, title)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn workspace_config(app: AppHandle, workspace_root: String) -> Result<WorkspaceConfig, String> {
     open_core(&app)?
         .workspace_config(&workspace_root)
@@ -1241,6 +1259,7 @@ fn main() {
             delete_session,
             delete_workspace_sessions,
             rename_session,
+            branch_session,
             workspace_config,
             set_workspace_config,
             count_local_memories,

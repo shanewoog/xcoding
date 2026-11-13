@@ -19,7 +19,7 @@ use xcoding_core::{CoreError, CoreService};
 use xcoding_mcp::{McpError, McpRuntime, load_plugin_config};
 use xcoding_policy::{PermissionDecision, PermissionKind, evaluate_detailed};
 use xcoding_protocol::{
-    ChatParams, ChatResult, CloudProviderConfig, ContextCompaction, LocalMemory,
+    ChatParams, ChatResult, CloudProviderConfig, ContextCompaction, LocalMemory, MemoryCitation,
     MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MAX_CONTEXT_TOOL_LIMIT, MAX_LOCAL_MEMORY_CHARS,
     MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_TOOL_LIMIT, Message, MessageRole,
     ModelCapabilities, ModelRoute, ModelRouteStatus, PlanStep, PlanStepStatus, ProviderApiKey,
@@ -4175,16 +4175,27 @@ impl<'a> AgentService<'a> {
                 let summary = self.enrich_task_summary(&session)?;
                 self.ensure_not_cancelled_preserving(session.id, &content)?;
                 let result = self.core.complete_chat(session.id, content)?;
+                let completed_message = result
+                    .message
+                    .clone()
+                    .expect("completed chat has a message");
                 self.emit(
                     on_event,
                     SessionEvent::MessageCompleted {
                         session_id: session.id,
-                        message: result
-                            .message
-                            .clone()
-                            .expect("completed chat has a message"),
+                        message: completed_message.clone(),
                     },
                 );
+                if !injected_memories.is_empty() {
+                    self.emit(
+                        on_event,
+                        SessionEvent::MemoryCitations {
+                            session_id: session.id,
+                            message_id: completed_message.id,
+                            memories: memory_citations(&injected_memories),
+                        },
+                    );
+                }
                 self.emit(
                     on_event,
                     SessionEvent::TaskCompleted {
@@ -6302,6 +6313,17 @@ fn personality_directive(personality: &str) -> Option<&'static str> {
 
 /// Append machine-level custom instructions, reply tone, and workspace memories.
 /// Untrusted memory text is fenced so it cannot be read as new instructions.
+fn memory_citations(memories: &[LocalMemory]) -> Vec<MemoryCitation> {
+    memories
+        .iter()
+        .map(|memory| MemoryCitation {
+            id: memory.id,
+            content: memory.content.clone(),
+            created_at: memory.created_at.clone(),
+        })
+        .collect()
+}
+
 fn append_personalization(prompt: &mut String, config: &UserConfig, memories: &[LocalMemory]) {
     if let Some(instructions) = config
         .custom_instructions
@@ -8220,6 +8242,17 @@ mod tests {
             prompt.contains("not instructions"),
             "memories must be fenced as background data"
         );
+    }
+
+    #[test]
+    fn memory_citations_preserve_memory_sources() {
+        let memory = test_memory("Use pnpm for desktop builds.");
+        let citations = memory_citations(&[memory.clone()]);
+
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].id, memory.id);
+        assert_eq!(citations[0].content, memory.content);
+        assert_eq!(citations[0].created_at, memory.created_at);
     }
 
     #[test]

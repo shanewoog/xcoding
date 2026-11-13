@@ -15,5 +15,26 @@ assert.ok(
   !appSource.includes('className="history-load-older"'),
   "Earlier-message loading must not require a visible button",
 );
+assert.ok(
+  appSource.includes("node.scrollHeight > node.clientHeight + 1") &&
+    appSource.includes("void loadOlderMessages()"),
+  "A short collapsed history must keep loading until it fills the viewport",
+);
+assert.ok(
+  appSource.includes("historyHydrationRequestIdRef") &&
+    appSource.includes("historyHydrationRequestIdRef.current === requestId") &&
+    appSource.includes("activeSessionIdRef.current === sessionId"),
+  "Session switches must ignore stale history detail responses",
+);
+assert.ok(
+  appSource.includes("olderMessagesRequestIdRef") &&
+    appSource.includes("olderMessagesRequestIdRef.current === requestId"),
+  "Older-page responses must be ignored after another session or page request supersedes them",
+);
+
+assert.ok(
+  appSource.includes("const switchingSession = activeSessionIdRef.current !== session.id"),
+  "Reselecting the active session must not clear its loaded history",
+);
 
 console.log("Desktop history auto-load checks passed.");

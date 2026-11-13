@@ -593,6 +593,13 @@ pub struct LocalMemory {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MemoryCitation {
+    pub id: Uuid,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ProviderAuthStatus {
     pub ready: bool,
     pub has_api_key: bool,
@@ -1276,6 +1283,12 @@ pub enum SessionEvent {
     MessageCompleted {
         session_id: Uuid,
         message: Message,
+    },
+    /// Local memories that were provided to the model for this assistant reply.
+    MemoryCitations {
+        session_id: Uuid,
+        message_id: Uuid,
+        memories: Vec<MemoryCitation>,
     },
     Plan {
         session_id: Uuid,
@@ -1998,6 +2011,29 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn serializes_memory_citation_events() {
+        let session_id = Uuid::nil();
+        let message_id = Uuid::from_u128(1);
+        let event = SessionEvent::MemoryCitations {
+            session_id,
+            message_id,
+            memories: vec![MemoryCitation {
+                id: Uuid::from_u128(2),
+                content: "Use the release checklist.".to_owned(),
+                created_at: DateTime::parse_from_rfc3339("2026-07-27T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            }],
+        };
+
+        let value = serde_json::to_value(event).expect("memory citations serialize");
+        assert_eq!(value["type"], "memory_citations");
+        assert_eq!(value["session_id"], session_id.to_string());
+        assert_eq!(value["message_id"], message_id.to_string());
+        assert_eq!(value["memories"][0]["content"], "Use the release checklist.");
     }
 
     #[test]

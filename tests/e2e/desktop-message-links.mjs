@@ -179,6 +179,42 @@ export { formatReplyTargetMessage, parseReplyTarget };
   );
   assert.ok(appSource.includes("beginReplyToMessage(message)"), "assistant messages must expose a reply action");
   assert.ok(
+    appSource.includes("function toggleBranchSelection") &&
+      appSource.includes("selectedBranchMessageIds") &&
+      cssSource.includes(".message.branch-selected"),
+    "assistant messages must support multi-selection for branching",
+  );
+  assert.ok(appSource.includes("async function branchSelectedMessages"), "selected replies must expose a branch action");
+  assert.ok(
+    appSource.includes('invoke<Session>("branch_session"') &&
+      appSource.includes("throughMessageIds: selectedBranchMessageIds"),
+    "branching must pass all selected assistant messages to the branch_session backend command",
+  );
+  assert.ok(
+    mainSource.includes("fn branch_session(") && mainSource.includes("branch_session,"),
+    "the branch_session Tauri command must be registered",
+  );
+  assert.ok(
+    appSource.includes("branch-selection-bar") &&
+      cssSource.includes(".branch-selection-bar"),
+    "multi-selection must expose an actionable branch bar",
+  );
+  assert.ok(
+    ["message.selectForBranch", "message.unselectForBranch", "message.branchSelectionHint", "message.branchSelectionCount"].every(
+      (key) => i18nSource.includes('"' + key + '"'),
+    ),
+    "branch selection actions and counts must be localized",
+  );
+  assert.ok(i18nSource.includes('"message.branchToNewChat"'), "branch action must be localized");
+  assert.ok(appSource.includes("function MemoryCitations"), "assistant replies must render memory citations");
+  assert.ok(
+    appSource.includes('payload.type === "memory_citations"') &&
+      appSource.includes('item.event.type === "memory_citations"'),
+    "memory citations must merge from live and persisted session events",
+  );
+  assert.ok(i18nSource.includes('"memory.citations"'), "memory citation labels must be localized");
+  assert.ok(cssSource.includes(".memory-citations"), "memory citation styles must exist");
+  assert.ok(
     appSource.includes('className="composer-reply-target"') &&
       cssSource.includes(".composer-reply-target"),
     "the composer must show the active reply target",

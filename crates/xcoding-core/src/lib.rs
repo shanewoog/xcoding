@@ -397,6 +397,95 @@ impl CoreService {
             .map_err(CoreError::from)
     }
 
+    /// Create a new session containing the source conversation through the
+    /// selected assistant message. The source session is never modified.
+    pub fn branch_session(
+        &self,
+        source_session_id: uuid::Uuid,
+        through_message_ids: Vec<uuid::Uuid>,
+        title: Option<String>,
+    ) -> Result<Session, CoreError> {
+        if through_message_ids.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "select at least one assistant message to branch".to_owned(),
+            ));
+        }
+        let source = self
+            .store
+            .get_session(source_session_id)?
+            .ok_or_else(|| CoreError::SessionNotFound(source_session_id.to_string()))?;
+        let messages = self.store.list_messages(source_session_id)?;
+        let mut seen_targets = HashSet::new();
+        let mut target_indices = Vec::new();
+        for message_id in through_message_ids {
+            if !seen_targets.insert(message_id) {
+                continue;
+            }
+            let index = messages
+                .iter()
+                .position(|message| message.id == message_id)
+                .ok_or_else(|| CoreError::InvalidInput("branch message not found".to_owned()))?;
+            if messages[index].role != MessageRole::Assistant {
+                return Err(CoreError::InvalidInput(
+                    "branch points must be assistant messages".to_owned(),
+                ));
+            }
+            target_indices.push(index);
+        }
+        target_indices.sort_unstable();
+
+        let mut copied_message_ids = HashSet::new();
+        let mut selected_messages = Vec::new();
+        for target_index in target_indices {
+            let start = messages[..target_index]
+                .iter()
+                .rposition(|message| message.role == MessageRole::Assistant)
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            for message in &messages[start..=target_index] {
+                if copied_message_ids.insert(message.id) {
+                    selected_messages.push(message);
+                }
+            }
+        }
+
+        let branch_title = title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| source.title.clone());
+        let branch = self.store.create_session(CreateSessionParams {
+            workspace_root: source.workspace_root.clone(),
+            mode: source.mode.clone(),
+            provider: source.provider.clone(),
+            model: source.model.clone(),
+            title: branch_title,
+        })?;
+
+        let copy_result = (|| -> Result<(), CoreError> {
+            for message in selected_messages {
+                let full = self
+                    .store
+                    .get_session_message(source_session_id, message.id)?
+                    .ok_or_else(|| {
+                        CoreError::InvalidInput("branch history message not found".to_owned())
+                    })?;
+                self.store.append_message_at(
+                    branch.id,
+                    full.role,
+                    full.content,
+                    full.created_at,
+                )?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = copy_result {
+            let _ = self.store.delete_session(branch.id);
+            return Err(error);
+        }
+        Ok(branch)
+    }
+
     /// Flip any `Running` sessions left over from a previous process to `Cancelled`.
     /// Must be called once at process startup, before any chat turn can execute.
     pub fn reconcile_interrupted_sessions(&self) -> Result<usize, CoreError> {
@@ -1196,6 +1285,7 @@ fn build_replay_steps(events: &[PersistedSessionEvent]) -> Vec<ReplayStep> {
             SessionEvent::Retrying { .. }
             | SessionEvent::StreamReset { .. }
             | SessionEvent::ModelCall { .. }
+            | SessionEvent::MemoryCitations { .. }
             | SessionEvent::ContextCompacted { .. } => {}
             SessionEvent::Error { message, .. } => {
                 steps.push(ReplayStep {
@@ -1689,6 +1779,154 @@ mod tests {
         assert_eq!(messages[1].role, MessageRole::Tool);
         assert_eq!(messages[2].role, MessageRole::Assistant);
     }
+    #[test]
+    fn branches_history_through_selected_assistant_message() {
+        let root = std::env::temp_dir().join(format!(
+            "xcoding-core-branch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("temporary directory");
+        let core = CoreService::open(root.join("xcoding.db")).expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "First question".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("test-model".to_owned()),
+                title: Some("Original task".to_owned()),
+                session_id: None,
+                images: None,
+            })
+            .expect("chat starts");
+        let first_user = core.messages(session.id).expect("first messages").remove(0);
+        let tool_content = "tool-output-".repeat(30_000);
+        let tool = core
+            .record_tool_message(session.id, tool_content.clone())
+            .expect("tool output saves");
+        let first_assistant = core
+            .complete_chat(session.id, "First answer")
+            .expect("first answer saves")
+            .message
+            .expect("assistant message");
+        core.start_chat(ChatParams {
+            workspace_root: "D:/work/demo".to_owned(),
+            message: "Second question".to_owned(),
+            mode: None,
+            provider: None,
+            model: Some("test-model".to_owned()),
+            title: None,
+            session_id: Some(session.id),
+            images: None,
+        })
+        .expect("second turn starts");
+        core.complete_chat(session.id, "Second answer")
+            .expect("second answer saves");
+
+        let branch = core
+            .branch_session(session.id, vec![first_assistant.id], Some("  Branch task  ".to_owned()))
+            .expect("session branches");
+        assert_ne!(branch.id, session.id);
+        assert_eq!(branch.status, SessionStatus::Created);
+        assert_eq!(branch.workspace_root, session.workspace_root);
+        assert_eq!(branch.title.as_deref(), Some("Branch task"));
+
+        let copied = core.messages(branch.id).expect("branch messages");
+        assert_eq!(copied.len(), 3);
+        assert_eq!(copied[0].role, MessageRole::User);
+        assert_eq!(copied[0].content, first_user.content);
+        assert_eq!(copied[0].created_at, first_user.created_at);
+        assert_eq!(copied[1].role, MessageRole::Tool);
+        assert_eq!(copied[1].created_at, tool.created_at);
+        assert_eq!(
+            core.history_message(branch.id, copied[1].id)
+                .expect("copied tool message loads")
+                .expect("copied tool message exists")
+                .content,
+            tool_content
+        );
+        assert_eq!(copied[2].role, MessageRole::Assistant);
+        assert_eq!(copied[2].content, "First answer");
+        assert_eq!(copied[2].created_at, first_assistant.created_at);
+        assert_eq!(core.messages(session.id).expect("source messages").len(), 5);
+        assert!(core
+            .branch_session(session.id, vec![first_user.id], None)
+            .is_err());
+        drop(core);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn branches_selected_turns_and_skips_unselected_turns() {
+        let core = CoreService::in_memory().expect("core starts");
+        let session = core
+            .start_chat(ChatParams {
+                workspace_root: "D:/work/demo".to_owned(),
+                message: "Question one".to_owned(),
+                mode: Some(Mode::Ask),
+                provider: Some("openai".to_owned()),
+                model: Some("test-model".to_owned()),
+                title: Some("Original task".to_owned()),
+                session_id: None,
+                images: None,
+            })
+            .expect("first turn starts");
+        let first_assistant = core
+            .complete_chat(session.id, "Answer one")
+            .expect("first turn completes")
+            .message
+            .expect("first assistant message");
+
+        core.start_chat(ChatParams {
+            workspace_root: "D:/work/demo".to_owned(),
+            message: "Question two".to_owned(),
+            mode: None,
+            provider: None,
+            model: Some("test-model".to_owned()),
+            title: None,
+            session_id: Some(session.id),
+            images: None,
+        })
+        .expect("second turn starts");
+        core.complete_chat(session.id, "Answer two")
+            .expect("second turn completes");
+
+        core.start_chat(ChatParams {
+            workspace_root: "D:/work/demo".to_owned(),
+            message: "Question three".to_owned(),
+            mode: None,
+            provider: None,
+            model: Some("test-model".to_owned()),
+            title: None,
+            session_id: Some(session.id),
+            images: None,
+        })
+        .expect("third turn starts");
+        let third_assistant = core
+            .complete_chat(session.id, "Answer three")
+            .expect("third turn completes")
+            .message
+            .expect("third assistant message");
+
+        let branch = core
+            .branch_session(
+                session.id,
+                vec![first_assistant.id, third_assistant.id],
+                Some("Selected turns".to_owned()),
+            )
+            .expect("selected turns branch");
+        let copied = core.messages(branch.id).expect("branch messages");
+        assert_eq!(copied.len(), 4);
+        assert_eq!(
+            copied
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Question one", "Answer one", "Question three", "Answer three"]
+        );
+        assert!(core.branch_session(session.id, Vec::new(), None).is_err());
+    }
+
     #[test]
     fn forwards_lossless_history_and_notes_contracts() {
         let core = CoreService::in_memory().expect("core starts");

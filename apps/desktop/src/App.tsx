@@ -37,6 +37,7 @@ import type {
   ImportProjectResult,
   ListModelsResult,
   LocalPluginItem,
+  MemoryCitation,
   ProjectDir,
   ProviderAuthStatus,
   ProviderApiKey,
@@ -691,6 +692,7 @@ type MessageContextMenuState = {
   y: number;
   text: string;
   fromSelection: boolean;
+  messageId?: string;
 };
 
 
@@ -1242,6 +1244,17 @@ function EditIcon() {
 }
 
 
+function BranchIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="4.5" cy="4.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="11.5" cy="11.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M4.5 6.1v1.1a3 3 0 0 0 3 3h2.4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M11.5 2.9v7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function SettingsIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1782,6 +1795,35 @@ function InlineActivityList({ items, locale }: { items: InlineActivityEntry[]; l
   );
 }
 
+function MemoryCitations({ items, locale }: { items: MemoryCitation[]; locale: Locale }) {
+  if (items.length === 0) return null;
+  return (
+    <details className="memory-citations" title={t(locale, "memory.citationsHint")}>
+      <summary>
+        <span className="memory-citations-label">{t(locale, "memory.citations", { count: items.length })}</span>
+      </summary>
+      <div className="memory-citations-list">
+        <p className="memory-citations-hint">{t(locale, "memory.citationsHint")}</p>
+        {items.map((memory, index) => {
+          const createdAt = new Date(memory.created_at);
+          const createdLabel = Number.isNaN(createdAt.getTime())
+            ? ""
+            : new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(createdAt);
+          return (
+            <div className="memory-citation-item" key={memory.id} title={memory.id}>
+              <div className="memory-citation-meta">
+                <span>#{index + 1}</span>
+                {createdLabel ? <time dateTime={memory.created_at}>{createdLabel}</time> : null}
+              </div>
+              <p>{memory.content}</p>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
 type SettingsTab = "provider" | "resilience" | "context" | "vision" | "personalization" | "plugins" | "defaults" | "reports" | "requestLogs";
 type ModelReportTab = "providers" | "keys" | "models";
 
@@ -1865,6 +1907,10 @@ export function App() {
     hasSelection: boolean;
   } | null>(null);
   const [messageContextMenu, setMessageContextMenu] = useState<MessageContextMenuState | null>(null);
+  const [branchSelectionMode, setBranchSelectionMode] = useState(false);
+  const [selectedBranchMessageIds, setSelectedBranchMessageIds] = useState<string[]>([]);
+  const [branchSelectionBusy, setBranchSelectionBusy] = useState(false);
+  const [memoryCitationsByMessage, setMemoryCitationsByMessage] = useState<Record<string, MemoryCitation[]>>({});
   const [composerDraftBySession, setComposerDraftBySession] = useState<Record<string, ComposerDraft>>(() => ({
     [DRAFT_SESSION_KEY]: createEmptyComposerDraft(),
   }));
@@ -1966,6 +2012,8 @@ export function App() {
   const [messagePageOffset, setMessagePageOffset] = useState(0);
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const olderMessagesLoadingRef = useRef(false);
+  const historyHydrationRequestIdRef = useRef(0);
+  const olderMessagesRequestIdRef = useRef(0);
   const [streamedText, setStreamedText] = useState("");
   const [streamedTextBySession, setStreamedTextBySession] = useState<Record<string, string>>({});
   const [plan, setPlan] = useState<PlanStep[]>([]);
@@ -2126,6 +2174,46 @@ export function App() {
       createdAt: message.created_at,
     });
     requestAnimationFrame(() => composerTextareaRef.current?.focus());
+  }
+
+  function toggleBranchSelection(messageId: string): void {
+    if (branchSelectionBusy) return;
+    setBranchSelectionMode(true);
+    setSelectedBranchMessageIds((current) =>
+      current.includes(messageId)
+        ? current.filter((id) => id !== messageId)
+        : [...current, messageId],
+    );
+  }
+
+  function clearBranchSelection(): void {
+    setBranchSelectionMode(false);
+    setSelectedBranchMessageIds([]);
+  }
+
+  async function branchSelectedMessages(): Promise<void> {
+    if (!isTauriRuntime || !activeSession || branchSelectionBusy || selectedBranchMessageIds.length === 0) {
+      return;
+    }
+    const title = `${sessionTitle(activeSession, locale)} · ${t(locale, "message.branchToNewChat")}`;
+    setBranchSelectionBusy(true);
+    setError(null);
+    try {
+      const created = await invoke<Session>("branch_session", {
+        sourceSessionId: activeSession.id,
+        throughMessageIds: selectedBranchMessageIds,
+        title,
+      });
+      setSessions((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+      clearBranchSelection();
+      selectSession(created);
+      await hydrateSession(created.id);
+      await refreshSessions();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBranchSelectionBusy(false);
+    }
   }
 
 
@@ -2848,6 +2936,7 @@ export function App() {
       if (options.autoRestore && !autoRestoredSessionRef.current) {
         autoRestoredSessionRef.current = true;
         if (nextSessions.length > 0) {
+          activeSessionIdRef.current = nextSessions[0].id;
           setActiveSessionId(nextSessions[0].id);
         }
       }
@@ -2907,8 +2996,16 @@ export function App() {
 
   const hydrateSession = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime) return;
+    const requestId = ++historyHydrationRequestIdRef.current;
+    olderMessagesRequestIdRef.current += 1;
+    olderMessagesLoadingRef.current = false;
+    setOlderMessagesLoading(false);
+    const isCurrentRequest = () =>
+      historyHydrationRequestIdRef.current === requestId
+      && activeSessionIdRef.current === sessionId;
     try {
       const detail = await invoke<SessionDisplayDetail>("session_detail", { sessionId, pageSize: 50 });
+      if (!isCurrentRequest()) return;
       const pending = detail.session.status === "need_user"
         ? detail.pending_actions.find((action) => action.status === "pending") ?? null
         : null;
@@ -2922,6 +3019,13 @@ export function App() {
         followUpQueueRef.current = next;
         return next;
       });
+      const citationsByMessage: Record<string, MemoryCitation[]> = {};
+      for (const item of detail.events) {
+        if (item.event.type === "memory_citations") {
+          citationsByMessage[item.event.message_id] = item.event.memories;
+        }
+      }
+      setMemoryCitationsByMessage((current) => ({ ...current, ...citationsByMessage }));
       const latestCompaction = [...detail.events]
         .reverse()
         .map((item) => item.event)
@@ -2970,13 +3074,15 @@ export function App() {
       if (detail.session.status === "done" || detail.session.status === "cancelled") {
         try {
           const replay = await invoke<ReplaySessionResult>("session_replay", { sessionId });
-          setReplaySteps(replay.steps);
+          if (isCurrentRequest()) setReplaySteps(replay.steps);
         } catch {
           // Keep the session usable when replay reconstruction is unavailable.
         }
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (isCurrentRequest()) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     }
   }, [locale]);
 
@@ -2984,6 +3090,10 @@ export function App() {
     const sessionId = activeSessionIdRef.current;
     const node = conversationRef.current;
     if (!sessionId || !node || messagePageOffset <= 0 || olderMessagesLoadingRef.current) return;
+    const requestId = ++olderMessagesRequestIdRef.current;
+    const isCurrentRequest = () =>
+      olderMessagesRequestIdRef.current === requestId
+      && activeSessionIdRef.current === sessionId;
     const nextOffset = Math.max(0, messagePageOffset - 50);
     const limit = messagePageOffset - nextOffset;
     olderMessagesLoadingRef.current = true;
@@ -2994,7 +3104,7 @@ export function App() {
         offset: nextOffset,
         limit,
       });
-      if (activeSessionIdRef.current !== sessionId) return;
+      if (!isCurrentRequest()) return;
       pendingHistoryPrependRef.current = { scrollTop: node.scrollTop, scrollHeight: node.scrollHeight };
       setMessages((current) => {
         const existing = new Set(current.map((message) => message.id));
@@ -3002,10 +3112,14 @@ export function App() {
       });
       setMessagePageOffset(page.offset);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (isCurrentRequest()) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      olderMessagesLoadingRef.current = false;
-      setOlderMessagesLoading(false);
+      if (isCurrentRequest()) {
+        olderMessagesLoadingRef.current = false;
+        setOlderMessagesLoading(false);
+      }
     }
   }, [messagePageOffset]);
 
@@ -3065,9 +3179,15 @@ export function App() {
     node.scrollTo({ top: node.scrollHeight, behavior });
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     conversationAtBottomRef.current = true;
     setConversationAtBottom(true);
+    pendingHistoryPrependRef.current = null;
+    pendingConversationScrollTopRef.current = null;
+    olderMessagesRequestIdRef.current += 1;
+    olderMessagesLoadingRef.current = false;
+    setOlderMessagesLoading(false);
+    setMessages([]);
     setMessagePageOffset(0);
   }, [activeSessionId]);
 
@@ -3104,6 +3224,13 @@ export function App() {
     updateConversationBottomState(node);
     pendingConversationScrollTopRef.current = null;
   }, [messages, updateConversationBottomState, view]);
+
+  useLayoutEffect(() => {
+    if (view !== "workbench" || messagePageOffset <= 0 || olderMessagesLoading) return;
+    const node = conversationRef.current;
+    if (!node || node.scrollHeight > node.clientHeight + 1) return;
+    void loadOlderMessages();
+  }, [loadOlderMessages, messagePageOffset, messages, olderMessagesLoading, view]);
 
   useEffect(() => {
     if (view !== "workbench" || typeof ResizeObserver === "undefined") return;
@@ -3209,6 +3336,7 @@ export function App() {
       ) {
         patchRunStatus((current) => current ?? { startedAt: Date.now(), phase: "thinking" });
         setDraftRunStatus(null);
+        activeSessionIdRef.current = sid;
         setActiveSessionId(sid);
         adoptDraftRightPanelState(sid);
       }
@@ -3219,6 +3347,12 @@ export function App() {
         patchRunStatus((current) => current?.phase === "retrying"
           ? { ...current, phase: "thinking", detail: undefined }
           : (current ?? { startedAt: Date.now(), phase: "thinking" }));
+      }
+      if (payload.type === "memory_citations") {
+        setMemoryCitationsByMessage((current) => ({
+          ...current,
+          [payload.message_id]: payload.memories,
+        }));
       }
       if (payload.type === "model_call" && payload.prompt_tokens && payload.prompt_tokens > 0) {
         setReportedPromptTokensBySession((current) => current[sid] === payload.prompt_tokens
@@ -3434,7 +3568,15 @@ export function App() {
 
   function selectSession(session: Session): void {
     const nextSessionKey = sessionStateKey(session.id);
+    const switchingSession = activeSessionIdRef.current !== session.id;
     activeSessionIdRef.current = session.id;
+    if (switchingSession) {
+      olderMessagesRequestIdRef.current += 1;
+      olderMessagesLoadingRef.current = false;
+      setOlderMessagesLoading(false);
+      setMessages([]);
+      setMessagePageOffset(0);
+    }
     setSessionMenu(null);
     setView("workbench");
     setActiveSessionId(session.id);
@@ -3799,6 +3941,11 @@ export function App() {
     };
   }, [composerContextMenu]);
   useEffect(() => {
+    clearBranchSelection();
+    setBranchSelectionBusy(false);
+  }, [activeSessionId]);
+
+  useEffect(() => {
     if (!messageContextMenu) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       const target = event.target as Node | null;
@@ -3892,7 +4039,7 @@ export function App() {
     }
   }
 
-  function openMessageContextMenu(event: ReactMouseEvent<HTMLElement>, content: string): void {
+  function openMessageContextMenu(event: ReactMouseEvent<HTMLElement>, content: string, message?: Message): void {
     event.preventDefault();
     event.stopPropagation();
     const selection = window.getSelection();
@@ -3906,7 +4053,7 @@ export function App() {
     const text = (fromSelection && selection ? selection.toString() : content).trim();
     if (!text) return;
     const menuWidth = 190;
-    const menuHeight = 52;
+    const menuHeight = message?.role === "assistant" ? 92 : 52;
     const margin = 8;
     setSessionMenu(null);
     setProjectMenu(null);
@@ -3916,6 +4063,7 @@ export function App() {
       y: Math.max(margin, Math.min(event.clientY, window.innerHeight - menuHeight - margin)),
       text,
       fromSelection,
+      messageId: message?.role === "assistant" ? message.id : undefined,
     });
   }
 
@@ -4320,6 +4468,7 @@ export function App() {
               activeSessionIdRef.current === result.session.id
               || (!activeSessionIdRef.current && mayAdoptEmptyComposer)
             ) {
+              activeSessionIdRef.current = result.session.id;
               setActiveSessionId(result.session.id);
               adoptDraftRightPanelState(result.session.id);
               const completedMessage = result.message;
@@ -7312,6 +7461,26 @@ export function App() {
             >
               {t(locale, messageContextMenu.fromSelection ? "message.copySelection" : "message.copyMessage")}
             </button>
+            {messageContextMenu.messageId ? (
+              <button
+                type="button"
+                role="menuitem"
+                disabled={branchSelectionBusy}
+                onClick={() => {
+                  if (messageContextMenu.messageId) {
+                    toggleBranchSelection(messageContextMenu.messageId);
+                    setMessageContextMenu(null);
+                  }
+                }}
+              >
+                {t(
+                  locale,
+                  selectedBranchMessageIds.includes(messageContextMenu.messageId)
+                    ? "message.unselectForBranch"
+                    : "message.selectForBranch",
+                )}
+              </button>
+            ) : null}
           </div>
         ) : null}
       </aside>
@@ -7421,15 +7590,18 @@ export function App() {
               </article>
             ) : (
               <article
-                className={`message message-${message.role}`}
+                className={`message message-${message.role}${branchSelectionMode && selectedBranchMessageIds.includes(message.id) ? " branch-selected" : ""}`}
                 key={message.id}
-                onContextMenu={(event) => openMessageContextMenu(event, message.content)}
+                onContextMenu={(event) => openMessageContextMenu(event, message.content, message)}
               >
                 <div className="message-bubble">
                   <div className="message-body">{message.role === "assistant" ? <AssistantMessageBody content={message.content} onOpenLink={openAssistantLink} /> : message.content}</div>
                 </div>
                 {message.role === "assistant" ? (
                   <InlineActivityList items={inlineActivityBuckets.get(message.id) || []} locale={locale} />
+                ) : null}
+                {message.role === "assistant" ? (
+                  <MemoryCitations items={memoryCitationsByMessage[message.id] || []} locale={locale} />
                 ) : null}
                 {elapsed ? <p className="message-completed-elapsed">{t(locale, "run.processed", { elapsed })}</p> : null}
                 {message.role === "assistant" ? (
@@ -7454,6 +7626,27 @@ export function App() {
                       aria-label={t(locale, "action.reply")}
                     >
                       <ReplyIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className={`message-meta-button${selectedBranchMessageIds.includes(message.id) ? " selected" : ""}`}
+                      onClick={() => toggleBranchSelection(message.id)}
+                      disabled={branchSelectionBusy}
+                      title={t(
+                        locale,
+                        selectedBranchMessageIds.includes(message.id)
+                          ? "message.unselectForBranch"
+                          : "message.selectForBranch",
+                      )}
+                      aria-label={t(
+                        locale,
+                        selectedBranchMessageIds.includes(message.id)
+                          ? "message.unselectForBranch"
+                          : "message.selectForBranch",
+                      )}
+                      aria-pressed={selectedBranchMessageIds.includes(message.id)}
+                    >
+                      <BranchIcon />
                     </button>
                   </div>
                 ) : null}
@@ -7631,6 +7824,32 @@ export function App() {
           {error && runStatus?.phase !== "failed" ? <p className="error-message">{error}</p> : null}
         </div>
         <div className="chat-bottom">
+        {branchSelectionMode ? (
+          <div className="branch-selection-bar" role="region" aria-label={t(locale, "message.branchSelectionHint")}>
+            <div className="branch-selection-copy">
+              <strong>{t(locale, "message.branchSelectionCount", { count: selectedBranchMessageIds.length })}</strong>
+              <span>{t(locale, "message.branchSelectionHint")}</span>
+            </div>
+            <div className="branch-selection-actions">
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void branchSelectedMessages()}
+                disabled={branchSelectionBusy || selectedBranchMessageIds.length === 0}
+              >
+                {t(locale, "message.branchToNewChat")}
+              </button>
+              <button
+                type="button"
+                className="quiet-button"
+                onClick={clearBranchSelection}
+                disabled={branchSelectionBusy}
+              >
+                {t(locale, "action.cancel")}
+              </button>
+            </div>
+          </div>
+        ) : null}
         {pendingAction ? (() => {
           const review = buildReviewPresentation(pendingAction, approvalSummary, Boolean(patchPreview), locale);
           return (

@@ -840,6 +840,25 @@ impl SessionStore {
         Ok(message)
     }
 
+    /// Append a message while preserving a caller-supplied timestamp.
+    /// Branching uses this so copied conversation history keeps its original order
+    /// and visible timestamps without changing the normal append behavior.
+    pub fn append_message_at(
+        &self,
+        session_id: Uuid,
+        role: MessageRole,
+        content: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Result<Message, StoreError> {
+        let mut message = self.append_message(session_id, role, content)?;
+        self.connection.execute(
+            "UPDATE messages SET created_at = ?1 WHERE id = ?2",
+            params![created_at.to_rfc3339(), message.id.to_string()],
+        )?;
+        message.created_at = created_at;
+        Ok(message)
+    }
+
     pub fn list_messages(&self, session_id: Uuid) -> Result<Vec<Message>, StoreError> {
         let total = self.count_messages(session_id)?;
         let mut messages = Vec::with_capacity(total);
@@ -2674,6 +2693,7 @@ fn session_id_for_event(event: &SessionEvent) -> Uuid {
     match event {
         SessionEvent::TextDelta { session_id, .. }
         | SessionEvent::MessageCompleted { session_id, .. }
+        | SessionEvent::MemoryCitations { session_id, .. }
         | SessionEvent::Plan { session_id, .. }
         | SessionEvent::ToolStart { session_id, .. }
         | SessionEvent::ToolEnd { session_id, .. }
