@@ -18,7 +18,13 @@ async function main() {
     console.log("Historical tool echo retry E2E passed.");
     return;
   }
+  if (process.argv.includes("--responses-upstream-only")) {
+    await assertResponsesUpstreamErrorThenSucceeds();
+    console.log("Responses upstream retry E2E passed.");
+    return;
+  }
   await assertResponsesRateLimitThenSucceed();
+  await assertResponsesUpstreamErrorThenSucceeds();
   await assertEmptyResponseFailsClearly();
   await assertRetryThenFail();
   await assertRetryThenSucceed();
@@ -224,8 +230,26 @@ async function assertRetryThenFail() {
 }
 
 async function assertResponsesRateLimitThenSucceed() {
+  await assertResponsesFailureThenSucceeds({
+    scenario: "rate-limit",
+    code: "rate_limit_exceeded",
+    message: "Your requests to gpt-6-astra for gpt-6-astra in eastus2 have exceeded token rate limit.",
+    successText: "hello after rate limit",
+  });
+}
+
+async function assertResponsesUpstreamErrorThenSucceeds() {
+  await assertResponsesFailureThenSucceeds({
+    scenario: "upstream-error",
+    code: "upstream_error",
+    message: "Upstream service temporarily unavailable",
+    successText: "hello after upstream recovery",
+    retryRules: ["invalid provider response: upstream_error:"],
+  });
+}
+
+async function assertResponsesFailureThenSucceeds({ scenario, code, message, successText, retryRules }) {
   const requests = [];
-  const rateLimitMessage = "Your requests to gpt-6-astra for gpt-6-astra in eastus2 have exceeded token rate limit.";
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -236,17 +260,19 @@ async function assertResponsesRateLimitThenSucceed() {
       response.end(
         "data: " + JSON.stringify({
           type: "response.failed",
-          response: { error: { code: "rate_limit_exceeded", message: rateLimitMessage } },
+          response: { error: { code, message } },
         }) + "\n\n",
       );
     } else {
-      response.write('data: {"type":"response.output_text.delta","delta":"hello after rate limit"}\n\n');
+      response.write(
+        "data: " + JSON.stringify({ type: "response.output_text.delta", delta: successText }) + "\n\n",
+      );
       response.end('data: {"type":"response.completed","response":{"status":"completed"}}\n\n');
     }
   });
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
   const baseUrl = "http://127.0.0.1:" + server.address().port + "/v1";
-  const homeDirectory = await mkdtemp(resolve(tmpdir(), "xcoding-e2e-responses-rate-limit-"));
+  const homeDirectory = await mkdtemp(resolve(tmpdir(), `xcoding-e2e-responses-${scenario}-`));
   const configDirectory = resolve(homeDirectory, ".xcoding");
   await mkdir(configDirectory, { recursive: true });
   await writeFile(resolve(configDirectory, "config.json"), JSON.stringify({
@@ -254,6 +280,7 @@ async function assertResponsesRateLimitThenSucceed() {
     base_url: baseUrl,
     providers: [{ id: "default", name: "openai", base_url: baseUrl, wire_api: "responses", api_key: "e2e-test-key" }],
     active_provider_id: "default",
+    ...(retryRules ? { provider_retry_rules: retryRules } : {}),
   }), "utf8");
   const { OPENAI_API_KEY, XCODING_OPENAI_BASE_URL, ...environment } = process.env;
   const rpc = startRpcClient({
@@ -272,8 +299,8 @@ async function assertResponsesRateLimitThenSucceed() {
       model: "gpt-6-astra",
     });
     assert.equal(result.session.status, "done");
-    assert.equal(result.message?.content, "hello after rate limit");
-    assert.equal(requests.length, 3, "rate limits must retry within the same turn");
+    assert.equal(result.message?.content, successText);
+    assert.equal(requests.length, 3, `${code} must retry within the same turn`);
     assert.ok(requests.every((request) => request.url === "/v1/responses"));
     assert.equal(requests[0].body.model, "gpt-6-astra");
     assert.deepEqual(requests[1].body, requests[0].body);
@@ -282,7 +309,7 @@ async function assertResponsesRateLimitThenSucceed() {
     assert.deepEqual(retryEvents.map((event) => event.attempt), [1, 2]);
     assert.ok(retryEvents.every((event) =>
       event.session_id === result.session.id &&
-      event.message.includes("rate_limit_exceeded: " + rateLimitMessage)));
+      event.message.includes(`${code}: ${message}`)));
     assert.equal(rpc.events.filter((event) => event.type === "error").length, 0);
     const calls = await persistedModelCallEvents(rpc, result.session.id);
     assert.deepEqual(calls.map((event) => event.success), [false, false, true]);

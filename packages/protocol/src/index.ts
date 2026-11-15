@@ -256,6 +256,10 @@ export interface UserConfig {
   reasoning_efforts?: string[];
   /** Retries after the initial failed request for one provider before XCoding tries a backup provider. */
   max_provider_retries?: number;
+  /** Case-insensitive message rules; `{{name}}` placeholders match variable text. */
+  provider_retry_rules?: string[];
+  /** Higher-priority rules that suppress ordinary retries and keep dedicated handling. */
+  provider_interrupt_rules?: string[];
   /** Whether XCoding may switch to another configured provider after the active provider fails. */
   provider_fallback_enabled?: boolean;
   /** Maximum model/tool interaction rounds for one user turn before the agent stops. */

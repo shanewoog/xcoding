@@ -660,6 +660,24 @@ async function main() {
     "proxy labels must exist in both en and zh-CN catalogs",
   );
 
+  // User-defined provider error fragments that should be retried.
+  assert.ok(protocolSource.includes("provider_retry_rules?: string[]"), "TypeScript protocol missing provider retry rules");
+  assert.ok(protocolSource.includes("provider_interrupt_rules?: string[]"), "TypeScript protocol missing provider interrupt rules");
+  assert.ok(appSource.includes("const [providerRetryRulesText, setProviderRetryRulesText]"), "App missing provider retry rules state");
+  assert.ok(appSource.includes("const [providerInterruptRulesText, setProviderInterruptRulesText]"), "App missing provider interrupt rules state");
+  assert.ok(appSource.includes("function normalizeProviderRules"), "App must normalize provider rules");
+  assert.ok(appSource.includes('id="provider-retry-rules"'), "resilience settings should render provider retry rules");
+  assert.ok(appSource.includes('id="provider-interrupt-rules"'), "resilience settings should render provider interrupt rules");
+  assert.ok(appSource.includes("provider_retry_rules: normalizeProviderRules(providerRetryRulesText, DEFAULT_PROVIDER_RETRY_RULES)"), "saving settings must persist provider retry rules");
+  assert.ok(appSource.includes("provider_interrupt_rules: normalizeProviderRules(providerInterruptRulesText, DEFAULT_PROVIDER_INTERRUPT_RULES)"), "saving settings must persist provider interrupt rules");
+  assert.ok(appSource.includes("setProviderRetryRulesText(normalizeProviderRules(config.provider_retry_rules, DEFAULT_PROVIDER_RETRY_RULES).join(\"\\n\"))"), "App must hydrate provider retry rules");
+  assert.ok(appSource.includes("setProviderInterruptRulesText(normalizeProviderRules(config.provider_interrupt_rules, DEFAULT_PROVIDER_INTERRUPT_RULES).join(\"\\n\"))"), "App must hydrate provider interrupt rules");
+  assert.ok(appSource.includes("setProviderRetryRulesText(normalizeProviderRules(savedUser.provider_retry_rules, DEFAULT_PROVIDER_RETRY_RULES).join(\"\\n\"))"), "App must refresh provider retry rules after save");
+  assert.ok(appSource.includes("setProviderInterruptRulesText(normalizeProviderRules(savedUser.provider_interrupt_rules, DEFAULT_PROVIDER_INTERRUPT_RULES).join(\"\\n\"))"), "App must refresh provider interrupt rules after save");
+  for (const needle of ['"field.providerRetryRules"', '"field.providerRetryRulesHint"', '"field.providerInterruptRules"', '"field.providerInterruptRulesHint"', '"field.providerRuleParametersHint"']) {
+    assert.equal((i18nSource.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length, 2, `i18n missing bilingual ${needle}`);
+  }
+
   // Provider HTTP User-Agent default setting.
   assert.ok(protocolSource.includes("http_user_agent?: string"), "TypeScript protocol missing HTTP User-Agent config");
   assert.ok(appSource.includes("const [httpUserAgent, setHttpUserAgent]"), "App missing HTTP User-Agent state");

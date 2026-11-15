@@ -10,6 +10,45 @@ pub const JSON_RPC_VERSION: &str = "2.0";
 pub const DEFAULT_MAX_PROVIDER_RETRIES: u32 = 6;
 pub const MIN_MAX_PROVIDER_RETRIES: u32 = 0;
 pub const MAX_MAX_PROVIDER_RETRIES: u32 = 999;
+pub const DEFAULT_PROVIDER_RETRY_RULES: &[&str] = &[
+    "rate_limit_exceeded:",
+    "gateway_concurrency_limit:",
+    "upstream_error:",
+    "not allowed to use channel {{any}}(allowed:",
+    "temporarily unavailable",
+];
+pub const DEFAULT_PROVIDER_INTERRUPT_RULES: &[&str] = &[
+    "will reset at {{timestamp}}",
+    "resets at {{timestamp}}",
+    "将在 {{timestamp}}",
+    "context_length_exceeded",
+    "model_context_window_exceeded",
+    "context window",
+    "context length",
+    "maximum context",
+    "too many tokens",
+    "exceeds {{any}} token",
+    "exceeds {{any}} context",
+    "tool result {{any}} no matching tool use",
+    "tool result {{any}} no matching tool_use",
+    "tool result {{any}} matching tool call",
+    "unsupported model",
+    "model not found",
+    "unknown model",
+    "model does not exist",
+    "not supported by any configured account",
+    "not supported by any account",
+    "invalid_request_error: rate_limit_exceeded is not a valid parameter",
+    "invalid_api_key",
+    "insufficient_quota",
+    "<!doctype html",
+    "<html",
+    "cloudflare",
+    "cf-ray",
+    "attention required",
+    "just a moment",
+    "web application firewall",
+];
 pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 16;
 pub const MIN_MAX_TOOL_ROUNDS: u32 = 1;
 pub const MAX_MAX_TOOL_ROUNDS: u32 = 1024;
@@ -841,6 +880,12 @@ pub struct UserConfig {
     /// Retries after the initial failed request for one provider before trying a backup provider.
     #[serde(default = "default_max_provider_retries")]
     pub max_provider_retries: u32,
+    /// Case-insensitive message fragments that make a provider failure retryable.
+    #[serde(default = "default_provider_retry_rules")]
+    pub provider_retry_rules: Vec<String>,
+    /// Rules that suppress ordinary retries and keep the failure on its dedicated path.
+    #[serde(default = "default_provider_interrupt_rules")]
+    pub provider_interrupt_rules: Vec<String>,
     /// Whether XCoding may switch to another configured provider after the active provider fails.
     #[serde(default = "default_provider_fallback_enabled")]
     pub provider_fallback_enabled: bool,
@@ -968,6 +1013,8 @@ impl Default for UserConfig {
             reasoning_effort: default_reasoning_effort(),
             reasoning_efforts: default_reasoning_efforts(),
             max_provider_retries: default_max_provider_retries(),
+            provider_retry_rules: default_provider_retry_rules(),
+            provider_interrupt_rules: default_provider_interrupt_rules(),
             provider_fallback_enabled: default_provider_fallback_enabled(),
             max_tool_rounds: default_max_tool_rounds(),
             circuit_failure_threshold: default_circuit_failure_threshold(),
@@ -1503,6 +1550,20 @@ fn default_max_provider_retries() -> u32 {
     DEFAULT_MAX_PROVIDER_RETRIES
 }
 
+fn default_provider_retry_rules() -> Vec<String> {
+    DEFAULT_PROVIDER_RETRY_RULES
+        .iter()
+        .map(|rule| (*rule).to_owned())
+        .collect()
+}
+
+fn default_provider_interrupt_rules() -> Vec<String> {
+    DEFAULT_PROVIDER_INTERRUPT_RULES
+        .iter()
+        .map(|rule| (*rule).to_owned())
+        .collect()
+}
+
 fn default_provider_fallback_enabled() -> bool {
     false
 }
@@ -1696,6 +1757,11 @@ mod tests {
             DEFAULT_STREAM_IDLE_TIMEOUT_SECS
         );
         assert_eq!(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES);
+        assert_eq!(config.provider_retry_rules, default_provider_retry_rules());
+        assert_eq!(
+            config.provider_interrupt_rules,
+            default_provider_interrupt_rules()
+        );
         assert!(!config.provider_fallback_enabled);
         assert_eq!(config.max_tool_rounds, DEFAULT_MAX_TOOL_ROUNDS);
         assert_eq!(
@@ -1729,6 +1795,19 @@ mod tests {
         assert!(config.providers.is_empty());
         assert_eq!(config.active_provider_id, None);
         assert!(!config.skip_local_api_confirmation);
+    }
+
+    #[test]
+    fn user_config_preserves_empty_provider_rule_lists() {
+        let mut config = UserConfig::default();
+        config.provider_retry_rules.clear();
+        config.provider_interrupt_rules.clear();
+
+        let value = serde_json::to_value(&config).expect("user config serializes");
+        let parsed: UserConfig = serde_json::from_value(value).expect("user config parses");
+
+        assert!(parsed.provider_retry_rules.is_empty());
+        assert!(parsed.provider_interrupt_rules.is_empty());
     }
 
     #[test]

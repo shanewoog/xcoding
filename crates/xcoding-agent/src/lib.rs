@@ -2346,7 +2346,11 @@ fn record_provider_failure(candidate: &ProviderCandidate, settings: CircuitSetti
     }
 }
 
-fn is_retryable_provider_attempt(error: &AgentError) -> bool {
+fn is_retryable_provider_attempt(
+    error: &AgentError,
+    retry_rules: &[String],
+    interrupt_rules: &[String],
+) -> bool {
     // An explicit rejection of the selected model cannot be fixed by resending
     // the same request to the same provider, even when it uses HTTP 404/400.
     if provider_rejected_selected_model(error) {
@@ -2359,11 +2363,14 @@ fn is_retryable_provider_attempt(error: &AgentError) -> bool {
         | AgentError::ProviderBusyResponse(_)
         | AgentError::LeakedToolProtocol(_) => true,
         AgentError::Provider(provider_error) => {
+            if provider_error.matches_interrupt_rule(interrupt_rules) {
+                return false;
+            }
             // Context overflow needs history trimming, not a plain retry.
             if provider_error.is_context_overflow() {
                 return false;
             }
-            provider_error.is_retryable()
+            provider_error.is_retryable() || provider_error.matches_retry_rule(retry_rules)
         }
         _ => false,
     }
@@ -2598,16 +2605,18 @@ impl HistoricalContentFingerprints {
 /// streamed is persisted before `MessageCompleted`, so the partial text lives
 /// only in the UI: the client can drop it and the retry starts a clean answer.
 /// Keeping the turn alive is worth more than the discarded characters.
-fn stream_restart_discards_partial_output(error: &AgentError) -> bool {
+fn stream_restart_discards_partial_output(error: &AgentError, retry_rules: &[String]) -> bool {
     match error {
         AgentError::ProviderStreamFirstEventTimeout(_)
         | AgentError::ProviderStreamIdleTimeout(_)
         | AgentError::ProviderBusyResponse(_)
         | AgentError::LeakedToolProtocol(_) => true,
-        AgentError::Provider(provider_error) => matches!(
-            provider_error,
-            ProviderError::StreamDisconnected(_) | ProviderError::Http(_)
-        ),
+        AgentError::Provider(provider_error) => {
+            matches!(
+                provider_error,
+                ProviderError::StreamDisconnected(_) | ProviderError::Http(_)
+            ) || provider_error.matches_retry_rule(retry_rules)
+        }
         _ => false,
     }
 }
@@ -3999,10 +4008,16 @@ impl<'a> AgentService<'a> {
                                     };
                                 let restart_after_visible_output =
                                     visible_output_was_started(&failure)
-                                        && stream_restart_discards_partial_output(&failure.error);
-                                if is_retryable_provider_attempt(&failure.error)
-                                    && (!visible_output_was_started(&failure)
-                                        || restart_after_visible_output)
+                                        && stream_restart_discards_partial_output(
+                                            &failure.error,
+                                            &user_config.provider_retry_rules,
+                                        );
+                                if is_retryable_provider_attempt(
+                                    &failure.error,
+                                    &user_config.provider_retry_rules,
+                                    &user_config.provider_interrupt_rules,
+                                ) && (!visible_output_was_started(&failure)
+                                    || restart_after_visible_output)
                                     && retry_attempt < max_provider_retries
                                     && (!leaked_dsml_protocol || repair_instruction_was_added)
                                 {
@@ -11746,7 +11761,12 @@ private material
         });
         assert!(is_context_overflow_error(&error));
         // Overflow needs a smaller payload, not a plain resend.
-        assert!(!is_retryable_provider_attempt(&error));
+        assert!(!is_retryable_provider_attempt(&error, &[], &[]));
+        assert!(!is_retryable_provider_attempt(
+            &error,
+            &["context window".to_owned()],
+            &[],
+        ));
     }
 
     #[test]
@@ -11758,7 +11778,7 @@ private material
         });
         assert!(!is_context_overflow_error(&error));
         assert!(provider_rejected_selected_model(&error));
-        assert!(!is_retryable_provider_attempt(&error));
+        assert!(!is_retryable_provider_attempt(&error, &[], &[]));
     }
 
     #[test]
@@ -11770,7 +11790,7 @@ private material
         });
 
         assert!(provider_rejected_selected_model(&error));
-        assert!(!is_retryable_provider_attempt(&error));
+        assert!(!is_retryable_provider_attempt(&error, &[], &[]));
     }
 
     #[test]
@@ -11782,7 +11802,12 @@ private material
             retry_after_secs: None,
         });
 
-        assert!(is_retryable_provider_attempt(&error));
+        let config = UserConfig::default();
+        assert!(is_retryable_provider_attempt(
+            &error,
+            &config.provider_retry_rules,
+            &config.provider_interrupt_rules,
+        ));
     }
 
     #[test]
@@ -11792,7 +11817,24 @@ private material
                 .to_owned(),
         ));
 
-        assert!(is_retryable_provider_attempt(&error));
+        let config = UserConfig::default();
+        assert!(is_retryable_provider_attempt(
+            &error,
+            &config.provider_retry_rules,
+            &config.provider_interrupt_rules,
+        ));
+    }
+
+    #[test]
+    fn configured_retry_rule_recovers_an_unknown_provider_failure() {
+        let error = AgentError::Provider(ProviderError::InvalidResponse(
+            "unknown_gateway_error: request aborted".to_owned(),
+        ));
+        assert!(!is_retryable_provider_attempt(&error, &[], &[]));
+
+        let rules = vec!["invalid provider response: unknown_gateway_error:".to_owned()];
+        assert!(is_retryable_provider_attempt(&error, &rules, &[]));
+        assert!(stream_restart_discards_partial_output(&error, &rules));
     }
 
     #[test]
@@ -11918,14 +11960,24 @@ private material
             retry_after_secs: None,
         });
 
-        assert!(!is_retryable_provider_attempt(&error));
+        let config = UserConfig::default();
+        assert!(!is_retryable_provider_attempt(
+            &error,
+            &config.provider_retry_rules,
+            &config.provider_interrupt_rules,
+        ));
 
         let chinese_error = AgentError::Provider(ProviderError::HttpStatus {
             status: xcoding_providers::StatusCode::TOO_MANY_REQUESTS,
             body: r#"{"error":{"message":"{\"code\":6004,\"msg\":\"您的使用量已超出频率限制，将在 2026-11-05 16:36:20 UTC+8 重置，您也可以切换其他模型继续使用。\"}","type":"api_error"}}"#.to_owned(),
             retry_after_secs: None,
         });
-        assert!(!is_retryable_provider_attempt(&chinese_error));
+        let config = UserConfig::default();
+        assert!(!is_retryable_provider_attempt(
+            &chinese_error,
+            &config.provider_retry_rules,
+            &config.provider_interrupt_rules,
+        ));
     }
 
     #[test]
@@ -12233,14 +12285,14 @@ private material
                 total_ms: None,
             };
             assert!(visible_output_was_started(&failure));
-            assert!(stream_restart_discards_partial_output(&failure.error));
+            assert!(stream_restart_discards_partial_output(&failure.error, &[]));
         }
     }
 
     #[test]
     fn leaked_dsml_protocol_restarts_even_after_visible_text() {
         let error = AgentError::LeakedToolProtocol("partial tool-call block".to_owned());
-        assert!(is_retryable_provider_attempt(&error));
+        assert!(is_retryable_provider_attempt(&error, &[], &[]));
         let failure = ProviderAttemptFailure {
             error,
             output_chars: 45,
@@ -12249,7 +12301,7 @@ private material
             total_ms: None,
         };
         assert!(visible_output_was_started(&failure));
-        assert!(stream_restart_discards_partial_output(&failure.error));
+        assert!(stream_restart_discards_partial_output(&failure.error, &[]));
     }
 
     #[test]
@@ -12268,7 +12320,7 @@ private material
             total_ms: None,
         };
         assert!(visible_output_was_started(&failure));
-        assert!(!stream_restart_discards_partial_output(&failure.error));
+        assert!(!stream_restart_discards_partial_output(&failure.error, &[]));
     }
 
     #[test]
@@ -12277,8 +12329,8 @@ private material
         assert!(is_transient_provider_busy_response(notice, &[]));
 
         let error = AgentError::ProviderBusyResponse(notice.to_owned());
-        assert!(is_retryable_provider_attempt(&error));
-        assert!(stream_restart_discards_partial_output(&error));
+        assert!(is_retryable_provider_attempt(&error, &[], &[]));
+        assert!(stream_restart_discards_partial_output(&error, &[]));
     }
 
     #[test]

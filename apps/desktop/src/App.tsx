@@ -125,6 +125,8 @@ const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000;
 const DEFAULT_MAX_PROVIDER_RETRIES = 6;
 const MIN_MAX_PROVIDER_RETRIES = 0;
 const MAX_MAX_PROVIDER_RETRIES = 999;
+const DEFAULT_PROVIDER_RETRY_RULES: readonly string[] = [];
+const DEFAULT_PROVIDER_INTERRUPT_RULES: readonly string[] = [];
 const DEFAULT_MAX_TOOL_ROUNDS = 16;
 const MIN_MAX_TOOL_ROUNDS = 1;
 const MAX_MAX_TOOL_ROUNDS = 1024;
@@ -177,6 +179,24 @@ function normalizeReasoningEfforts(value: readonly string[] | string | undefined
     normalized.push(trimmed);
   }
   return normalized.length > 0 ? normalized : [...DEFAULT_REASONING_EFFORTS];
+}
+
+function normalizeProviderRules(
+  value: readonly string[] | string | undefined | null,
+  defaults: readonly string[],
+): string[] {
+  if (value == null) return [...defaults];
+  const rawValues = typeof value === "string" ? value.split(/\r?\n/) : value;
+  const seen = new Set<string>();
+  const normalized = [];
+  for (const rawValue of rawValues) {
+    const trimmed = rawValue.trim();
+    const key = trimmed.toLocaleLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(trimmed);
+  }
+  return normalized;
 }
 
 function normalizeReasoningEffort(
@@ -2077,6 +2097,8 @@ export function App() {
   const reasoningEfforts = normalizeReasoningEfforts(reasoningEffortsText);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(DEFAULT_REASONING_EFFORT);
   const [maxProviderRetries, setMaxProviderRetries] = useState(DEFAULT_MAX_PROVIDER_RETRIES);
+  const [providerRetryRulesText, setProviderRetryRulesText] = useState(DEFAULT_PROVIDER_RETRY_RULES.join("\n"));
+  const [providerInterruptRulesText, setProviderInterruptRulesText] = useState(DEFAULT_PROVIDER_INTERRUPT_RULES.join("\n"));
   const [providerFallbackEnabled, setProviderFallbackEnabled] = useState(false);
   const [httpProxyMode, setHttpProxyMode] = useState<HttpProxyMode>("system");
   const [httpProxyUrl, setHttpProxyUrl] = useState("");
@@ -2703,6 +2725,8 @@ export function App() {
         setReasoningEffortsText(loadedReasoningEfforts.join("\n"));
         setReasoningEffort(normalizeReasoningEffort(config.reasoning_effort, loadedReasoningEfforts));
         setMaxProviderRetries(normalizeBoundedInteger(config.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
+        setProviderRetryRulesText(normalizeProviderRules(config.provider_retry_rules, DEFAULT_PROVIDER_RETRY_RULES).join("\n"));
+        setProviderInterruptRulesText(normalizeProviderRules(config.provider_interrupt_rules, DEFAULT_PROVIDER_INTERRUPT_RULES).join("\n"));
         setProviderFallbackEnabled(config.provider_fallback_enabled === true);
         setHttpProxyMode(normalizeHttpProxyMode(config.http_proxy_mode));
         setHttpProxyUrl((config.http_proxy_url ?? "").trim());
@@ -5422,6 +5446,8 @@ export function App() {
           reasoning_effort: selectedReasoningEffort,
           reasoning_efforts: normalizedReasoningEfforts,
           max_provider_retries: normalizeBoundedInteger(maxProviderRetries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES),
+          provider_retry_rules: normalizeProviderRules(providerRetryRulesText, DEFAULT_PROVIDER_RETRY_RULES),
+          provider_interrupt_rules: normalizeProviderRules(providerInterruptRulesText, DEFAULT_PROVIDER_INTERRUPT_RULES),
           provider_fallback_enabled: providerFallbackEnabled,
           max_tool_rounds: normalizeBoundedInteger(maxToolRounds, DEFAULT_MAX_TOOL_ROUNDS, MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS),
           circuit_failure_threshold: normalizeBoundedInteger(circuitFailureThreshold, DEFAULT_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_FAILURE_THRESHOLD, MAX_CIRCUIT_FAILURE_THRESHOLD),
@@ -5468,6 +5494,8 @@ export function App() {
       setReasoningEffortsText(savedReasoningEfforts.join("\n"));
       setReasoningEffort(normalizeReasoningEffort(savedUser.reasoning_effort, savedReasoningEfforts));
       setMaxProviderRetries(normalizeBoundedInteger(savedUser.max_provider_retries, DEFAULT_MAX_PROVIDER_RETRIES, MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES));
+      setProviderRetryRulesText(normalizeProviderRules(savedUser.provider_retry_rules, DEFAULT_PROVIDER_RETRY_RULES).join("\n"));
+      setProviderInterruptRulesText(normalizeProviderRules(savedUser.provider_interrupt_rules, DEFAULT_PROVIDER_INTERRUPT_RULES).join("\n"));
       setProviderFallbackEnabled(savedUser.provider_fallback_enabled === true);
       setHttpProxyMode(normalizeHttpProxyMode(savedUser.http_proxy_mode));
       setHttpProxyUrl((savedUser.http_proxy_url ?? "").trim());
@@ -6525,6 +6553,29 @@ export function App() {
               </div>
               <p className="mode-help">{t(locale, "field.maxProviderRetriesHint")}</p>
               <p className="mode-help">{t(locale, "field.maxToolRoundsHint")}</p>
+              <label className="field-label" htmlFor="provider-retry-rules">{t(locale, "field.providerRetryRules")}</label>
+              <textarea
+                id="provider-retry-rules"
+                rows={4}
+                value={providerRetryRulesText}
+                placeholder="upstream_error:"
+                onChange={(event) => setProviderRetryRulesText(event.target.value)}
+                disabled={anySessionRunning || isSavingConfig}
+                spellCheck={false}
+              />
+              <p className="mode-help">{t(locale, "field.providerRetryRulesHint")}</p>
+              <label className="field-label" htmlFor="provider-interrupt-rules">{t(locale, "field.providerInterruptRules")}</label>
+              <textarea
+                id="provider-interrupt-rules"
+                rows={6}
+                value={providerInterruptRulesText}
+                placeholder="will reset at {{timestamp}}"
+                onChange={(event) => setProviderInterruptRulesText(event.target.value)}
+                disabled={anySessionRunning || isSavingConfig}
+                spellCheck={false}
+              />
+              <p className="mode-help">{t(locale, "field.providerInterruptRulesHint")}</p>
+              <p className="mode-help">{t(locale, "field.providerRuleParametersHint")}</p>
             </div>
 
             <div className="resilience-setting-group">

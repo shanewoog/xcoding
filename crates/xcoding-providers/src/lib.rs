@@ -48,8 +48,8 @@ where
 use serde_json::{Value, json};
 use thiserror::Error;
 use xcoding_protocol::{
-    CloudProviderConfig, DEFAULT_LOCAL_RELAY_PORT, HttpProxyMode, ListModelsResult,
-    MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_FAILURE_THRESHOLD,
+    CloudProviderConfig, DEFAULT_LOCAL_RELAY_PORT, DEFAULT_PROVIDER_RETRY_RULES, HttpProxyMode,
+    ListModelsResult, MAX_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MAX_CIRCUIT_FAILURE_THRESHOLD,
     MAX_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
     MAX_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
     MAX_CONTEXT_WINDOW_TOKENS, MAX_LOCAL_RELAY_PORT, MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS,
@@ -350,6 +350,35 @@ impl ProviderError {
         }
     }
 
+    /// Matches a retry rule against the complete displayed error.
+    /// Rules are case-insensitive fragments and may contain `{{name}}`
+    /// placeholders, which match any intervening text.
+    pub fn matches_retry_rule(&self, rules: &[String]) -> bool {
+        self.matches_rule_list(rules)
+    }
+
+    /// Matches a rule that keeps the failure on an interrupt or dedicated path.
+    pub fn matches_interrupt_rule(&self, rules: &[String]) -> bool {
+        self.matches_rule_list(rules)
+    }
+
+    fn matches_rule_list(&self, rules: &[String]) -> bool {
+        let Some(error) = self.rule_match_text() else {
+            return false;
+        };
+        rules.iter().any(|rule| provider_rule_matches(rule, &error))
+    }
+
+    fn rule_match_text(&self) -> Option<String> {
+        match self {
+            Self::HttpStatus { body, .. } => Some(format!("{}\n{body}", self)),
+            Self::EmptyStream { body, .. } => Some(format!("{}\n{body}", self)),
+            Self::InvalidResponse(message) => Some(format!("{}\n{message}", self)),
+            Self::StreamDisconnected(message) => Some(format!("{}\n{message}", self)),
+            _ => None,
+        }
+    }
+
     /// Transient transport / upstream failures worth retrying before failing the turn.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -361,17 +390,9 @@ impl ProviderError {
                     || error.is_body()
                     || (!error.is_decode() && error.status().is_none())
             }
-            Self::HttpStatus { status, body, .. } => {
-                if *status == StatusCode::TOO_MANY_REQUESTS
-                    && body_indicates_scheduled_quota_reset(body)
-                {
-                    return false;
-                }
+            Self::HttpStatus { status, .. } => {
                 if self.is_tool_result_mismatch() {
                     return false;
-                }
-                if self.is_transient_channel_rejection() {
-                    return true;
                 }
                 // Context overflow (400/413 + overflow body) needs history trimming, not a plain resend.
                 if self.is_context_overflow() {
@@ -387,13 +408,7 @@ impl ProviderError {
                 )
             }
             Self::StreamDisconnected(_) | Self::EmptyStream { .. } => true,
-            Self::InvalidResponse(message) => {
-                !body_indicates_scheduled_quota_reset(message)
-                    && (message == "rate_limit_exceeded"
-                        || message.starts_with("rate_limit_exceeded:")
-                        || message == "gateway_concurrency_limit"
-                        || message.starts_with("gateway_concurrency_limit:"))
-            }
+            Self::InvalidResponse(_) => false,
             Self::MissingApiKey
             | Self::Utf8(_)
             | Self::StreamJson(_)
@@ -474,6 +489,78 @@ impl ProviderError {
             }
             _ => false,
         }
+    }
+}
+
+#[derive(Debug)]
+enum ProviderRuleSegment {
+    Literal(String),
+    Placeholder,
+}
+
+fn provider_rule_matches(rule: &str, error: &str) -> bool {
+    let rule = rule.trim().to_ascii_lowercase();
+    if rule.is_empty() {
+        return false;
+    }
+    let error = error.to_ascii_lowercase();
+    let segments = parse_provider_rule(&rule);
+    !segments.is_empty() && provider_rule_segments_match(&segments, &error, 0)
+}
+
+fn parse_provider_rule(rule: &str) -> Vec<ProviderRuleSegment> {
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    while let Some(open_offset) = rule[cursor..].find("{{") {
+        let open = cursor + open_offset;
+        if open > cursor {
+            segments.push(ProviderRuleSegment::Literal(rule[cursor..open].to_owned()));
+        }
+        let Some(close_offset) = rule[open + 2..].find("}}") else {
+            segments.push(ProviderRuleSegment::Literal(rule[open..].to_owned()));
+            return segments;
+        };
+        let close = open + 2 + close_offset;
+        segments.push(ProviderRuleSegment::Placeholder);
+        cursor = close + 2;
+    }
+    if cursor < rule.len() {
+        segments.push(ProviderRuleSegment::Literal(rule[cursor..].to_owned()));
+    }
+    segments
+}
+
+fn provider_rule_segments_match(
+    segments: &[ProviderRuleSegment],
+    error: &str,
+    cursor: usize,
+) -> bool {
+    let Some((first, rest)) = segments.split_first() else {
+        return true;
+    };
+    match first {
+        ProviderRuleSegment::Literal(literal) => {
+            error[cursor..].find(literal).is_some_and(|offset| {
+                provider_rule_segments_match(rest, error, cursor + offset + literal.len())
+            })
+        }
+        ProviderRuleSegment::Placeholder => match rest.first() {
+            None => true,
+            Some(ProviderRuleSegment::Literal(next_literal)) => {
+                let mut search_from = cursor;
+                while let Some(offset) = error[search_from..].find(next_literal) {
+                    let literal_at = search_from + offset;
+                    if provider_rule_segments_match(rest, error, literal_at) {
+                        return true;
+                    }
+                    search_from = literal_at + next_literal.len().max(1);
+                }
+                false
+            }
+            Some(ProviderRuleSegment::Placeholder) => {
+                provider_rule_segments_match(rest, error, cursor)
+            }
+        },
     }
 }
 
@@ -727,21 +814,6 @@ fn body_indicates_context_overflow(body: &str) -> bool {
         || (lower.contains("exceeds") && (lower.contains("token") || lower.contains("context")))
 }
 
-/// A quota response that names its reset time cannot succeed before that time.
-/// Treat it as terminal instead of spending the bounded retry budget.
-fn body_indicates_scheduled_quota_reset(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    ["will reset at", "resets at", "将在"].iter().any(|marker| {
-        lower.find(marker).is_some_and(|index| {
-            lower[index + marker.len()..]
-                .trim_start()
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_digit())
-        })
-    })
-}
-
 /// Recognizes an edge-protection block page. Model APIs answer with JSON, so an
 /// HTML document or a named gateway vendor means the request never reached the
 /// API and the credential was never evaluated.
@@ -869,6 +941,14 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
     config.max_provider_retries = config
         .max_provider_retries
         .clamp(MIN_MAX_PROVIDER_RETRIES, MAX_MAX_PROVIDER_RETRIES);
+    if config.provider_retry_rules.as_slice() == ["upstream_error:"] {
+        config.provider_retry_rules = DEFAULT_PROVIDER_RETRY_RULES
+            .iter()
+            .map(|rule| (*rule).to_owned())
+            .collect();
+    }
+    config.provider_retry_rules = normalize_provider_rules(config.provider_retry_rules);
+    config.provider_interrupt_rules = normalize_provider_rules(config.provider_interrupt_rules);
     config.max_tool_rounds = config
         .max_tool_rounds
         .clamp(MIN_MAX_TOOL_ROUNDS, MAX_MAX_TOOL_ROUNDS);
@@ -1069,6 +1149,16 @@ pub fn normalize_user_config(mut config: UserConfig) -> UserConfig {
     normalize_model_routes(&mut config);
 
     config
+}
+
+fn normalize_provider_rules(rules: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    rules
+        .into_iter()
+        .map(|rule| rule.trim().to_owned())
+        .filter(|rule| !rule.is_empty())
+        .filter(|rule| seen.insert(rule.to_ascii_lowercase()))
+        .collect()
 }
 
 /// Keeps multi-provider routes consistent with the provider list: model keys are
@@ -3159,6 +3249,58 @@ mod tests {
     }
 
     #[test]
+    fn normalize_user_config_cleans_provider_retry_rules() {
+        let config = normalize_user_config(UserConfig {
+            provider_retry_rules: vec![
+                "  upstream_error:  ".to_owned(),
+                "UPSTREAM_ERROR:".to_owned(),
+                "  ".to_owned(),
+                "gateway_timeout:".to_owned(),
+            ],
+            provider_interrupt_rules: vec![
+                "  will reset at {{timestamp}}  ".to_owned(),
+                "WILL RESET AT {{TIMESTAMP}}".to_owned(),
+                "context window".to_owned(),
+            ],
+            ..UserConfig::default()
+        });
+        assert_eq!(
+            config.provider_retry_rules,
+            vec!["upstream_error:".to_owned(), "gateway_timeout:".to_owned()]
+        );
+        assert_eq!(
+            config.provider_interrupt_rules,
+            vec![
+                "will reset at {{timestamp}}".to_owned(),
+                "context window".to_owned()
+            ]
+        );
+
+        let config = normalize_user_config(UserConfig {
+            provider_retry_rules: Vec::new(),
+            provider_interrupt_rules: Vec::new(),
+            ..UserConfig::default()
+        });
+        assert!(config.provider_retry_rules.is_empty());
+        assert!(config.provider_interrupt_rules.is_empty());
+    }
+
+    #[test]
+    fn normalize_user_config_expands_the_legacy_retry_rule_default() {
+        let config = normalize_user_config(UserConfig {
+            provider_retry_rules: vec!["upstream_error:".to_owned()],
+            ..UserConfig::default()
+        });
+        assert_eq!(
+            config.provider_retry_rules,
+            DEFAULT_PROVIDER_RETRY_RULES
+                .iter()
+                .map(|rule| (*rule).to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn normalize_user_config_normalizes_local_relay_settings() {
         let config = normalize_user_config(UserConfig {
             local_relay_api_key: Some("  xcoding-local-abc  ".to_owned()),
@@ -3811,7 +3953,9 @@ mod tests {
             panic!("expected failed event");
         };
         let error = ProviderError::InvalidResponse(message);
-        assert!(error.is_retryable());
+        let config = UserConfig::default();
+        assert!(!error.is_retryable());
+        assert!(error.matches_retry_rule(&config.provider_retry_rules));
         assert!(!error.is_context_overflow());
     }
 
@@ -3825,31 +3969,63 @@ mod tests {
             panic!("expected failed event");
         };
         let error = ProviderError::InvalidResponse(message);
-        assert!(error.is_retryable());
+        let config = UserConfig::default();
+        assert!(!error.is_retryable());
+        assert!(error.matches_retry_rule(&config.provider_retry_rules));
         assert!(!error.is_context_overflow());
     }
 
     #[test]
-    fn invalid_response_only_retries_explicit_transient_codes() {
+    fn responses_upstream_error_matches_configured_retry_rule() {
+        let event = parse_responses_event(
+            r#"{"type":"response.failed","response":{"error":{"code":"upstream_error","message":"Upstream service temporarily unavailable"}}}"#,
+        )
+        .expect("upstream error event parses");
+        let ResponsesParsedEvent::Failed(message) = event else {
+            panic!("expected failed event");
+        };
+        let error = ProviderError::InvalidResponse(message);
+        let config = UserConfig::default();
+        assert!(!error.is_retryable());
+        assert!(error.matches_retry_rule(&config.provider_retry_rules));
+        assert!(error.matches_retry_rule(&[
+            "invalid provider response: UPSTREAM_ERROR: Upstream service {{timestamp}}".to_owned()
+        ]));
+        assert!(!error.is_context_overflow());
+    }
+
+    #[test]
+    fn default_message_rules_classify_invalid_responses() {
+        let config = UserConfig::default();
         for message in [
-            "rate_limit_exceeded",
             "rate_limit_exceeded: Too many requests",
-            "gateway_concurrency_limit",
             "gateway_concurrency_limit: Concurrency limit exceeded for account, please retry later",
+            "upstream_error: Upstream service temporarily unavailable",
         ] {
-            assert!(ProviderError::InvalidResponse(message.to_owned()).is_retryable());
+            let error = ProviderError::InvalidResponse(message.to_owned());
+            assert!(!error.is_retryable());
+            assert!(error.matches_retry_rule(&config.provider_retry_rules));
+            assert!(!error.matches_interrupt_rule(&config.provider_interrupt_rules));
         }
         for message in [
-            "upstream_error: request failed",
             "invalid_api_key: Invalid API key",
             "insufficient_quota: Check your plan and billing details",
             "invalid_request_error: rate_limit_exceeded is not a valid parameter",
-            "rate_limit_exceeded_unknown: request failed",
-            "gateway_concurrency_limit_unknown: request failed",
             "context_length_exceeded: Your input exceeds the context window",
             "rate_limit_exceeded: usage exceeds frequency limit; your usage will reset at 2026-10-31 17:51:18 UTC+8",
         ] {
-            assert!(!ProviderError::InvalidResponse(message.to_owned()).is_retryable());
+            let error = ProviderError::InvalidResponse(message.to_owned());
+            assert!(!error.is_retryable());
+            assert!(error.matches_interrupt_rule(&config.provider_interrupt_rules));
+        }
+        for message in [
+            "rate_limit_exceeded_unknown: request failed",
+            "gateway_concurrency_limit_unknown: request failed",
+            "upstream_error_unknown: request failed",
+        ] {
+            let error = ProviderError::InvalidResponse(message.to_owned());
+            assert!(!error.matches_retry_rule(&config.provider_retry_rules));
+            assert!(!error.matches_interrupt_rule(&config.provider_interrupt_rules));
         }
     }
 
@@ -4062,7 +4238,8 @@ mod tests {
     }
 
     #[test]
-    fn http_429_with_explicit_quota_reset_time_is_not_retried() {
+    fn explicit_quota_reset_time_matches_an_interrupt_rule() {
+        let config = UserConfig::default();
         let body = r#"{"error":{"message":"{\"code\":6004,\"msg\":\"usage exceeds frequency limit, but don't worry, your usage will reset at 2026-10-31 17:51:18 UTC+8, alternatively, you can switch to the other models to continue using it.\",\"requestId\":\"8125ba89ed258381516f2f20e083bc6f\"}"}}"#;
         let error = ProviderError::HttpStatus {
             status: StatusCode::TOO_MANY_REQUESTS,
@@ -4070,17 +4247,16 @@ mod tests {
             retry_after_secs: None,
         };
 
-        assert!(!error.is_retryable());
+        assert!(error.is_retryable());
+        assert!(error.matches_interrupt_rule(&config.provider_interrupt_rules));
 
         let chinese_body = r#"{"error":{"message":"{\"code\":6004,\"msg\":\"您的使用量已超出频率限制，将在 2026-11-05 16:36:20 UTC+8 重置，您也可以切换其他模型继续使用。\",\"requestId\":\"89567cd9bcac2866c5afb2d191010370\"}","type":"api_error","code":null,"gateway_hint":"rate limited by upstream; retry after reset"}}"#;
-        assert!(
-            !ProviderError::HttpStatus {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                body: chinese_body.to_owned(),
-                retry_after_secs: None,
-            }
-            .is_retryable()
-        );
+        let chinese_error = ProviderError::HttpStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: chinese_body.to_owned(),
+            retry_after_secs: None,
+        };
+        assert!(chinese_error.matches_interrupt_rule(&config.provider_interrupt_rules));
 
         // A 429 without a reset time keeps the existing bounded retry.
         assert!(
@@ -4092,13 +4268,11 @@ mod tests {
             .is_retryable()
         );
         // Streamed failures carrying the same message are terminal too.
-        assert!(
-            !ProviderError::InvalidResponse(
-                "rate_limit_exceeded: your usage will reset at 2026-10-31 17:51:18 UTC+8"
-                    .to_owned()
-            )
-            .is_retryable()
+        let streamed_error = ProviderError::InvalidResponse(
+            "rate_limit_exceeded: your usage will reset at 2026-10-31 17:51:18 UTC+8".to_owned(),
         );
+        assert!(streamed_error.matches_retry_rule(&config.provider_retry_rules));
+        assert!(streamed_error.matches_interrupt_rule(&config.provider_interrupt_rules));
     }
 
     #[test]
@@ -4124,8 +4298,10 @@ mod tests {
             retry_after_secs: None,
         };
 
+        let config = UserConfig::default();
         assert!(error.is_transient_channel_rejection());
-        assert!(error.is_retryable());
+        assert!(!error.is_retryable());
+        assert!(error.matches_retry_rule(&config.provider_retry_rules));
         assert!(!error.is_credential_rejection());
         assert!(error.to_string().contains("temporarily throttled"));
     }
