@@ -140,6 +140,8 @@ export interface ProviderApiKey {
   key: string;
   /** Relative share in the weighted rotation. 0 keeps the key out. */
   weight?: number;
+  /** Higher values are used before lower values; equal priorities rotate by weight. */
+  priority?: number;
   /** Disabled keys stay out of the rotation without losing their configuration. */
   enabled?: boolean;
 }
@@ -153,6 +155,7 @@ export interface ProviderKeyStatus {
   /** Masked tail of the key. Never contains the full secret. */
   key_hint: string;
   weight: number;
+  priority: number;
   enabled: boolean;
   /** One of ready | rejected | rate_limited | unstable | disabled. */
   state: string;

@@ -84,6 +84,7 @@ pub const MIN_CIRCUIT_MIN_REQUEST_COUNT: u32 = 1;
 pub const MAX_CIRCUIT_MIN_REQUEST_COUNT: u32 = 100;
 pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 4_000;
 pub const MAX_PROVIDER_KEY_WEIGHT: u32 = 1_000;
+pub const MAX_PROVIDER_KEY_PRIORITY: u32 = 1_000;
 /// Default loopback port for the in-process local relay.
 pub const DEFAULT_LOCAL_RELAY_PORT: u16 = 17821;
 pub const MIN_LOCAL_RELAY_PORT: u16 = 1_024;
@@ -661,6 +662,7 @@ pub struct ProviderKeyStatus {
     /// file.
     pub key_hint: String,
     pub weight: u32,
+    pub priority: u32,
     pub enabled: bool,
     /// One of `ready`, `rejected`, `rate_limited`, `unstable`, `disabled`.
     pub state: String,
@@ -787,12 +789,20 @@ pub struct ProviderApiKey {
     /// Relative share in the provider's smooth weighted rotation.
     #[serde(default = "default_provider_key_weight")]
     pub weight: u32,
+    /// Highest-priority usable keys are selected before lower-priority keys.
+    /// Keys with the same priority continue to use smooth weighted rotation.
+    #[serde(default = "default_provider_key_priority")]
+    pub priority: u32,
     /// Disabled keys remain configured but are excluded from rotation.
     #[serde(default = "default_provider_key_enabled")]
     pub enabled: bool,
 }
 
 fn default_provider_key_weight() -> u32 {
+    1
+}
+
+fn default_provider_key_priority() -> u32 {
     1
 }
 
@@ -2077,6 +2087,17 @@ mod tests {
             serde_json::to_value(anthropic).expect("Anthropic protocol serializes"),
             "anthropic_messages"
         );
+    }
+
+    #[test]
+    fn provider_api_key_defaults_priority_to_one() {
+        let key: ProviderApiKey = serde_json::from_value(json!({
+            "id": "key-a",
+            "key": "sk-test"
+        }))
+        .expect("provider key parses");
+        assert_eq!(key.weight, 1);
+        assert_eq!(key.priority, 1);
     }
 
     #[test]

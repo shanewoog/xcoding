@@ -283,6 +283,8 @@ function providerId(): string {
 
 const MIN_PROVIDER_KEY_WEIGHT = 0;
 const MAX_PROVIDER_KEY_WEIGHT = 1000;
+const MIN_PROVIDER_KEY_PRIORITY = 1;
+const MAX_PROVIDER_KEY_PRIORITY = 1000;
 
 /** Blocked credential states the user can clear manually from settings: a
  * refused key (`rejected`) and the time-based cooldowns (`rate_limited` /
@@ -304,6 +306,7 @@ function normalizeProviderApiKeys(items: ProviderApiKey[] | undefined): Provider
       label: item.label?.trim() || undefined,
       key: item.key.trim(),
       weight: normalizeBoundedInteger(item.weight, 1, MIN_PROVIDER_KEY_WEIGHT, MAX_PROVIDER_KEY_WEIGHT),
+      priority: normalizeBoundedInteger(item.priority, 1, MIN_PROVIDER_KEY_PRIORITY, MAX_PROVIDER_KEY_PRIORITY),
       enabled: item.enabled !== false,
     }))
     .filter((item) => item.key.length > 0);
@@ -312,7 +315,11 @@ function normalizeProviderApiKeys(items: ProviderApiKey[] | undefined): Provider
 /** Key actually used for single-key flows such as the model list probe. */
 function primaryProviderKey(provider: CloudProviderConfig | null | undefined): string {
   if (!provider) return "";
-  const pool = (provider.api_keys || []).filter((item) => item.enabled !== false && (item.key || "").trim());
+  const pool = (provider.api_keys || [])
+    .filter((item) => item.enabled !== false && (item.key || "").trim())
+    .sort((left, right) =>
+      (right.priority ?? 1) - (left.priority ?? 1)
+      || (right.weight ?? 1) - (left.weight ?? 1));
   if (pool.length > 0) return (pool[0].key || "").trim();
   return (provider.api_key || "").trim();
 }
@@ -373,6 +380,10 @@ const CHAT_WORKSPACE_DIR = ".xcoding-chat";
 
 function normalizeRoot(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function normalizeProjectRoot(value: string): string {
+  return normalizeRoot(value).replace(/^\/\/[?.]\//, "");
 }
 
 function isChatWorkspace(root: string | null | undefined): boolean {
@@ -2297,6 +2308,23 @@ export function App() {
     || activeSession?.status === "running"
   );
   const anySessionRunning = draftRunning || runningSessionIds.length > 0;
+  const runningProjectRoots = useMemo(() => {
+    const roots = new Set<string>();
+    if (draftRunning && workspaceRoot.trim()) {
+      roots.add(normalizeProjectRoot(workspaceRoot.trim()));
+    }
+    for (const session of sessions) {
+      if (isChatWorkspace(session.workspace_root)) continue;
+      const running =
+        runningSessionIds.includes(session.id)
+        || session.status === "running"
+        || session.status === "need_user";
+      if (running && session.workspace_root.trim()) {
+        roots.add(normalizeProjectRoot(session.workspace_root.trim()));
+      }
+    }
+    return roots;
+  }, [draftRunning, runningSessionIds, sessions, workspaceRoot]);
   // Active-session aliases keep the rest of the workbench logic readable.
   const isRunning = activeSessionRunning;
   // A session can be running or waiting for approval after a reload or while the
@@ -2487,7 +2515,7 @@ export function App() {
   function addProviderKey(id: string): void {
     updateProviderKeys(id, (keys) => [
       ...keys,
-      { id: providerKeyId(), label: "", key: "", weight: 1, enabled: true },
+      { id: providerKeyId(), label: "", key: "", weight: 1, priority: 1, enabled: true },
     ]);
   }
 
@@ -4021,6 +4049,32 @@ export function App() {
     }
   }
 
+  async function requeueFollowUp(id: string): Promise<boolean> {
+    const item = followUpQueueRef.current.find((entry) => entry.id === id)
+      || followUpQueue.find((entry) => entry.id === id);
+    if (!item || item.status === "queued" || item.status === "cancelled") return false;
+    const previousStatus = item.status;
+    setFollowUpStatusInState(id, "queued");
+    try {
+      const updated = await invoke<FollowUpQueueEntry | null>("set_follow_up_queue_status", {
+        params: {
+          session_id: item.sessionId,
+          follow_up_id: item.id,
+          status: "queued",
+        },
+      });
+      if (!updated) {
+        setFollowUpStatusInState(id, previousStatus);
+        return false;
+      }
+      return true;
+    } catch (cause) {
+      setFollowUpStatusInState(id, previousStatus);
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+  }
+
   function visibleFollowUps(sessionId: string | null): QueuedFollowUp[] {
     if (!sessionId) return [];
     return followUpQueue.filter((item) => item.sessionId === sessionId);
@@ -4077,10 +4131,17 @@ export function App() {
   }
 
   async function continueFollowUp(id: string): Promise<void> {
-    if (isRunning || activeSession?.status === "running" || activeSession?.status === "need_user") return;
     const item = followUpQueueRef.current.find((entry) => entry.id === id)
       || followUpQueue.find((entry) => entry.id === id);
     if (!item) return;
+    const session = sessionsRef.current.find((entry) => entry.id === item.sessionId);
+    const sessionRunning = runningSessionIds.includes(item.sessionId)
+      || session?.status === "running"
+      || session?.status === "need_user";
+    if (sessionRunning) {
+      await requeueFollowUp(item.id);
+      return;
+    }
     await sendChatMessage(item.text, {
       sessionId: item.sessionId,
       followUpId: item.id,
@@ -6171,6 +6232,20 @@ export function App() {
                           aria-label={t(locale, "field.apiKey")}
                         />
                         <input
+                          className="provider-key-priority"
+                          type="number"
+                          min={MIN_PROVIDER_KEY_PRIORITY}
+                          max={MAX_PROVIDER_KEY_PRIORITY}
+                          step={1}
+                          value={keyEntry.priority ?? 1}
+                          onChange={(event) => updateProviderKey(selectedProvider.id, keyEntry.id, {
+                            priority: normalizeBoundedInteger(Number(event.target.value), 1, MIN_PROVIDER_KEY_PRIORITY, MAX_PROVIDER_KEY_PRIORITY),
+                          })}
+                          disabled={anySessionRunning || isSavingConfig}
+                          aria-label={t(locale, "field.keyPriority")}
+                          title={t(locale, "field.keyPriority")}
+                        />
+                        <input
                           className="provider-key-weight"
                           type="number"
                           min={MIN_PROVIDER_KEY_WEIGHT}
@@ -6246,8 +6321,8 @@ export function App() {
                           updateProvider(selectedProvider.id, {
                             api_key: undefined,
                             api_keys: [
-                              { id: providerKeyId(), label: "", key: legacy, weight: 1, enabled: true },
-                              { id: providerKeyId(), label: "", key: "", weight: 1, enabled: true },
+                              { id: providerKeyId(), label: "", key: legacy, weight: 1, priority: 1, enabled: true },
+                              { id: providerKeyId(), label: "", key: "", weight: 1, priority: 1, enabled: true },
                             ],
                           });
                           return;
@@ -7216,7 +7291,8 @@ export function App() {
               <ProjectCleanup
                 locale={locale}
                 workspaceHome={workspaceHome}
-                disabled={anySessionRunning}
+                runningProjectRoots={runningProjectRoots}
+                disabled={isSavingConfig}
               />
             </section>
           ) : null}
@@ -7963,9 +8039,6 @@ export function App() {
               : item.status === "not_started"
                 ? t(locale, "composer.queueNotStartedHint")
                 : t(locale, "composer.queueCancelledHint");
-            const waitingForTurn = isRunning
-              || activeSession?.status === "running"
-              || activeSession?.status === "need_user";
             return (
               <article className={`message message-user message-queued message-queued-${item.status}`} key={item.id}>
                 <div className="message-bubble">
@@ -7990,17 +8063,16 @@ export function App() {
                     >
                       {t(locale, "action.steerMode")}
                     </button>
-                  ) : (
+                  ) : item.status === "not_started" ? (
                     <button
                       type="button"
                       className="quiet-button message-queued-button"
                       onClick={() => void continueFollowUp(item.id)}
-                      disabled={waitingForTurn}
-                      title={t(locale, "action.continue")}
+                      title={t(locale, "composer.queueNotStartedHint")}
                     >
                       {t(locale, "action.continue")}
                     </button>
-                  )}
+                  ) : null}
                   <button
                     type="button"
                     className="quiet-button message-queued-button"

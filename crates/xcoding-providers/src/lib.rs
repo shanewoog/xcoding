@@ -53,14 +53,14 @@ use xcoding_protocol::{
     MAX_CIRCUIT_MIN_REQUEST_COUNT, MAX_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
     MAX_CIRCUIT_RECOVERY_WAIT_SECS, MAX_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
     MAX_CONTEXT_WINDOW_TOKENS, MAX_LOCAL_RELAY_PORT, MAX_MAX_PROVIDER_RETRIES, MAX_MAX_TOOL_ROUNDS,
-    MAX_NON_STREAM_TIMEOUT_SECS, MAX_PROVIDER_KEY_WEIGHT, MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS,
-    MAX_STREAM_IDLE_TIMEOUT_SECS, MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT,
-    MIN_CIRCUIT_FAILURE_THRESHOLD, MIN_CIRCUIT_MIN_REQUEST_COUNT,
-    MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD, MIN_CIRCUIT_RECOVERY_WAIT_SECS,
-    MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT, MIN_CONTEXT_WINDOW_TOKENS, MIN_LOCAL_RELAY_PORT,
-    MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS, MIN_NON_STREAM_TIMEOUT_SECS,
-    MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS, ModelRoute,
-    ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
+    MAX_NON_STREAM_TIMEOUT_SECS, MAX_PROVIDER_KEY_PRIORITY, MAX_PROVIDER_KEY_WEIGHT,
+    MAX_STREAM_FIRST_EVENT_TIMEOUT_SECS, MAX_STREAM_IDLE_TIMEOUT_SECS,
+    MIN_CIRCUIT_ERROR_RATE_THRESHOLD_PERCENT, MIN_CIRCUIT_FAILURE_THRESHOLD,
+    MIN_CIRCUIT_MIN_REQUEST_COUNT, MIN_CIRCUIT_RECOVERY_SUCCESS_THRESHOLD,
+    MIN_CIRCUIT_RECOVERY_WAIT_SECS, MIN_CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+    MIN_CONTEXT_WINDOW_TOKENS, MIN_LOCAL_RELAY_PORT, MIN_MAX_PROVIDER_RETRIES, MIN_MAX_TOOL_ROUNDS,
+    MIN_NON_STREAM_TIMEOUT_SECS, MIN_STREAM_FIRST_EVENT_TIMEOUT_SECS, MIN_STREAM_IDLE_TIMEOUT_SECS,
+    ModelRoute, ProviderAuthStatus, ProviderModel, ProviderWireApi, UserConfig,
 };
 
 pub type ProviderEventStream =
@@ -1235,6 +1235,7 @@ fn normalize_provider_api_keys(provider: &mut CloudProviderConfig) {
         seen.insert(entry.id.clone());
         entry.label = entry.label.trim().to_owned();
         entry.weight = entry.weight.min(MAX_PROVIDER_KEY_WEIGHT);
+        entry.priority = entry.priority.clamp(1, MAX_PROVIDER_KEY_PRIORITY);
         true
     });
 }
@@ -3160,6 +3161,7 @@ fn completed_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xcoding_protocol::ProviderApiKey;
 
     #[test]
     fn default_http_user_agent_looks_like_codex() {
@@ -3283,6 +3285,36 @@ mod tests {
         });
         assert!(config.provider_retry_rules.is_empty());
         assert!(config.provider_interrupt_rules.is_empty());
+    }
+
+    #[test]
+    fn normalize_user_config_bounds_provider_key_priority() {
+        let mut config = UserConfig::default();
+        config.providers[0].api_keys = vec![
+            ProviderApiKey {
+                id: "low".to_owned(),
+                label: "Low".to_owned(),
+                key: "sk-low".to_owned(),
+                weight: 1,
+                priority: 0,
+                enabled: true,
+            },
+            ProviderApiKey {
+                id: "high".to_owned(),
+                label: "High".to_owned(),
+                key: "sk-high".to_owned(),
+                weight: 1,
+                priority: MAX_PROVIDER_KEY_PRIORITY + 1,
+                enabled: true,
+            },
+        ];
+
+        let config = normalize_user_config(config);
+        assert_eq!(config.providers[0].api_keys[0].priority, 1);
+        assert_eq!(
+            config.providers[0].api_keys[1].priority,
+            MAX_PROVIDER_KEY_PRIORITY
+        );
     }
 
     #[test]

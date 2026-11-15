@@ -268,6 +268,11 @@ impl ProviderKeyRotation {
             .iter()
             .filter(|key| key.enabled && key.weight > 0 && !key.key.trim().is_empty())
             .collect();
+        let max_priority = usable.iter().map(|key| key.priority).max()?;
+        let usable: Vec<&ProviderApiKey> = usable
+            .into_iter()
+            .filter(|key| key.priority == max_priority)
+            .collect();
         let entries: Vec<(String, u32)> = usable
             .iter()
             .map(|key| (key.id.clone(), key.weight))
@@ -658,6 +663,7 @@ pub fn provider_key_statuses(config: &UserConfig) -> Vec<ProviderKeyStatus> {
                         label: String::new(),
                         key: key.to_owned(),
                         weight: 1,
+                        priority: 1,
                         enabled: true,
                     }]
                 })
@@ -694,6 +700,7 @@ pub fn provider_key_statuses(config: &UserConfig) -> Vec<ProviderKeyStatus> {
                 label: entry.label.clone(),
                 key_hint: provider_key_hint(Some(&entry.key)),
                 weight: entry.weight,
+                priority: entry.priority,
                 enabled: entry.enabled,
                 state: label.to_owned(),
                 cooldown_secs,
@@ -838,6 +845,7 @@ fn select_provider_key(provider: &CloudProviderConfig) -> Option<(String, String
                 label: "default".to_owned(),
                 key: key.clone(),
                 weight: 1,
+                priority: 1,
                 enabled: true,
             }]
         })?
@@ -1917,7 +1925,7 @@ fn provider_credential_list(
                 .filter(|key| !key.is_empty())
                 .map(str::to_owned)
         });
-    let keys: Vec<(String, Option<String>)> = if provider.api_keys.is_empty() {
+    let mut keys: Vec<(String, Option<String>)> = if provider.api_keys.is_empty() {
         api_key
             .map(|key| vec![("legacy".to_owned(), Some(key))])
             .unwrap_or_default()
@@ -1929,6 +1937,20 @@ fn provider_credential_list(
             .map(|key| (key.id.clone(), Some(key.key.clone())))
             .collect()
     };
+    if !provider.api_keys.is_empty() {
+        let priorities = provider
+            .api_keys
+            .iter()
+            .map(|key| (key.id.as_str(), key.priority))
+            .collect::<HashMap<_, _>>();
+        keys.sort_by(|left, right| {
+            priorities
+                .get(right.0.as_str())
+                .copied()
+                .unwrap_or(1)
+                .cmp(&priorities.get(left.0.as_str()).copied().unwrap_or(1))
+        });
+    }
     if keys.is_empty() {
         if Some(provider.id.as_str()) != active_id {
             return Vec::new();
@@ -9622,8 +9644,15 @@ private material
             label: id.to_owned(),
             key: format!("sk-{id}"),
             weight,
+            priority: 1,
             enabled: true,
         }
+    }
+
+    fn test_key_priority(id: &str, weight: u32, priority: u32) -> ProviderApiKey {
+        let mut key = test_key(id, weight);
+        key.priority = priority;
+        key
     }
 
     fn key_candidate(provider_id: &str, key_id: &str, api_key: &str) -> ProviderCandidate {
@@ -9671,6 +9700,65 @@ private material
         assert_eq!(counts.get("a").copied(), Some(60));
         assert_eq!(counts.get("b").copied(), Some(30));
         assert_eq!(counts.get("c").copied(), Some(10));
+    }
+
+    #[test]
+    fn priority_groups_are_used_before_weighted_fallback() {
+        let keys = vec![
+            test_key_priority("primary", 100, 10),
+            test_key_priority("secondary", 1_000, 8),
+        ];
+        let mut rotation = ProviderKeyRotation::default();
+        for _ in 0..20 {
+            assert_eq!(rotation.select(&keys).expect("selected").id, "primary");
+        }
+
+        let fallback = ProviderKeyRotation::default()
+            .select(&keys[1..])
+            .expect("fallback");
+        assert_eq!(fallback.id, "secondary");
+    }
+
+    #[test]
+    fn equal_priority_keys_keep_the_existing_weighted_rotation() {
+        let keys = vec![
+            test_key_priority("a", 6, 3),
+            test_key_priority("b", 3, 3),
+            test_key_priority("c", 1, 3),
+        ];
+        let mut rotation = ProviderKeyRotation::default();
+        let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+        for _ in 0..100 {
+            let selected = rotation.select(&keys).expect("a key is selected");
+            *counts.entry(selected.id.clone()).or_default() += 1;
+        }
+        assert_eq!(counts.get("a").copied(), Some(60));
+        assert_eq!(counts.get("b").copied(), Some(30));
+        assert_eq!(counts.get("c").copied(), Some(10));
+    }
+
+    #[test]
+    fn provider_credential_list_orders_priority_groups_first() {
+        let config = UserConfig::default();
+        let provider = CloudProviderConfig {
+            id: "pool".to_owned(),
+            name: "Pool".to_owned(),
+            base_url: "https://pool.example.test".to_owned(),
+            wire_api: ProviderWireApi::ChatCompletions,
+            trust_level: ProviderTrustLevel::Relay,
+            api_key: None,
+            api_keys: vec![
+                test_key_priority("low", 1, 1),
+                test_key_priority("high", 1, 10),
+                test_key_priority("middle", 1, 8),
+            ],
+            note: None,
+        };
+        let ids = provider_credential_list(&config, &provider, None)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["high", "middle", "low"]);
     }
 
     #[test]

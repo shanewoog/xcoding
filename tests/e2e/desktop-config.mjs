@@ -82,6 +82,7 @@ async function main() {
   const configSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/config.ts"), "utf8");
   const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
   const appearanceSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/appearance.ts"), "utf8");
+  const protocolSource = await readFile(resolve(repositoryRoot, "packages/protocol/src/index.ts"), "utf8");
   assert.ok(appSource.includes("const MAX_MAX_TOOL_ROUNDS = 1024;"), "tool-round settings should allow up to 1024 rounds");
   assert.ok(appSource.includes("max={MAX_MAX_TOOL_ROUNDS}"), "tool-round input should use the configured upper bound");
   assert.ok(i18nSource.includes("export type Locale"), "i18n.ts missing Locale");
@@ -386,7 +387,12 @@ async function main() {
   assert.ok(appSource.includes('t(locale, "action.deleteApiKey")'), "key pool needs a remove-key action");
   assert.ok(appSource.includes('aria-label={t(locale, "field.keyWeight")}'), "weight input needs an accessible label");
   assert.ok(appSource.includes("max={MAX_PROVIDER_KEY_WEIGHT}"), "weight input must be bounded");
+  assert.ok(protocolSource.includes("priority?: number"), "provider key type must expose priority");
+  assert.ok(appSource.includes("priority: normalizeBoundedInteger(item.priority, 1"), "App must normalize key priority");
+  assert.ok(appSource.includes('aria-label={t(locale, "field.keyPriority")}'), "priority input needs an accessible label");
+  assert.ok(appSource.includes("max={MAX_PROVIDER_KEY_PRIORITY}"), "priority input must be bounded");
   assert.ok(cssSource.includes(".provider-key-row"), "styles.css missing key pool row layout");
+  assert.ok(cssSource.includes(".provider-key-priority"), "styles.css missing priority input styling");
   // Rotation stats for each key of a shared endpoint.
   assert.ok(appSource.includes('invoke<ProviderKeyStatus[]>("provider_key_status")'), "App must read per-key rotation health from the backend");
   assert.ok(appSource.includes("providerKeyStatusById"), "App must index key health by provider and key id");
@@ -395,6 +401,7 @@ async function main() {
   for (const needle of [
     '"field.keyLabel"',
     '"field.keyWeight"',
+    '"field.keyPriority"',
     '"field.keyEnabled"',
     '"action.addApiKey"',
     '"action.deleteApiKey"',
@@ -408,6 +415,7 @@ async function main() {
   }
   const keyPoolLabelCount = (i18nSource.match(/"field\.keyWeight":/g) || []).length;
   assert.equal(keyPoolLabelCount, 2, "key pool labels must exist in both en and zh-CN catalogs");
+  assert.equal((i18nSource.match(/"field\.keyPriority":/g) || []).length, 2, "priority labels must exist in both catalogs");
   // Weighted multi-provider routing for one logical model.
   assert.ok(appSource.includes("function modelRouteMapFromEntries"), "App must convert the routing form into model_routes");
   assert.ok(appSource.includes("function modelRouteEntriesFromMap"), "App must hydrate the routing form from model_routes");
@@ -575,7 +583,6 @@ async function main() {
   assert.ok(projectsSource.includes("copy_dir_recursive"), "projects.rs should copy external folders into workspace");
   const projectsProductionSource = projectsSource.split("#[cfg(test)]", 1)[0];
   assert.ok(!/fs::remove_dir|remove_dir_all/.test(projectsProductionSource), "project removal must not delete workspace folders");
-  const protocolSource = await readFile(resolve(repositoryRoot, "packages/protocol/src/index.ts"), "utf8");
   assert.ok(protocolSource.includes('"anthropic_messages"'), "TypeScript protocol should include Anthropic Messages");
   assert.ok(protocolSource.includes("hidden_project_paths"), "protocol missing hidden_project_paths");
   assert.ok(protocolSource.includes("model_context_windows"), "protocol missing model_context_windows");

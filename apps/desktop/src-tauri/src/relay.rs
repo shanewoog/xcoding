@@ -490,6 +490,7 @@ mod tests {
                         label: "Disabled".to_owned(),
                         key: "disabled-key".to_owned(),
                         weight: 1,
+                        priority: 1,
                         enabled: false,
                     },
                     ProviderApiKey {
@@ -497,6 +498,7 @@ mod tests {
                         label: "Enabled".to_owned(),
                         key: "pool-key".to_owned(),
                         weight: 1,
+                        priority: 1,
                         enabled: true,
                     },
                 ],

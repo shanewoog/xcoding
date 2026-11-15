@@ -2940,13 +2940,14 @@ input.workspace-missing {
   align-items: center;
   display: grid;
   gap: 0.35rem;
-  grid-template-columns: minmax(6rem, 0.7fr) minmax(0, 1.6fr) 4.5rem auto auto;
+  grid-template-columns: minmax(6rem, 0.7fr) minmax(0, 1.6fr) 4.5rem 4.5rem auto auto;
 }
 .provider-key-row.disabled .provider-key-secret,
 .provider-key-row.disabled .provider-key-label {
   opacity: 0.55;
 }
-.provider-key-weight {
+.provider-key-weight,
+.provider-key-priority {
   text-align: right;
 }
 .provider-key-enabled {

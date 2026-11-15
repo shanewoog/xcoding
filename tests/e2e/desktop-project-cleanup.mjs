@@ -33,8 +33,15 @@ assert.ok(
   componentSource.includes("formatCleanupBytes") &&
     componentSource.includes("report.total_bytes") &&
     componentSource.includes("usage.cleanable_bytes") &&
-    componentSource.includes("disabled"),
-  "project cleanup must show total/reclaimable usage and respect active-session blocking",
+    componentSource.includes("runningProjectRoots") &&
+    componentSource.includes("isProjectRunning"),
+  "project cleanup must show usage and block only projects with active sessions",
+);
+assert.ok(
+  appSource.includes("const runningProjectRoots = useMemo") &&
+    appSource.includes("runningProjectRoots={runningProjectRoots}") &&
+    !appSource.includes("workspaceHome={workspaceHome}\n                disabled={anySessionRunning}"),
+  "project cleanup must derive per-project running-session blocking instead of disabling globally",
 );
 assert.ok(
   cleanupSource.includes("node_modules") &&
@@ -46,6 +53,11 @@ assert.ok(
   "backend cleanup must restrict deletion to the approved regenerable paths",
 );
 assert.ok(
+  cleanupSource.includes("fn nested_project_roots") &&
+    cleanupSource.includes("nested_projects_are_not_counted_in_their_parent_usage"),
+  "nested projects must be excluded from their parent usage to avoid double counting",
+);
+assert.ok(
   mainSource.includes("async fn scan_project_usage") &&
     mainSource.includes("async fn cleanup_project") &&
     mainSource.includes("scan_project_usage,") &&
@@ -55,6 +67,7 @@ assert.ok(
 assert.ok(
   i18nSource.includes('"settings.tab.cleanup"') &&
     i18nSource.includes('"settings.cleanup.cleanable"') &&
+    i18nSource.includes('"settings.cleanup.running"') &&
     (i18nSource.match(/"settings.tab.cleanup"/g)?.length ?? 0) >= 2,
   "project cleanup copy must be localized in both languages",
 );

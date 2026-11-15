@@ -82,6 +82,18 @@ fn is_cleanable_path(project_root: &Path, path: &Path) -> bool {
         .is_some_and(is_cleanable_relative)
 }
 
+fn nested_project_roots(project_path: &Path, project_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let project_key = path_key(project_path);
+    project_roots
+        .iter()
+        .filter(|root| {
+            let root_key = path_key(root);
+            root_key != project_key && root_key.starts_with(&(project_key.clone() + "/"))
+        })
+        .cloned()
+        .collect()
+}
+
 fn measure_directory(root: &Path) -> (u64, u64) {
     let mut total_bytes = 0_u64;
     let mut skipped_entries = 0_u64;
@@ -124,7 +136,7 @@ fn measure_directory(root: &Path) -> (u64, u64) {
     (total_bytes, skipped_entries)
 }
 
-fn scan_project(project: &ProjectDir) -> ProjectDiskUsage {
+fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> ProjectDiskUsage {
     let project_root = PathBuf::from(&project.path);
     let root_metadata = fs::symlink_metadata(&project_root);
     if root_metadata
@@ -181,6 +193,12 @@ fn scan_project(project: &ProjectDir) -> ProjectDiskUsage {
             if !metadata.is_dir() {
                 continue;
             }
+            if nested_project_roots
+                .iter()
+                .any(|root| path_key(root) == path_key(&path))
+            {
+                continue;
+            }
 
             if is_cleanable_path(&project_root, &path) {
                 let (bytes, skipped) = measure_directory(&path);
@@ -218,11 +236,16 @@ fn scan_project(project: &ProjectDir) -> ProjectDiskUsage {
 /// explicitly supported generated dependency/build/cache directories.
 pub fn scan_projects(workspace_home: &str) -> Result<ProjectDiskUsageReport, String> {
     let projects = projects::list_projects(workspace_home)?;
+    let project_roots = projects
+        .iter()
+        .map(|project| PathBuf::from(&project.path))
+        .collect::<Vec<_>>();
     let mut reports = Vec::with_capacity(projects.len());
     let mut total_bytes = 0_u64;
     let mut cleanable_bytes = 0_u64;
     for project in projects {
-        let report = scan_project(&project);
+        let nested_roots = nested_project_roots(Path::new(&project.path), &project_roots);
+        let report = scan_project(&project, &nested_roots);
         total_bytes = total_bytes.saturating_add(report.total_bytes);
         cleanable_bytes = cleanable_bytes.saturating_add(report.cleanable_bytes);
         reports.push(report);
@@ -273,6 +296,10 @@ pub fn cleanup_project(
     project_path: &str,
 ) -> Result<CleanupProjectResult, String> {
     let projects = projects::list_projects(workspace_home)?;
+    let project_roots = projects
+        .iter()
+        .map(|project| PathBuf::from(&project.path))
+        .collect::<Vec<_>>();
     let requested = Path::new(project_path.trim());
     let project = projects
         .into_iter()
@@ -284,7 +311,8 @@ pub fn cleanup_project(
             )
         })?;
     let project_root = fs::canonicalize(&project.path).map_err(|error| error.to_string())?;
-    let report = scan_project(&project);
+    let nested_roots = nested_project_roots(Path::new(&project.path), &project_roots);
+    let report = scan_project(&project, &nested_roots);
     let mut removed_bytes = 0_u64;
     let mut removed_items = Vec::new();
     let mut failed_items = Vec::new();
@@ -372,6 +400,54 @@ mod tests {
         let rescanned = scan_projects(home.to_str().expect("home path")).expect("rescan projects");
         assert_eq!(rescanned.projects[0].total_bytes, 72);
         assert_eq!(rescanned.projects[0].cleanable_bytes, 0);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn nested_projects_are_not_counted_in_their_parent_usage() {
+        let home = temp_home("nested-projects");
+        let parent = home.join("sshm");
+        let child = parent.join("main");
+        write_file(&parent.join("README.md"), 5);
+        write_file(&parent.join("node_modules/pkg/index.js"), 10);
+        write_file(&child.join("src/main.rs"), 7);
+        write_file(&child.join("src-tauri/target/out.bin"), 20);
+        fs::create_dir_all(home.join(".xcoding")).expect("registry directory");
+        fs::write(
+            home.join(".xcoding/projects.json"),
+            "{\n  \"project_paths\": [\"sshm/main\"]\n}\n",
+        )
+        .expect("project registry");
+        fs::create_dir_all(child.join(".xcoding")).expect("child metadata directory");
+        write_file(&child.join(".xcoding/project-meta.json"), 2);
+
+        let report = scan_projects(home.to_str().expect("home path")).expect("scan projects");
+        let parent_usage = report
+            .projects
+            .iter()
+            .find(|usage| path_key(Path::new(&usage.project.path)) == path_key(&parent))
+            .expect("parent project");
+        let child_usage = report
+            .projects
+            .iter()
+            .find(|usage| path_key(Path::new(&usage.project.path)) == path_key(&child))
+            .expect("child project");
+
+        assert_eq!(parent_usage.total_bytes, 15);
+        assert_eq!(parent_usage.cleanable_bytes, 10);
+        assert_eq!(child_usage.total_bytes, 29);
+        assert_eq!(child_usage.cleanable_bytes, 20);
+        assert_eq!(report.total_bytes, 44);
+        assert_eq!(report.cleanable_bytes, 30);
+
+        let cleaned = cleanup_project(
+            home.to_str().expect("home path"),
+            parent.to_str().expect("parent path"),
+        )
+        .expect("clean parent project");
+        assert_eq!(cleaned.removed_bytes, 10);
+        assert!(!parent.join("node_modules").exists());
+        assert!(child.join("src-tauri/target/out.bin").exists());
         let _ = fs::remove_dir_all(home);
     }
 

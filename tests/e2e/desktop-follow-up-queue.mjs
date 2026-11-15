@@ -92,8 +92,22 @@ assert.ok(
 
 const continueSource = functionBody("continueFollowUp");
 assert.ok(
-  continueSource.includes("followUpId: item.id") && continueSource.includes("sendChatMessage("),
-  "not-started entries must remain persisted until the manual send passes preflight",
+  continueSource.includes("sessionRunning") &&
+    continueSource.includes("await requeueFollowUp(item.id)") &&
+    continueSource.includes("followUpId: item.id") &&
+    continueSource.includes("sendChatMessage("),
+  "continue must requeue while the session is active and send directly only when idle",
+);
+const requeueSource = functionBody("requeueFollowUp");
+assert.ok(
+  requeueSource.includes('"set_follow_up_queue_status"') &&
+    requeueSource.includes('status: "queued"'),
+  "manual continue must persist a not-started entry back to queued",
+);
+assert.ok(
+  appSource.includes('item.status === "not_started" ?') &&
+    !appSource.includes('disabled={waitingForTurn}'),
+  "not-started continue action must stay enabled while a turn is running",
 );
 
 assert.ok(

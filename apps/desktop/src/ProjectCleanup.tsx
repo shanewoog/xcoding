@@ -20,13 +20,22 @@ function formatCleanupBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[unitIndex]}`;
 }
 
+function normalizeProjectRoot(value: string): string {
+  return value
+    .replace(/\\/g, "/")
+    .replace(/^\/\/[?.]\//, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
 type ProjectCleanupProps = {
   locale: Locale;
   workspaceHome: string;
+  runningProjectRoots: ReadonlySet<string>;
   disabled: boolean;
 };
 
-export function ProjectCleanup({ locale, workspaceHome, disabled }: ProjectCleanupProps) {
+export function ProjectCleanup({ locale, workspaceHome, runningProjectRoots, disabled }: ProjectCleanupProps) {
   const [report, setReport] = useState<ProjectDiskUsageReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -69,7 +78,8 @@ export function ProjectCleanup({ locale, workspaceHome, disabled }: ProjectClean
   }, [scan]);
 
   async function cleanProject(usage: ProjectDiskUsage): Promise<void> {
-    if (disabled || cleaningPath || usage.cleanable_bytes === 0) return;
+    const projectRunning = runningProjectRoots.has(normalizeProjectRoot(usage.project.path));
+    if (disabled || cleaningPath || projectRunning || usage.cleanable_bytes === 0) return;
     const projectName = usage.project.title.trim() || usage.project.dir_name;
     if (!window.confirm(t(locale, "settings.cleanup.confirm", {
       name: projectName,
@@ -151,6 +161,7 @@ export function ProjectCleanup({ locale, workspaceHome, disabled }: ProjectClean
               {report.projects.map((usage) => {
                 const projectName = usage.project.title.trim() || usage.project.dir_name;
                 const isCleaning = cleaningPath === usage.project.path;
+                const isProjectRunning = runningProjectRoots.has(normalizeProjectRoot(usage.project.path));
                 return (
                   <article className="project-cleanup-project" key={usage.project.path} role="listitem">
                     <header>
@@ -162,8 +173,8 @@ export function ProjectCleanup({ locale, workspaceHome, disabled }: ProjectClean
                         type="button"
                         className="quiet-button project-cleanup-button"
                         onClick={() => void cleanProject(usage)}
-                        disabled={!canClean || usage.cleanable_bytes === 0}
-                        title={disabled ? t(locale, "settings.cleanup.running") : undefined}
+                        disabled={!canClean || isProjectRunning || usage.cleanable_bytes === 0}
+                        title={isProjectRunning ? t(locale, "settings.cleanup.running") : undefined}
                       >
                         {isCleaning
                           ? t(locale, "settings.cleanup.cleaning")
@@ -184,6 +195,9 @@ export function ProjectCleanup({ locale, workspaceHome, disabled }: ProjectClean
                       <p className="project-cleanup-warning">
                         {t(locale, "settings.cleanup.skipped", { count: usage.skipped_entries })}
                       </p>
+                    ) : null}
+                    {isProjectRunning ? (
+                      <p className="project-cleanup-warning">{t(locale, "settings.cleanup.running")}</p>
                     ) : null}
                     {usage.cleanable_items.length > 0 ? (
                       <details className="project-cleanup-details">
