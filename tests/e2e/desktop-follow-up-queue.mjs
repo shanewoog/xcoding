@@ -116,6 +116,11 @@ assert.ok(
     appSource.includes('"action.cancelFollowUp"'),
   "the conversation history must show not-started and cancelled queue states with normal actions",
 );
+assert.ok(
+  appSource.includes('item.status === "cancelled" ?') &&
+    appSource.includes("void deleteFollowUp(item.id)"),
+  "cancelled queue entries must expose a delete action",
+);
 
 assert.ok(
   storeSource.includes("CREATE TABLE IF NOT EXISTS follow_up_queue") &&

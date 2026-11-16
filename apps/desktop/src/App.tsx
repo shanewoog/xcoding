@@ -8081,7 +8081,17 @@ export function App() {
                   >
                     {t(locale, "action.editMessage")}
                   </button>
-                  {item.status !== "cancelled" ? (
+                  {item.status === "cancelled" ? (
+                    <button
+                      type="button"
+                      className="quiet-button message-queued-button"
+                      onClick={() => void deleteFollowUp(item.id)}
+                      title={t(locale, "action.delete")}
+                      aria-label={t(locale, "action.delete")}
+                    >
+                      {t(locale, "action.delete")}
+                    </button>
+                  ) : (
                     <button
                       type="button"
                       className="quiet-button message-queued-button"
@@ -8091,7 +8101,7 @@ export function App() {
                     >
                       {t(locale, "action.cancelFollowUp")}
                     </button>
-                  ) : null}
+                  )}
                 </div>
               </article>
             );
