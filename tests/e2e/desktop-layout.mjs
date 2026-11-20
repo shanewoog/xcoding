@@ -122,6 +122,7 @@ async function main() {
   assert.ok(cssSource.includes(".message-tool-group"), "styles.css missing tool group styles");
   const layoutSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/layout.ts"), "utf8");
   const tauriConfigSource = await readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/tauri.conf.json"), "utf8");
+  const tauriCapabilitiesSource = await readFile(resolve(repositoryRoot, "apps/desktop/src-tauri/capabilities/default.json"), "utf8");
   const panelsSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/panels.tsx"), "utf8");
   const apiSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/workspaceApi.ts"), "utf8");
   const i18nSource = await readFile(resolve(repositoryRoot, "apps/desktop/src/i18n.ts"), "utf8");
@@ -272,11 +273,32 @@ async function main() {
     "composer controls must stay on one line and prevent the center column from shrinking",
   );
   assert.ok(cssSource.includes(".workbench.has-right-panel"), "styles should support optional right tools panel");
+  assert.match(
+    cssSource,
+    /\.workbench\.has-right-panel\s*\{[\s\S]*?grid-template-columns:\s*280px\s+minmax\(0,\s*1fr\)\s+var\(--right-panel-width,\s*420px\);/,
+    "the open right panel must occupy its own grid column",
+  );
+  assert.match(
+    cssSource,
+    /\.right-tools-panel\s*\{[^}]*position:\s*relative;[^}]*width:\s*100%;/,
+    "the right panel must stay in flow",
+  );
   assert.ok(
-    /\.workbench\.has-right-panel\s*\{[\s\S]*?grid-template-columns:\s*280px\s+minmax\(1140px,\s*1fr\);/.test(cssSource) &&
-      /\.right-tools-panel\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?right:\s*0;[\s\S]*?width:\s*var\(--right-panel-width/.test(cssSource) &&
-      /@media \(max-width: 620px\)[\s\S]*?\.right-tools-panel\s*\{[\s\S]*?position:\s*relative;/.test(cssSource),
-    "the right panel must overlay without changing the center column width",
+    !/\.right-tools-panel\s*\{[^}]*position:\s*absolute;/.test(cssSource),
+    "the right panel must never overlay the chat",
+  );
+  assert.ok(
+    appSource.includes("resizeMainWindowByRightPanel") &&
+      appSource.includes("rightPanelWindowAppliedRef") &&
+      appSource.includes("if (rightPanelOpenRef.current) return;") &&
+      appSource.includes("new LogicalSize") &&
+      appSource.includes("currentMonitor()"),
+    "opening the right panel must widen the app window instead of shrinking the chat",
+  );
+  assert.ok(
+    tauriCapabilitiesSource.includes('"core:window:allow-set-size"') &&
+      tauriCapabilitiesSource.includes('"core:window:allow-set-position"'),
+    "right-panel window growth requires Tauri size and position permissions",
   );
 assert.ok(panelsSource.includes("BuiltInBrowserPanel"), "right browser should be built-in panel");
 assert.ok(panelsSource.includes("browserEnsure") || apiSource.includes("browserEnsure"), "built-in browser API wiring missing");

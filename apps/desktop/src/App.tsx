@@ -2,7 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { ProjectCleanup } from "./ProjectCleanup";
 import { RequestLogs } from "./RequestLogs";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  currentMonitor,
+  getCurrentWindow,
+  LogicalPosition,
+  LogicalSize,
+} from "@tauri-apps/api/window";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -164,6 +169,50 @@ const DEFAULT_VISION_TIMEOUT_SECS = 30;
 const MIN_VISION_TIMEOUT_SECS = 5;
 const MAX_VISION_TIMEOUT_SECS = 300;
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
+const RIGHT_PANEL_WINDOW_WIDTH_EPSILON = 1;
+
+async function resizeMainWindowByRightPanel(delta: number): Promise<number> {
+  if (Math.abs(delta) < RIGHT_PANEL_WINDOW_WIDTH_EPSILON) return 0;
+  const appWindow = getCurrentWindow();
+  if (await appWindow.isMaximized()) return 0;
+  const [innerSize, outerSize, outerPosition, monitor, scaleFactor] = await Promise.all([
+    appWindow.innerSize(),
+    appWindow.outerSize(),
+    appWindow.outerPosition(),
+    currentMonitor(),
+    appWindow.scaleFactor(),
+  ]);
+  if (!monitor) return 0;
+
+  const inner = innerSize.toLogical(scaleFactor);
+  const outer = outerSize.toLogical(scaleFactor);
+  const position = outerPosition.toLogical(scaleFactor);
+  const workPosition = monitor.workArea.position.toLogical(monitor.scaleFactor);
+  const workSize = monitor.workArea.size.toLogical(monitor.scaleFactor);
+  const requestedDelta = delta > 0
+    ? Math.min(delta, Math.max(0, workSize.width - outer.width))
+    : delta;
+  const nextInnerWidth = Math.max(1, Math.round(inner.width + requestedDelta));
+  if (Math.abs(nextInnerWidth - inner.width) < RIGHT_PANEL_WINDOW_WIDTH_EPSILON) return 0;
+
+  await appWindow.setSize(new LogicalSize(nextInnerWidth, Math.round(inner.height)));
+  const resizedInner = (await appWindow.innerSize()).toLogical(scaleFactor);
+  const appliedDelta = Math.round(resizedInner.width - inner.width);
+
+  if (appliedDelta > 0) {
+    const nextOuterWidth = outer.width + appliedDelta;
+    const workRight = workPosition.x + workSize.width;
+    const nextX = Math.max(
+      workPosition.x,
+      Math.min(position.x, workRight - nextOuterWidth),
+    );
+    if (Math.abs(nextX - position.x) >= RIGHT_PANEL_WINDOW_WIDTH_EPSILON) {
+      await appWindow.setPosition(new LogicalPosition(nextX, position.y)).catch(() => undefined);
+    }
+  }
+  return appliedDelta;
+}
+
 const DEFAULT_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 const DEFAULT_REASONING_EFFORT = "high";
 type ReasoningEffort = string;
@@ -2269,6 +2318,7 @@ export function App() {
   const [browserNavigationBySession, setBrowserNavigationBySession] = useState<Record<string, BrowserNavigationRequest>>({});
   const [browserStateBySession, setBrowserStateBySession] = useState<Record<string, BrowserSessionState>>({});
   const [rightPanelWidth, setRightPanelWidth] = useState(() => loadRightPanelWidth());
+  const rightPanelOpenRef = useRef(false);
   const [envPopoverOpen, setEnvPopoverOpen] = useState(false);
   const [contextUsageOpen, setContextUsageOpen] = useState(false);
   const [compactedMessageCount, setCompactedMessageCount] = useState(0);
@@ -2280,6 +2330,7 @@ export function App() {
 
   useEffect(() => {
     const onResize = () => {
+      if (rightPanelOpenRef.current) return;
       setRightPanelWidth((current) => {
         const next = clampRightPanelWidth(current);
         if (next !== current) saveRightPanelWidth(next);
@@ -2349,6 +2400,26 @@ export function App() {
     rightPanelTabBySession,
     "review",
   );
+  rightPanelOpenRef.current = rightPanelOpen;
+  const rightPanelWindowAppliedRef = useRef(0);
+  const rightPanelWindowQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    const targetContribution = rightPanelOpen ? rightPanelWidth : 0;
+    rightPanelWindowQueueRef.current = rightPanelWindowQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const delta = targetContribution - rightPanelWindowAppliedRef.current;
+        if (Math.abs(delta) < RIGHT_PANEL_WINDOW_WIDTH_EPSILON) return;
+        const appliedDelta = await resizeMainWindowByRightPanel(delta);
+        rightPanelWindowAppliedRef.current = Math.max(
+          0,
+          rightPanelWindowAppliedRef.current + appliedDelta,
+        );
+      })
+      .catch(() => undefined);
+  }, [rightPanelOpen, rightPanelWidth]);
   const activeSessionStateKey = sessionStateKey(activeSessionId);
   const browserNavigation = browserNavigationBySession[activeSessionStateKey] ?? null;
   const browserState = browserStateBySession[activeSessionStateKey] ?? null;
