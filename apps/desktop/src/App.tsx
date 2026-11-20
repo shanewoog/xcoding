@@ -213,6 +213,24 @@ async function resizeMainWindowByRightPanel(delta: number): Promise<number> {
   return appliedDelta;
 }
 
+const CONTEXT_MENU_MARGIN = 8;
+const CONTEXT_MENU_WIDTH = 190;
+const SESSION_CONTEXT_MENU_HEIGHT = 96;
+const PROJECT_CONTEXT_MENU_HEIGHT = 132;
+
+function contextMenuPosition(clientX: number, clientY: number, width: number, height: number) {
+  return {
+    x: Math.max(
+      CONTEXT_MENU_MARGIN,
+      Math.min(clientX, window.innerWidth - width - CONTEXT_MENU_MARGIN),
+    ),
+    y: Math.max(
+      CONTEXT_MENU_MARGIN,
+      Math.min(clientY, window.innerHeight - height - CONTEXT_MENU_MARGIN),
+    ),
+  };
+}
+
 const DEFAULT_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 const DEFAULT_REASONING_EFFORT = "high";
 type ReasoningEffort = string;
@@ -4397,7 +4415,13 @@ export function App() {
     setProjectMenu(null);
     setComposerContextMenu(null);
     setMessageContextMenu(null);
-    setSessionMenu({ sessionId, x: event.clientX, y: event.clientY });
+    const position = contextMenuPosition(
+      event.clientX,
+      event.clientY,
+      CONTEXT_MENU_WIDTH,
+      SESSION_CONTEXT_MENU_HEIGHT,
+    );
+    setSessionMenu({ sessionId, ...position });
   }
 
   async function renameSession(sessionId: string): Promise<void> {
@@ -5375,7 +5399,13 @@ export function App() {
     setSessionMenu(null);
     setComposerContextMenu(null);
     setMessageContextMenu(null);
-    setProjectMenu({ root, x: event.clientX, y: event.clientY });
+    const position = contextMenuPosition(
+      event.clientX,
+      event.clientY,
+      CONTEXT_MENU_WIDTH,
+      PROJECT_CONTEXT_MENU_HEIGHT,
+    );
+    setProjectMenu({ root, ...position });
   }
 
   async function submitCreateProject(): Promise<void> {

@@ -273,6 +273,17 @@ async function main() {
     "composer controls must stay on one line and prevent the center column from shrinking",
   );
   assert.ok(cssSource.includes(".workbench.has-right-panel"), "styles should support optional right tools panel");
+  assert.ok(
+    appSource.includes("function contextMenuPosition") &&
+      appSource.includes("SESSION_CONTEXT_MENU_HEIGHT") &&
+      appSource.includes("PROJECT_CONTEXT_MENU_HEIGHT"),
+    "project and session context menus must be clamped inside the viewport",
+  );
+  assert.match(
+    cssSource,
+    /\.session-context-menu\s*\{[^}]*max-height:\s*calc\(100vh - 1rem\);[^}]*overflow-y:\s*auto;/,
+    "context menus must remain scrollable on very small viewports",
+  );
   assert.match(
     cssSource,
     /\.workbench\.has-right-panel\s*\{[\s\S]*?grid-template-columns:\s*280px\s+minmax\(0,\s*1fr\)\s+var\(--right-panel-width,\s*420px\);/,
