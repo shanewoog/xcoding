@@ -47,7 +47,13 @@ assert.ok(
   cleanupSource.includes("node_modules") &&
     cleanupSource.includes("target") &&
     cleanupSource.includes(".xcoding/logs") &&
+    cleanupSource.includes("tracked_log_files") &&
+    cleanupSource.includes("ls-files") &&
     cleanupSource.includes("remove_dir_all") &&
+    cleanupSource.includes("remove_file") &&
+    cleanupSource.includes("scans_and_cleans_untracked_logs_except_protected_paths") &&
+    cleanupSource.includes(".git/") &&
+    cleanupSource.includes(".xcoding/") &&
     !cleanupSource.includes('"dist"') &&
     !cleanupSource.includes('"build"'),
   "backend cleanup must restrict deletion to the approved regenerable paths",

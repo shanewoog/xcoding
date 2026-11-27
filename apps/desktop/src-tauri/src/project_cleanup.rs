@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use xcoding_protocol::{
     CleanupProjectResult, ProjectCleanupItem, ProjectDir, ProjectDiskUsage, ProjectDiskUsageReport,
@@ -20,6 +22,13 @@ const CLEANABLE_DIR_NAMES: &[&str] = &[
     ".ruff_cache",
 ];
 const PROJECT_LOG_RELATIVE: &str = ".xcoding/logs";
+const LOG_FILE_SUFFIX: &str = ".log";
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[cfg(windows)]
 fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
@@ -62,6 +71,30 @@ fn relative_forward_path(root: &Path, path: &Path) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
+fn tracked_log_files(project_root: &Path) -> HashSet<String> {
+    let mut command = Command::new("git");
+    command
+        .arg("ls-files")
+        .arg("-z")
+        .current_dir(project_root);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return HashSet::new();
+    };
+    if !output.status.success() {
+        return HashSet::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| std::str::from_utf8(part).ok())
+        .map(|path| path.replace('\\', "/").to_ascii_lowercase())
+        .filter(|path| path.ends_with(LOG_FILE_SUFFIX))
+        .collect()
+}
+
 fn is_cleanable_relative(relative: &str) -> bool {
     let normalized = relative.replace('\\', "/").to_ascii_lowercase();
     if normalized == PROJECT_LOG_RELATIVE {
@@ -76,10 +109,28 @@ fn is_cleanable_relative(relative: &str) -> bool {
         .is_some_and(|name| CLEANABLE_DIR_NAMES.contains(&name))
 }
 
+fn is_cleanable_file_relative(relative: &str, tracked_logs: &HashSet<String>) -> bool {
+    let normalized = relative.replace('\\', "/").to_ascii_lowercase();
+    normalized.ends_with(LOG_FILE_SUFFIX)
+        && !normalized.starts_with(".git/")
+        && !normalized.starts_with(".xcoding/")
+        && !tracked_logs.contains(&normalized)
+}
+
 fn is_cleanable_path(project_root: &Path, path: &Path) -> bool {
     relative_forward_path(project_root, path)
         .as_deref()
         .is_some_and(is_cleanable_relative)
+}
+
+fn is_cleanable_file_path(
+    project_root: &Path,
+    path: &Path,
+    tracked_logs: &HashSet<String>,
+) -> bool {
+    relative_forward_path(project_root, path)
+        .as_deref()
+        .is_some_and(|relative| is_cleanable_file_relative(relative, tracked_logs))
 }
 
 fn nested_project_roots(project_path: &Path, project_roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -153,6 +204,7 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
         };
     }
 
+    let tracked_logs = tracked_log_files(&project_root);
     let mut total_bytes = 0_u64;
     let mut cleanable_bytes = 0_u64;
     let mut skipped_entries = 0_u64;
@@ -188,6 +240,15 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
             }
             if metadata.is_file() {
                 total_bytes = total_bytes.saturating_add(metadata.len());
+                if is_cleanable_file_path(&project_root, &path, &tracked_logs) {
+                    cleanable_bytes = cleanable_bytes.saturating_add(metadata.len());
+                    if let Some(relative_path) = relative_forward_path(&project_root, &path) {
+                        cleanable_items.push(ProjectCleanupItem {
+                            relative_path,
+                            bytes: metadata.len(),
+                        });
+                    }
+                }
                 continue;
             }
             if !metadata.is_dir() {
@@ -233,7 +294,7 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
 }
 
 /// Calculate approximate on-disk usage from file lengths and identify only the
-/// explicitly supported generated dependency/build/cache directories.
+/// explicitly supported generated dependency/build/cache directories and logs.
 pub fn scan_projects(workspace_home: &str) -> Result<ProjectDiskUsageReport, String> {
     let projects = projects::list_projects(workspace_home)?;
     let project_roots = projects
@@ -264,7 +325,11 @@ fn same_project_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn safe_cleanup_target(project_root: &Path, relative_path: &str) -> Option<PathBuf> {
+fn safe_cleanup_target(
+    project_root: &Path,
+    relative_path: &str,
+    tracked_logs: &HashSet<String>,
+) -> Option<(PathBuf, bool)> {
     let relative = Path::new(relative_path);
     if relative_path.trim().is_empty() || relative.is_absolute() {
         return None;
@@ -275,21 +340,25 @@ fn safe_cleanup_target(project_root: &Path, relative_path: &str) -> Option<PathB
     {
         return None;
     }
-    if !is_cleanable_relative(relative_path) {
+    let is_file = is_cleanable_file_relative(relative_path, tracked_logs);
+    if !is_file && !is_cleanable_relative(relative_path) {
         return None;
     }
 
     let target = project_root.join(relative);
     let metadata = fs::symlink_metadata(&target).ok()?;
-    if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+    if is_link_or_reparse(&metadata)
+        || (is_file && !metadata.is_file())
+        || (!is_file && !metadata.is_dir())
+    {
         return None;
     }
     let canonical_root = fs::canonicalize(project_root).ok()?;
     let canonical_target = fs::canonicalize(&target).ok()?;
-    is_within_root(&canonical_root, &canonical_target).then_some(target)
+    is_within_root(&canonical_root, &canonical_target).then_some((target, is_file))
 }
 
-/// Remove every supported cleanable directory previously discovered inside one
+/// Remove every supported cleanable path previously discovered inside one
 /// workspace project. Unknown paths, symlinks and reparse points are rejected.
 pub fn cleanup_project(
     workspace_home: &str,
@@ -313,16 +382,24 @@ pub fn cleanup_project(
     let project_root = fs::canonicalize(&project.path).map_err(|error| error.to_string())?;
     let nested_roots = nested_project_roots(Path::new(&project.path), &project_roots);
     let report = scan_project(&project, &nested_roots);
+    let tracked_logs = tracked_log_files(&project_root);
     let mut removed_bytes = 0_u64;
     let mut removed_items = Vec::new();
     let mut failed_items = Vec::new();
 
     for item in report.cleanable_items {
-        let Some(target) = safe_cleanup_target(&project_root, &item.relative_path) else {
+        let Some((target, is_file)) =
+            safe_cleanup_target(&project_root, &item.relative_path, &tracked_logs)
+        else {
             failed_items.push(item.relative_path);
             continue;
         };
-        match fs::remove_dir_all(&target) {
+        let removed = if is_file {
+            fs::remove_file(&target)
+        } else {
+            fs::remove_dir_all(&target)
+        };
+        match removed {
             Ok(()) => {
                 removed_bytes = removed_bytes.saturating_add(item.bytes);
                 removed_items.push(item.relative_path);
@@ -358,6 +435,15 @@ mod tests {
             fs::create_dir_all(parent).expect("parent directory");
         }
         fs::write(path, vec![0_u8; bytes]).expect("fixture file");
+    }
+
+    fn run_git(project: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .status()
+            .expect("git command");
+        assert!(status.success(), "git {args:?} failed");
     }
 
     #[test]
@@ -400,6 +486,57 @@ mod tests {
         let rescanned = scan_projects(home.to_str().expect("home path")).expect("rescan projects");
         assert_eq!(rescanned.projects[0].total_bytes, 72);
         assert_eq!(rescanned.projects[0].cleanable_bytes, 0);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn scans_and_cleans_untracked_logs_except_protected_paths() {
+        let home = temp_home("all-logs");
+        let project = home.join("demo");
+        write_file(&project.join("tracked.log"), 41);
+        run_git(&project, &["init", "-q"]);
+        run_git(&project, &["add", "tracked.log"]);
+        write_file(&project.join("logs/node-data/node-data-20261118.log"), 19);
+        write_file(&project.join("logs/node-data/node-data-20261119.LOG"), 11);
+        write_file(&project.join("logs/node-data/debug.log"), 29);
+        write_file(&project.join("logs/node-data/keep.txt"), 47);
+        write_file(&project.join("logs/keep.json"), 37);
+        write_file(&project.join("nested/service.log"), 31);
+        write_file(&project.join(".xcoding/audit.log"), 43);
+
+        let report = scan_projects(home.to_str().expect("home path")).expect("scan projects");
+        assert_eq!(report.projects.len(), 1);
+        let usage = &report.projects[0];
+        assert_eq!(usage.cleanable_bytes, 90);
+        assert_eq!(usage.cleanable_items.len(), 4);
+        let relative_paths = usage
+            .cleanable_items
+            .iter()
+            .map(|item| item.relative_path.as_str())
+            .collect::<HashSet<_>>();
+        assert!(!relative_paths.contains("tracked.log"));
+        assert!(!relative_paths.contains(".xcoding/audit.log"));
+        assert!(relative_paths.contains("logs/node-data/debug.log"));
+        assert!(relative_paths.contains("logs/node-data/node-data-20261118.log"));
+        assert!(relative_paths.contains("logs/node-data/node-data-20261119.LOG"));
+        assert!(relative_paths.contains("nested/service.log"));
+
+        let cleaned = cleanup_project(
+            home.to_str().expect("home path"),
+            project.to_str().expect("project path"),
+        )
+        .expect("cleanup project");
+        assert_eq!(cleaned.removed_bytes, 90);
+        assert!(cleaned.failed_items.is_empty());
+        assert_eq!(cleaned.removed_items.len(), 4);
+        assert!(project.join("tracked.log").exists());
+        assert!(project.join(".xcoding/audit.log").exists());
+        assert!(!project.join("logs/node-data/debug.log").exists());
+        assert!(!project.join("logs/node-data/node-data-20261118.log").exists());
+        assert!(!project.join("logs/node-data/node-data-20261119.LOG").exists());
+        assert!(!project.join("nested/service.log").exists());
+        assert!(project.join("logs/node-data/keep.txt").exists());
+        assert!(project.join("logs/keep.json").exists());
         let _ = fs::remove_dir_all(home);
     }
 
