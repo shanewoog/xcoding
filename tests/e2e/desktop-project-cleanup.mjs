@@ -59,6 +59,12 @@ assert.ok(
   "backend cleanup must restrict deletion to the approved regenerable paths",
 );
 assert.ok(
+  componentSource.includes("usage.skipped_paths.length") &&
+    componentSource.includes("usage.skipped_paths.map") &&
+    i18nSource.includes('"settings.cleanup.skippedItems"'),
+  "project cleanup must list skipped entries instead of only showing a count",
+);
+assert.ok(
   cleanupSource.includes("fn nested_project_roots") &&
     cleanupSource.includes("nested_projects_are_not_counted_in_their_parent_usage"),
   "nested projects must be excluded from their parent usage to avoid double counting",

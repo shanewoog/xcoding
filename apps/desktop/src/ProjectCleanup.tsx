@@ -192,9 +192,25 @@ export function ProjectCleanup({ locale, workspaceHome, runningProjectRoots, dis
                       </span>
                     </div>
                     {usage.skipped_entries > 0 ? (
-                      <p className="project-cleanup-warning">
-                        {t(locale, "settings.cleanup.skipped", { count: usage.skipped_entries })}
-                      </p>
+                      <>
+                        <p className="project-cleanup-warning">
+                          {t(locale, "settings.cleanup.skipped", { count: usage.skipped_entries })}
+                        </p>
+                        {usage.skipped_paths.length > 0 ? (
+                          <details className="project-cleanup-details project-cleanup-skipped">
+                            <summary>
+                              {t(locale, "settings.cleanup.skippedItems", { count: usage.skipped_paths.length })}
+                            </summary>
+                            <div>
+                              {usage.skipped_paths.map((path) => (
+                                <span key={path}>
+                                  <code title={path}>{path}</code>
+                                </span>
+                              ))}
+                            </div>
+                          </details>
+                        ) : null}
+                      </>
                     ) : null}
                     {isProjectRunning ? (
                       <p className="project-cleanup-warning">{t(locale, "settings.cleanup.running")}</p>

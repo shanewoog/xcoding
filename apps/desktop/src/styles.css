@@ -2622,6 +2622,10 @@ input.workspace-missing {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.project-cleanup-skipped code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
 .project-cleanup-details em {
   color: var(--text-muted);
   flex: 0 0 auto;

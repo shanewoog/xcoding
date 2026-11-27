@@ -1082,6 +1082,8 @@ pub struct ProjectDiskUsage {
     pub total_bytes: u64,
     pub cleanable_bytes: u64,
     pub skipped_entries: u64,
+    #[serde(default)]
+    pub skipped_paths: Vec<String>,
     pub cleanable_items: Vec<ProjectCleanupItem>,
 }
 

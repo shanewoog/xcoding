@@ -133,6 +133,10 @@ fn is_cleanable_file_path(
         .is_some_and(|relative| is_cleanable_file_relative(relative, tracked_logs))
 }
 
+fn skipped_relative_path(project_root: &Path, path: &Path) -> String {
+    relative_forward_path(project_root, path).unwrap_or_else(|| ".".to_owned())
+}
+
 fn nested_project_roots(project_path: &Path, project_roots: &[PathBuf]) -> Vec<PathBuf> {
     let project_key = path_key(project_path);
     project_roots
@@ -145,15 +149,15 @@ fn nested_project_roots(project_path: &Path, project_roots: &[PathBuf]) -> Vec<P
         .collect()
 }
 
-fn measure_directory(root: &Path) -> (u64, u64) {
+fn measure_directory(root: &Path, project_root: &Path) -> (u64, Vec<String>) {
     let mut total_bytes = 0_u64;
-    let mut skipped_entries = 0_u64;
+    let mut skipped_paths = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(_) => {
-                skipped_entries = skipped_entries.saturating_add(1);
+                skipped_paths.push(skipped_relative_path(project_root, &directory));
                 continue;
             }
         };
@@ -161,7 +165,7 @@ fn measure_directory(root: &Path) -> (u64, u64) {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
-                    skipped_entries = skipped_entries.saturating_add(1);
+                    skipped_paths.push(skipped_relative_path(project_root, &directory));
                     continue;
                 }
             };
@@ -169,12 +173,12 @@ fn measure_directory(root: &Path) -> (u64, u64) {
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(_) => {
-                    skipped_entries = skipped_entries.saturating_add(1);
+                    skipped_paths.push(skipped_relative_path(project_root, &path));
                     continue;
                 }
             };
             if is_link_or_reparse(&metadata) {
-                skipped_entries = skipped_entries.saturating_add(1);
+                skipped_paths.push(skipped_relative_path(project_root, &path));
                 continue;
             }
             if metadata.is_file() {
@@ -184,7 +188,7 @@ fn measure_directory(root: &Path) -> (u64, u64) {
             }
         }
     }
-    (total_bytes, skipped_entries)
+    (total_bytes, skipped_paths)
 }
 
 fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> ProjectDiskUsage {
@@ -200,6 +204,7 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
             total_bytes: 0,
             cleanable_bytes: 0,
             skipped_entries: 1,
+            skipped_paths: vec![".".to_owned()],
             cleanable_items: Vec::new(),
         };
     }
@@ -207,14 +212,14 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
     let tracked_logs = tracked_log_files(&project_root);
     let mut total_bytes = 0_u64;
     let mut cleanable_bytes = 0_u64;
-    let mut skipped_entries = 0_u64;
+    let mut skipped_paths = Vec::new();
     let mut cleanable_items = Vec::new();
     let mut pending = vec![project_root.clone()];
     while let Some(directory) = pending.pop() {
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(_) => {
-                skipped_entries = skipped_entries.saturating_add(1);
+                skipped_paths.push(skipped_relative_path(&project_root, &directory));
                 continue;
             }
         };
@@ -222,7 +227,7 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
-                    skipped_entries = skipped_entries.saturating_add(1);
+                    skipped_paths.push(skipped_relative_path(&project_root, &directory));
                     continue;
                 }
             };
@@ -230,12 +235,12 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(_) => {
-                    skipped_entries = skipped_entries.saturating_add(1);
+                    skipped_paths.push(skipped_relative_path(&project_root, &path));
                     continue;
                 }
             };
             if is_link_or_reparse(&metadata) {
-                skipped_entries = skipped_entries.saturating_add(1);
+                skipped_paths.push(skipped_relative_path(&project_root, &path));
                 continue;
             }
             if metadata.is_file() {
@@ -262,10 +267,10 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
             }
 
             if is_cleanable_path(&project_root, &path) {
-                let (bytes, skipped) = measure_directory(&path);
+                let (bytes, mut skipped) = measure_directory(&path, &project_root);
                 total_bytes = total_bytes.saturating_add(bytes);
                 cleanable_bytes = cleanable_bytes.saturating_add(bytes);
-                skipped_entries = skipped_entries.saturating_add(skipped);
+                skipped_paths.append(&mut skipped);
                 if let Some(relative_path) = relative_forward_path(&project_root, &path) {
                     cleanable_items.push(ProjectCleanupItem {
                         relative_path,
@@ -278,6 +283,10 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
         }
     }
 
+    skipped_paths.sort();
+    skipped_paths.dedup();
+    let skipped_entries = skipped_paths.len() as u64;
+
     cleanable_items.sort_by(|left, right| {
         right
             .bytes
@@ -289,6 +298,7 @@ fn scan_project(project: &ProjectDir, nested_project_roots: &[PathBuf]) -> Proje
         total_bytes,
         cleanable_bytes,
         skipped_entries,
+        skipped_paths,
         cleanable_items,
     }
 }
@@ -537,6 +547,19 @@ mod tests {
         assert!(!project.join("nested/service.log").exists());
         assert!(project.join("logs/node-data/keep.txt").exists());
         assert!(project.join("logs/keep.json").exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn records_relative_skipped_paths() {
+        let home = temp_home("skipped-paths");
+        let project = home.join("demo");
+        fs::create_dir_all(&project).expect("project");
+        let missing = project.join("missing/nested");
+
+        let (bytes, skipped_paths) = measure_directory(&missing, &project);
+        assert_eq!(bytes, 0);
+        assert_eq!(skipped_paths, vec!["missing/nested".to_owned()]);
         let _ = fs::remove_dir_all(home);
     }
 

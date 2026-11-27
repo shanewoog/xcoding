@@ -345,6 +345,7 @@ export interface ProjectDiskUsage {
   total_bytes: number;
   cleanable_bytes: number;
   skipped_entries: number;
+  skipped_paths: string[];
   cleanable_items: ProjectCleanupItem[];
 }
 
